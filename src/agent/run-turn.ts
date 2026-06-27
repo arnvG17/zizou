@@ -27,7 +27,7 @@
 // valve against an infinite loop.
 
 import { streamText, stepCountIs, type ModelMessage, type LanguageModel } from "ai";
-import { readFile, editFile, glob, grep, createRunBashTool, type ConfirmFn } from "../tools/index.js";
+import { readFile, writeFile, editFile, glob, grep, listDir, openFile, createRunBashTool, type ConfirmFn } from "../tools/index.js";
 
 // --- Event types this module emits, for whatever UI is listening ---
 //
@@ -44,7 +44,11 @@ export type AgentEvent =
   | { kind: "tool-call"; toolCallId: string; toolName: string; input: unknown }
   | { kind: "tool-result"; toolCallId: string; toolName: string; output: unknown }
   | { kind: "tool-error"; toolCallId: string; toolName: string; error: unknown }
-  | { kind: "turn-complete" };
+  | { kind: "turn-complete" }
+  | {
+      kind: "finish";
+      usage?: { inputTokens: number; outputTokens: number };
+    };
 
 export interface RunTurnOptions {
   /** Full conversation history so far, INCLUDING the new user message already appended. */
@@ -82,14 +86,58 @@ export async function* runTurn(
 ): AsyncGenerator<AgentEvent, ModelMessage[]> {
   const { history, model, onConfirm, systemPrompt, maxSteps = 15 } = options;
 
+  // ── DEBUG LOG ──────────────────────────────────────────────────────────────
+  // Writes the complete LLM payload to zizou-debug.log in the project root
+  // so you can inspect exactly what is sent to the model during testing.
+  // This file is overwritten on every turn.
+  try {
+    const { writeFileSync } = await import("node:fs");
+    const { resolve } = await import("node:path");
+    const toolNames = [
+      "readFile", "writeFile", "editFile",
+      "glob", "grep", "listDir", "openFile", "runBash",
+    ];
+    const debugPayload = [
+      "=".repeat(60),
+      `ZIZOU DEBUG LOG  —  ${new Date().toISOString()}`,
+      "=".repeat(60),
+      "",
+      "── SYSTEM PROMPT (" + (systemPrompt?.length ?? 0) + " chars) " + "─".repeat(20),
+      systemPrompt ?? "(none)",
+      "",
+      "── CONVERSATION HISTORY (" + history.length + " messages) " + "─".repeat(20),
+      ...history.map((msg, i) => {
+        const role = msg.role.toUpperCase();
+        const content =
+          typeof msg.content === "string"
+            ? msg.content
+            : JSON.stringify(msg.content, null, 2);
+        return `[${i}] ${role}:\n${content}`;
+      }),
+      "",
+      "── REGISTERED TOOLS " + "─".repeat(40),
+      toolNames.join("\n"),
+      "",
+      "=".repeat(60),
+    ].join("\n");
+
+    writeFileSync(resolve(process.cwd(), "zizou-debug.log"), debugPayload, "utf-8");
+  } catch {
+    // Debug logging is best-effort — never crash the agent loop because of it.
+  }
+  // ── END DEBUG LOG ──────────────────────────────────────────────────────────
+
   const result = streamText({
     model,
     system: systemPrompt,
     tools: {
       readFile,
+      writeFile,
       editFile,
       glob,
       grep,
+      listDir,
+      openFile,
       runBash: createRunBashTool(onConfirm),
     },
     // stepCountIs(N): allow up to N internal "model asks for a tool ->
@@ -143,6 +191,18 @@ export async function* runTurn(
   }
 
   yield { kind: "turn-complete" };
+
+  let usage = undefined;
+  try {
+    const rawUsage = await result.usage;
+    usage = {
+      inputTokens: rawUsage.inputTokens ?? 0,
+      outputTokens: rawUsage.outputTokens ?? 0,
+    };
+  } catch (err) {
+    // ignore
+  }
+  yield { kind: "finish", usage };
 
   // CRITICAL: streamText does NOT automatically persist history —
   // verified against the installed ai@7.0.2 types.

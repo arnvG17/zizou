@@ -16,6 +16,7 @@ import type { ConfirmFn } from "../tools/index.js";
 import { runTurn } from "../agent/run-turn.js";
 import { buildSystemPrompt } from "../context/build-system-prompt.js";
 import { useTerminalSize, SidebarWordmark } from "./Figurine.js";
+import { handleSlashCommand } from "../commands/index.js";
 
 // --- Types for our scrolling log ---
 type LogEntry =
@@ -26,6 +27,8 @@ type LogEntry =
       toolCallId: string;
       name: string;
       input: unknown;
+      output?: unknown;
+      errorMessage?: string;
       startTime: number;
       duration?: string;
       status: "running" | "success" | "error";
@@ -39,24 +42,63 @@ function formatDuration(ms: number): string {
   return `${(ms / 1000).toFixed(1)}s`;
 }
 
-function calculateTokenStats(history: ModelMessage[], systemPrompt: string) {
-  const systemPromptLength = systemPrompt.length;
-  let inputChars = systemPromptLength;
-  let outputChars = 0;
+function calculateTokenStats(
+  history: ModelMessage[],
+  systemPrompt: string,
+  actualUsage?: { inputTokens: number; outputTokens: number },
+  provider: ProviderChoice = "groq"
+) {
+  let inputTokens = 0;
+  let outputTokens = 0;
 
-  for (const msg of history) {
-    if (msg.role === "user") {
-      inputChars += (msg.content || "").length;
-    } else {
-      outputChars += (msg.content || "").length;
+  if (actualUsage) {
+    inputTokens = actualUsage.inputTokens;
+    outputTokens = actualUsage.outputTokens;
+  } else {
+    // Fallback naive estimation if we don't have actual usage yet
+    const systemPromptLength = systemPrompt.length;
+    let inputChars = systemPromptLength;
+    let outputChars = 0;
+
+    for (const msg of history) {
+      if (msg.role === "user") {
+        inputChars += (msg.content || "").length;
+      } else {
+        if (typeof msg.content === "string") {
+          outputChars += msg.content.length;
+        } else if (Array.isArray(msg.content)) {
+          for (const part of msg.content) {
+            if (part.type === "text") {
+              outputChars += part.text.length;
+            }
+          }
+        }
+      }
     }
+
+    inputTokens = Math.floor(inputChars / 4);
+    outputTokens = Math.floor(outputChars / 4);
   }
 
-  const inputTokens = Math.floor(inputChars / 4);
-  const outputTokens = Math.floor(outputChars / 4);
   const totalTokens = inputTokens + outputTokens;
   const pctUsed = Math.min(100, parseFloat(((totalTokens / 200000) * 100).toFixed(1)));
-  const cost = parseFloat((inputTokens * 0.000003 + outputTokens * 0.000015).toFixed(4));
+
+  // Cost calculation based on provider rates
+  let inputRate = 0.000003; // default $3/M (Anthropic)
+  let outputRate = 0.000015; // default $15/M (Anthropic)
+
+  if (provider === "openai") {
+    inputRate = 0.0000025; // $2.5/M
+    outputRate = 0.00001; // $10/M
+  } else if (provider === "google") {
+    inputRate = 0.000000075; // $0.075/M
+    outputRate = 0.0000003; // $0.3/M
+  } else if (provider === "groq") {
+    inputRate = 0.00000059; // $0.59/M
+    outputRate = 0.00000079; // $0.79/M
+  }
+
+  const cost = parseFloat((inputTokens * inputRate + outputTokens * outputRate).toFixed(4));
 
   return {
     totalTokens,
@@ -65,7 +107,11 @@ function calculateTokenStats(history: ModelMessage[], systemPrompt: string) {
   };
 }
 
-export function Chat() {
+export interface ChatProps {
+  onChangeKeys?: () => void;
+}
+
+export function Chat({ onChangeKeys }: ChatProps) {
   const [log, setLog] = useState<LogEntry[]>([]);
   const [input, setInput] = useState("");
   const [busy, setBusy] = useState(false);
@@ -95,6 +141,7 @@ export function Chat() {
   const history = useRef<ModelMessage[]>([]);
   const systemPromptRef = useRef<string>("");
   const [contextReady, setContextReady] = useState(false);
+  const [systemPromptText, setSystemPromptText] = useState<string>("");
 
   const [tokenStats, setTokenStats] = useState({
     totalTokens: 0,
@@ -105,8 +152,10 @@ export function Chat() {
   useEffect(() => {
     buildSystemPrompt(process.cwd()).then((prompt) => {
       systemPromptRef.current = prompt;
+      setSystemPromptText(prompt);
       setContextReady(true);
-      setTokenStats(calculateTokenStats(history.current, prompt));
+      const provider = getDefaultProvider() || "groq";
+      setTokenStats(calculateTokenStats(history.current, prompt, undefined, provider));
     });
   }, []);
 
@@ -131,18 +180,35 @@ export function Chat() {
   async function handleSubmit(userText: string) {
     if (!userText.trim() || busy) return;
     setInput("");
+
+    // --- Slash Commands Interceptor ---
+    const isCommand = handleSlashCommand({
+      userText,
+      history,
+      systemPrompt: systemPromptRef.current,
+      systemPromptText,
+      onChangeKeys,
+      setLog,
+      setTokenStats,
+      calculateTokenStats,
+    });
+    if (isCommand) return;
+
     setLog((l) => [...l, { kind: "user", text: userText }]);
     history.current.push({ role: "user", content: userText });
     setBusy(true);
 
     // Update token stats immediately for the user prompt
-    setTokenStats(calculateTokenStats(history.current, systemPromptRef.current));
+    const provider = getDefaultProvider() || "groq";
+    setTokenStats(calculateTokenStats(history.current, systemPromptRef.current, undefined, provider));
 
     const submitTime = Date.now();
     let currentAssistantText = "";
     let assistantEntryAdded = false;
     let firstPartReceived = false;
     let thoughtDuration = "";
+
+    let hasActualUsage = false;
 
     try {
       const provider = getDefaultProvider() || "groq";
@@ -203,6 +269,7 @@ export function Chat() {
                 return {
                   ...entry,
                   status: "success",
+                  output: event.output,
                   duration: formatDuration(Date.now() - entry.startTime),
                 };
               }
@@ -210,30 +277,45 @@ export function Chat() {
             })
           );
         } else if (event.kind === "tool-error") {
+          const errMsg = String(event.error);
           setLog((l) =>
             l.map((entry) => {
               if (entry.kind === "tool-call" && entry.toolCallId === event.toolCallId) {
                 return {
                   ...entry,
                   status: "error",
+                  errorMessage: errMsg,
                   duration: formatDuration(Date.now() - entry.startTime),
                 };
               }
               return entry;
             })
           );
-          setLog((l) => [
-            ...l,
-            { kind: "error", text: `Tool ${event.toolName} threw: ${String(event.error)}` },
-          ]);
+        } else if (event.kind === "finish") {
+          if (event.usage) {
+            hasActualUsage = true;
+            setTokenStats(
+              calculateTokenStats(
+                history.current,
+                systemPromptRef.current,
+                {
+                  inputTokens: event.usage.inputTokens,
+                  outputTokens: event.usage.outputTokens,
+                },
+                provider
+              )
+            );
+          }
         }
 
         result = await turn.next();
       }
 
       history.current = result.value;
-      // Update token stats at the end of the turn
-      setTokenStats(calculateTokenStats(history.current, systemPromptRef.current));
+      // Update token stats at the end of the turn if actual usage wasn't received
+      if (!hasActualUsage) {
+        setTokenStats(calculateTokenStats(history.current, systemPromptRef.current, undefined, provider));
+      }
     } catch (err: any) {
       setLog((l) => [...l, { kind: "error", text: err.message ?? String(err) }]);
     } finally {
@@ -329,6 +411,33 @@ export function Chat() {
             <Text color="gray">LSPs are disabled</Text>
           </Box>
 
+          {/* Section 4: System Prompt live view */}
+          <Box flexDirection="column" marginBottom={1}>
+            <Text color="#E6E6E6" bold>System Prompt</Text>
+            {!contextReady ? (
+              <Text color="gray" dimColor>loading…</Text>
+            ) : (
+              <>
+                <Text color="gray" dimColor>
+                  {systemPromptText.length.toLocaleString()} chars
+                  {" · "}
+                  {systemPromptText.split("\n").length} lines
+                </Text>
+                {systemPromptText.split("\n").slice(0, 8).map((line, i) => (
+                  <Text key={i} color="#4A5568" dimColor wrap="truncate">
+                    {line || " "}
+                  </Text>
+                ))}
+                {systemPromptText.split("\n").length > 8 && (
+                  <Text color="#4A5568" dimColor>
+                    … ({systemPromptText.split("\n").length - 8} more lines)
+                    {" · type /prompt for full text"}
+                  </Text>
+                )}
+              </>
+            )}
+          </Box>
+
           {/* Spacer */}
           <Box flexGrow={1} />
 
@@ -386,15 +495,58 @@ function LogLine({ entry }: { entry: LogEntry }) {
   if (entry.kind === "tool-call") {
     const isRunning = entry.status === "running";
     const isError = entry.status === "error";
+    const isSuccess = entry.status === "success";
+
+    // Format input args as "key=value" pairs (truncated to 80 chars per value)
+    const inputArgs = entry.input && typeof entry.input === "object"
+      ? Object.entries(entry.input as Record<string, unknown>)
+          .map(([k, v]) => {
+            const val = typeof v === "string" ? v : JSON.stringify(v);
+            return `${k}=${val.length > 80 ? val.slice(0, 77) + "..." : val}`;
+          })
+          .join("  ")
+      : "";
+
+    // Format output preview (success case)
+    let outputPreview = "";
+    if (isSuccess && entry.output !== undefined) {
+      const raw = typeof entry.output === "string" ? entry.output : JSON.stringify(entry.output);
+      outputPreview = raw.length > 120 ? raw.slice(0, 117) + "..." : raw;
+    }
 
     return (
-      <Box marginBottom={1} flexDirection="row" gap={1} alignItems="center">
-        <Text color={isError ? "red" : "#3B5FE0"}>■</Text>
-        <Text bold color={isError ? "red" : "#E6E6E6"}>{entry.name}</Text>
-        <Text color="gray">·</Text>
-        <Text color="gray">Zizou</Text>
-        <Text color="gray">·</Text>
-        <Text color="gray">{isRunning ? "running..." : entry.duration}</Text>
+      <Box marginBottom={1} flexDirection="column">
+        {/* Header row */}
+        <Box flexDirection="row" gap={1} alignItems="center">
+          <Text color={isError ? "red" : isSuccess ? "#5FB87A" : "#3B5FE0"}>■</Text>
+          <Text bold color={isError ? "red" : "#E6E6E6"}>{entry.name}</Text>
+          <Text color="gray">·</Text>
+          <Text color="gray">Zizou</Text>
+          <Text color="gray">·</Text>
+          <Text color={isError ? "red" : isRunning ? "yellow" : "gray"}>
+            {isRunning ? "running…" : entry.duration}
+          </Text>
+          {isSuccess && <Text color="#5FB87A"> ✓ done</Text>}
+          {isError && <Text color="red"> ✗ failed</Text>}
+        </Box>
+        {/* Args row */}
+        {inputArgs !== "" && (
+          <Box paddingLeft={2}>
+            <Text color="#6B7280" dimColor>↳ {inputArgs}</Text>
+          </Box>
+        )}
+        {/* Success output preview */}
+        {isSuccess && outputPreview !== "" && (
+          <Box paddingLeft={2}>
+            <Text color="#5FB87A" dimColor>↳ {outputPreview}</Text>
+          </Box>
+        )}
+        {/* Error message */}
+        {isError && entry.errorMessage && (
+          <Box paddingLeft={2}>
+            <Text color="red">↳ {entry.errorMessage}</Text>
+          </Box>
+        )}
       </Box>
     );
   }

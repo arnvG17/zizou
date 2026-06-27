@@ -36,11 +36,11 @@ You have two complementary ways to understand the codebase:
    use glob/grep to look for it directly rather than assuming it
    doesn't exist.
 
-When editing files, use editFile with an old_string that exactly
-matches existing content and is unique in the file — never rewrite
-whole files from scratch. Before running any shell command, know that
-the user will be asked to approve it; explain briefly what a command
-will do if it's not obvious.`;
+When creating a new file or completely replacing a file's contents, use the writeFile tool. When modifying existing files in a targeted way, use editFile with an old_string that exactly matches existing content and is unique in the file — never rewrite whole files from scratch if you are only making minor edits. Before running any shell command, know that the user will be asked to approve it; explain briefly what a command will do if it's not obvious.
+
+For general knowledge questions, conversational chat, or queries that do not require workspace files or terminal command execution, answer directly from your internal knowledge. Do NOT use tools (such as grep, glob, readFile, or runBash) unless the task specifically requires accessing the project codebase or executing commands.
+
+CRITICAL: When calling a tool, you must output the exact, clean name of the tool (e.g., 'runBash' or 'readFile') as a plain string in the tool name field. Do NOT concatenate, append, or embed any JSON arguments or parentheses into the tool name string itself. All arguments must be placed strictly inside the tool arguments object.`;
 
 /**
  * Builds the complete system prompt for a session: base instructions +
@@ -51,12 +51,36 @@ will do if it's not obvious.`;
 export async function buildSystemPrompt(projectRoot: string): Promise<string> {
   const repoMap = buildRepoMap(projectRoot);
 
+  // Injected at runtime so the model always has the real workspace path.
+  const SESSION_CONTEXT = `
+--- SESSION CONTEXT ---
+Workspace root (cwd): ${projectRoot}
+All relative paths you provide to tools are resolved from this root.
+When creating or writing a file, you can use either:
+  - An absolute path  (e.g. ${projectRoot}/index.html)
+  - A relative path   (e.g. index.html  or  src/components/Foo.tsx)
+Both will work — relative paths are resolved to the workspace root automatically.
+
+TOOL GUIDE:
+  listDir(path?)     → list immediate children of a directory. Use this FIRST
+                       whenever you need to understand the folder structure or
+                       decide where a new file should go.
+  readFile(path)     → read the full contents of an existing file.
+  writeFile(path, contents) → create a NEW file or FULLY REPLACE an existing one.
+                       Use this for brand-new files or when you want to overwrite everything.
+  editFile(path, old_string, new_string) → make a TARGETED replacement inside an existing
+                       file. old_string must match exactly and be unique in the file.
+  glob(pattern)      → find files recursively by name pattern (e.g. "*.ts").
+  grep(query)        → search file contents by text pattern.
+  runBash(command)   → run a shell command (user must approve first).
+  openFile(path)     → open a file in the OS default app (HTML → browser,
+                       images → viewer, etc.). Use after creating a file so the
+                       user can immediately preview it.
+--- END SESSION CONTEXT ---`;
+
   if (!repoMap) {
-    // Empty project, or scanRepo found nothing matching its file
-    // patterns — still return valid instructions rather than an empty
-    // string, so the agent isn't left with zero guidance.
-    return `${BASE_INSTRUCTIONS}\n\n(No repo map could be generated — the project may be empty or contain no recognized source files.)`;
+    return `${BASE_INSTRUCTIONS}${SESSION_CONTEXT}\n\n(No repo map could be generated — the project may be empty or contain no recognized source files.)`;
   }
 
-  return `${BASE_INSTRUCTIONS}\n\n--- REPO MAP ---\n${repoMap}\n--- END REPO MAP ---`;
+  return `${BASE_INSTRUCTIONS}${SESSION_CONTEXT}\n\n--- REPO MAP ---\n${repoMap}\n--- END REPO MAP ---`;
 }

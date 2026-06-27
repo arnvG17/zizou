@@ -80,6 +80,9 @@ export function hasAnyApiKey(): boolean {
  * Retrieves the default provider choice. Defaults to "groq" if not set.
  */
 export function getDefaultProvider(): ProviderChoice {
+  if (process.env.GROQ_API_KEY && !config.get("defaultProvider")) {
+    return "groq";
+  }
   return config.get("defaultProvider") || "groq";
 }
 

@@ -12,8 +12,11 @@
  */
 
 export { readFile } from "./read-file.js";
+export { writeFile } from "./write-file.js";
 export { editFile } from "./edit-file.js";
 export { glob } from "./glob.js";
 export { grep } from "./grep.js";
+export { listDir } from "./list-dir.js";
+export { openFile } from "./open-file.js";
 export { createRunBashTool } from "./run-bash.js";
 export type { ConfirmFn } from "./types.js";
