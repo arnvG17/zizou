@@ -86,60 +86,223 @@ export async function* runTurn(
 ): AsyncGenerator<AgentEvent, ModelMessage[]> {
   const { history, model, onConfirm, systemPrompt, maxSteps = 15 } = options;
 
-  // ── DEBUG LOG ──────────────────────────────────────────────────────────────
-  // Writes the complete LLM payload to zizou-debug.log in the project root
-  // so you can inspect exactly what is sent to the model during testing.
-  // This file is overwritten on every turn.
+  // ─────────────────────────────────────────────────────────────────────────
+  // VERBOSE DEBUG LOG
+  // Written to zizou-debug.log in the project root.
+  // Section 1 (pre-turn) is written before the LLM call.
+  // Section 2 (live stream) is appended as each event fires during the turn.
+  // The file is overwritten at the start of each new user turn so it always
+  // reflects the most recent interaction only.
+  // ─────────────────────────────────────────────────────────────────────────
+  let debugPath = "";
+  const appendDebug = (text: string) => {
+    try {
+      const { appendFileSync } = require("node:fs");
+      appendFileSync(debugPath, text + "\n", "utf-8");
+    } catch { /* best-effort */ }
+  };
+
   try {
     const { writeFileSync } = await import("node:fs");
     const { resolve } = await import("node:path");
-    const toolNames = [
-      "readFile", "writeFile", "editFile",
-      "glob", "grep", "listDir", "openFile", "runBash",
-    ];
-    const debugPayload = [
-      "=".repeat(60),
-      `ZIZOU DEBUG LOG  —  ${new Date().toISOString()}`,
-      "=".repeat(60),
-      "",
-      "── SYSTEM PROMPT (" + (systemPrompt?.length ?? 0) + " chars) " + "─".repeat(20),
-      systemPrompt ?? "(none)",
-      "",
-      "── CONVERSATION HISTORY (" + history.length + " messages) " + "─".repeat(20),
-      ...history.map((msg, i) => {
-        const role = msg.role.toUpperCase();
-        const content =
-          typeof msg.content === "string"
-            ? msg.content
-            : JSON.stringify(msg.content, null, 2);
-        return `[${i}] ${role}:\n${content}`;
-      }),
-      "",
-      "── REGISTERED TOOLS " + "─".repeat(40),
-      toolNames.join("\n"),
-      "",
-      "=".repeat(60),
-    ].join("\n");
+    debugPath = resolve(process.cwd(), "zizou-debug.log");
 
-    writeFileSync(resolve(process.cwd(), "zizou-debug.log"), debugPayload, "utf-8");
+    // ── TOOL SCHEMA DETAILS ──────────────────────────────────────────────────
+    // We manually describe each tool's schema here since the Vercel AI SDK
+    // does not expose a public API to serialise tool schemas at runtime.
+    const toolSchemas = [
+      {
+        name: "readFile",
+        description: "Read the full contents of a file from disk.",
+        parameters: { path: "string — absolute or relative file path" },
+        returnShape: "{ success: true, contents: string } | { success: false, error: string }",
+        howPassed: "LLM emits a structured tool-call JSON block. SDK intercepts it, calls execute(), and feeds { success, contents } back as a tool-result message before the next LLM token."
+      },
+      {
+        name: "writeFile",
+        description: "Create a new file or fully overwrite an existing one.",
+        parameters: { path: "string — target file path", contents: "string — full file content" },
+        returnShape: "{ success: true, message: string } | { success: false, error: string }",
+        howPassed: "Same tool-call / tool-result cycle. Path is resolved to absolute via path.resolve(cwd, inputPath) inside execute()."
+      },
+      {
+        name: "editFile",
+        description: "Replace exactly one unique occurrence of old_string with new_string.",
+        parameters: { path: "string", old_string: "string — must be unique in file", new_string: "string — replacement" },
+        returnShape: "{ success: true, message } | { success: false, error }",
+        howPassed: "Same cycle. execute() reads file, counts occurrences, errors if 0 or >1."
+      },
+      {
+        name: "glob",
+        description: "Find files by filename pattern (e.g. '*.ts') recursively from cwd.",
+        parameters: { pattern: "string — simple glob like '*.ts'" },
+        returnShape: "{ success: true, files: string[] } — capped at 50 results",
+        howPassed: "Pure in-process function using readdirSync. No subprocess. Skips node_modules/.git/dist."
+      },
+      {
+        name: "grep",
+        description: "Search file contents by text pattern.",
+        parameters: { query: "string" },
+        returnShape: "{ success: true, matches: Array<{file,line,content}> }",
+        howPassed: "Walks filesystem with readdirSync, reads each file, does string indexOf search."
+      },
+      {
+        name: "listDir",
+        description: "List immediate children of a directory.",
+        parameters: { path: "string? — defaults to cwd root" },
+        returnShape: "{ success: true, directory: string, entries: Array<{name, type: 'file'|'dir'}> }",
+        howPassed: "Uses readdirSync + statSync on the resolved absolute path."
+      },
+      {
+        name: "openFile",
+        description: "Open a file in the OS default application (HTML → browser).",
+        parameters: { path: "string" },
+        returnShape: "{ success: true, message } | { success: false, error }",
+        howPassed: "Spawns platform open command (start/open/xdg-open) detached so it doesn't block the agent loop."
+      },
+      {
+        name: "runBash",
+        description: "Execute a shell command after explicit user approval.",
+        parameters: { command: "string — the shell command" },
+        returnShape: "{ success: true, output: string } | { success: false, error }",
+        howPassed: "ConfirmFn suspends the agent loop (via Promise) until user presses y/n in the TUI. If approved, uses child_process.exec with 15s timeout + 1MB buffer."
+      },
+    ];
+
+    // ── BUILD PRE-TURN SECTION ───────────────────────────────────────────────
+    const hr = (label: string) =>
+      `\n${"═".repeat(70)}\n  ${label}\n${"═".repeat(70)}`;
+    const sub = (label: string) =>
+      `\n${"─".repeat(60)}\n  ${label}\n${"─".repeat(60)}`;
+
+    const lines: string[] = [
+      hr(`ZIZOU VERBOSE DEBUG LOG  ·  ${new Date().toISOString()}`),
+      `  cwd              : ${process.cwd()}`,
+      `  model (provider) : ${(model as any)?.modelId ?? (model as any)?.model ?? "unknown"}`,
+      `  history messages : ${history.length}`,
+      `  maxSteps         : ${maxSteps}`,
+      `  system prompt    : ${(systemPrompt?.length ?? 0).toLocaleString()} chars / ${(systemPrompt ?? "").split("\n").length} lines`,
+      "",
+
+      // ── 1. SYSTEM PROMPT ────────────────────────────────────────────────────
+      sub("1 · SYSTEM PROMPT (full text)"),
+      systemPrompt ?? "(none — no system prompt was provided)",
+      "",
+
+      // ── 2. SYSTEM PROMPT SECTION BREAKDOWN ──────────────────────────────────
+      sub("2 · SYSTEM PROMPT SECTION BREAKDOWN"),
+      ...(systemPrompt ? (() => {
+        const sections: string[] = [];
+        const hasBase = systemPrompt.includes("You are Zizou");
+        const hasSessionCtx = systemPrompt.includes("SESSION CONTEXT");
+        const hasRepoMap = systemPrompt.includes("REPO MAP");
+        const hasToolGuide = systemPrompt.includes("TOOL GUIDE");
+        if (hasBase) sections.push("  ✓ BASE_INSTRUCTIONS  — Agent identity, file-editing rules, tool usage rules");
+        if (hasSessionCtx) {
+          const cwdMatch = systemPrompt.match(/Workspace root \(cwd\): (.+)/);
+          sections.push(`  ✓ SESSION_CONTEXT    — Live workspace root: ${cwdMatch?.[1] ?? "unknown"}`);
+        }
+        if (hasToolGuide) sections.push("  ✓ TOOL GUIDE         — Per-tool documentation embedded in prompt");
+        if (hasRepoMap) {
+          const mapStart = systemPrompt.indexOf("--- REPO MAP ---");
+          const mapEnd = systemPrompt.indexOf("--- END REPO MAP ---");
+          const mapLen = mapEnd > mapStart ? mapEnd - mapStart : 0;
+          sections.push(`  ✓ REPO MAP           — ${mapLen.toLocaleString()} chars of extracted symbols from the codebase`);
+        }
+        return sections.length ? sections : ["  (no recognisable sections found)"];
+      })() : ["  (no system prompt)"]),
+      "",
+
+      // ── 3. CONVERSATION HISTORY ──────────────────────────────────────────────
+      sub(`3 · CONVERSATION HISTORY (${history.length} messages)`),
+      ...(history.length === 0 ? ["  (empty — this is the first turn)"] : history.flatMap((msg, i) => {
+        const role = msg.role.toUpperCase().padEnd(12);
+        const idx = `[msg ${String(i).padStart(2, "0")}]`;
+
+        if (typeof msg.content === "string") {
+          return [
+            `${idx} ROLE: ${role}  TYPE: plain-text string`,
+            `       CHARS: ${msg.content.length}`,
+            `       CONTENT:`,
+            ...msg.content.split("\n").map(l => "         " + l),
+            "",
+          ];
+        }
+
+        if (Array.isArray(msg.content)) {
+          return [
+            `${idx} ROLE: ${role}  TYPE: content-part array  (${msg.content.length} parts)`,
+            ...msg.content.flatMap((part: any, pi: number) => {
+              const partLines = [`       [part ${pi}] type="${part.type}"`];
+              if (part.type === "text")        partLines.push(`               text (${part.text?.length ?? 0} chars): ${part.text?.slice(0, 200) ?? ""}${(part.text?.length ?? 0) > 200 ? "…" : ""}`);
+              if (part.type === "tool-call")   partLines.push(`               toolCallId="${part.toolCallId}"  toolName="${part.toolName}"`, `               input=${JSON.stringify(part.input ?? {}, null, 2).replace(/\n/g, "\n               ")}`);
+              if (part.type === "tool-result") partLines.push(`               toolCallId="${part.toolCallId}"  isError=${part.isError ?? false}`, `               result=${JSON.stringify(part.result ?? part.output, null, 2).slice(0, 400)}`);
+              return partLines;
+            }),
+            "",
+          ];
+        }
+
+        return [`${idx} ROLE: ${role}  (unknown content shape)`, `       ${JSON.stringify(msg).slice(0, 300)}`, ""];
+      })),
+
+      // ── 4. TOOLS PASSED TO LLM ──────────────────────────────────────────────
+      sub(`4 · TOOLS PASSED TO LLM (${toolSchemas.length} total)`),
+      "  Each tool is serialised into JSON Schema by the Vercel AI SDK and sent",
+      "  alongside the messages in the API request body under the 'tools' key.",
+      "  The LLM sees the name, description, and parameter schema — NOT the execute().",
+      "  It can then request a tool call by name and the SDK dispatches it locally.",
+      "",
+      ...toolSchemas.flatMap((t, i) => [
+        `  [tool ${i + 1}] ${t.name}`,
+        `           description : ${t.description}`,
+        `           parameters  : ${JSON.stringify(t.parameters)}`,
+        `           returnShape : ${t.returnShape}`,
+        `           how it runs : ${t.howPassed}`,
+        "",
+      ]),
+
+      // ── 5. SDK CALL PARAMETERS ───────────────────────────────────────────────
+      sub("5 · SDK CALL PARAMETERS"),
+      "  streamText() is called with:",
+      `    model       : resolved LanguageModel object (provider-specific)`,
+      `    system      : the system prompt above`,
+      `    messages    : the ${history.length} history messages above`,
+      `    tools       : the ${toolSchemas.length} tool definitions above`,
+      `    stopWhen    : stepCountIs(${maxSteps})  ← safety cap on tool-call rounds`,
+      "",
+      "  The fullStream async iterator is consumed to get events in real time.",
+      "  Each tool-call event from the LLM causes the SDK to call execute()",
+      "  synchronously, then inject a tool-result message before re-prompting.",
+      "",
+
+      // ── 6. LIVE STREAM EVENTS (appended below as they fire) ─────────────────
+      sub("6 · LIVE STREAM EVENTS (appended as each event fires)"),
+      `  Turn started at: ${new Date().toISOString()}`,
+      "",
+    ];
+
+    writeFileSync(debugPath, lines.join("\n"), "utf-8");
   } catch {
-    // Debug logging is best-effort — never crash the agent loop because of it.
+    // Debug logging is best-effort — never crash the agent loop.
   }
-  // ── END DEBUG LOG ──────────────────────────────────────────────────────────
+  // ─────────────────────────────────────────────────────────────────────────
+
+  const tools = {
+    readFile,
+    writeFile,
+    editFile,
+    glob,
+    grep,
+    listDir,
+    openFile,
+    runBash: createRunBashTool(onConfirm),
+  };
 
   const result = streamText({
     model,
     system: systemPrompt,
-    tools: {
-      readFile,
-      writeFile,
-      editFile,
-      glob,
-      grep,
-      listDir,
-      openFile,
-      runBash: createRunBashTool(onConfirm),
-    },
+    tools,
     // stepCountIs(N): allow up to N internal "model asks for a tool ->
     // we run it -> model sees the result -> model asks again" rounds
     // before the SDK stops automatically, even if the model would have
@@ -153,23 +316,56 @@ export async function* runTurn(
   // fullStream interleaves EVERYTHING in real time order: text chunks,
   // tool calls, tool results, step boundaries. We only forward the
   // subset that's useful to render, per the AgentEvent design above.
+  let stepIndex = 0;
   for await (const part of result.fullStream) {
-    if (part.type === "text-delta") {
+    const ts = new Date().toISOString();
+
+    if (part.type === "step-start") {
+      stepIndex++;
+      appendDebug(`  [${ts}]  STEP-START     step=${stepIndex}`);
+      appendDebug(`             The SDK is starting a new internal round trip.`);
+      appendDebug(`             All tool-calls below belong to step ${stepIndex} until STEP-FINISH.`);
+      appendDebug("");
+    } else if (part.type === "step-finish") {
+      appendDebug(`  [${ts}]  STEP-FINISH    step=${stepIndex}  finishReason="${(part as any).finishReason ?? "unknown"}"`);
+      appendDebug(`             stepUsage=${JSON.stringify((part as any).usage ?? {})}`);
+      appendDebug("");
+
+    } else if (part.type === "text-delta") {
+      appendDebug(`  [${ts}]  TEXT-DELTA     chars=${part.text.length}  fragment="${part.text.replace(/\n/g, "\\n").slice(0, 80)}"`);
       yield { kind: "text-delta", text: part.text };
+
     } else if (part.type === "tool-call") {
+      const inputJson = JSON.stringify(part.input ?? {}, null, 2);
+      appendDebug(`  [${ts}]  TOOL-CALL      ► ${part.toolName}  (id=${part.toolCallId})`);
+      appendDebug(`             The LLM output a tool-call token for "${part.toolName}".`);
+      appendDebug(`             The SDK intercepts this and will call execute() locally.`);
+      appendDebug(`             INPUT ARGUMENTS:`);
+      inputJson.split("\n").forEach(l => appendDebug("               " + l));
+      appendDebug("");
       yield {
         kind: "tool-call",
         toolCallId: part.toolCallId,
         toolName: part.toolName,
         input: part.input,
       };
+
     } else if (part.type === "tool-result") {
+      const resultJson = JSON.stringify(part.output, null, 2);
+      const preview = resultJson.length > 600 ? resultJson.slice(0, 600) + "\n  … (truncated)" : resultJson;
+      appendDebug(`  [${ts}]  TOOL-RESULT    ◄ ${part.toolName}  (id=${part.toolCallId})`);
+      appendDebug(`             execute() finished. Result injected as a tool-result message`);
+      appendDebug(`             in the conversation before the LLM continues generating.`);
+      appendDebug(`             RESULT OUTPUT:`);
+      preview.split("\n").forEach(l => appendDebug("               " + l));
+      appendDebug("");
       yield {
         kind: "tool-result",
         toolCallId: part.toolCallId,
         toolName: part.toolName,
         output: part.output,
       };
+
     } else if (part.type === "tool-error") {
       // Distinct from tool-result: this fires when the tool's execute()
       // function itself THREW (a bug in the tool, not a normal "success:
@@ -178,17 +374,29 @@ export async function* runTurn(
       // return { success: false, error } as data — but a future tool
       // someone adds might not follow that convention, so this case
       // needs to be handled rather than silently swallowed.
+      appendDebug(`  [${ts}]  TOOL-ERROR     ✗ ${part.toolName}  (id=${part.toolCallId})`);
+      appendDebug(`             execute() THREW an exception (not a controlled error return).`);
+      appendDebug(`             ERROR: ${String(part.error)}`);
+      appendDebug("");
       yield {
         kind: "tool-error",
         toolCallId: part.toolCallId,
         toolName: part.toolName,
         error: part.error,
       };
+
+    } else if (part.type === "finish") {
+      appendDebug(`  [${ts}]  FINISH         finishReason="${(part as any).finishReason ?? "unknown"}"`);
+      appendDebug(`             usage=${JSON.stringify((part as any).usage ?? {})}`);
+      appendDebug(`             The LLM has stopped generating for this turn.`);
+      appendDebug("");
     }
-    // Other part types (reasoning-*, source, file, start-step,
-    // finish-step, start, finish, abort, raw) are intentionally not
-    // forwarded — see the AgentEvent comment above for why.
+    // Other part types (reasoning-*, source, file, start, abort, raw)
+    // are intentionally not forwarded to the UI.
   }
+
+  appendDebug(`  Turn ended at: ${new Date().toISOString()}`);
+  appendDebug("");
 
   yield { kind: "turn-complete" };
 
@@ -199,6 +407,7 @@ export async function* runTurn(
       inputTokens: rawUsage.inputTokens ?? 0,
       outputTokens: rawUsage.outputTokens ?? 0,
     };
+    appendDebug(`  FINAL USAGE: inputTokens=${usage.inputTokens}  outputTokens=${usage.outputTokens}  total=${usage.inputTokens + usage.outputTokens}`);
   } catch (err) {
     // ignore
   }
