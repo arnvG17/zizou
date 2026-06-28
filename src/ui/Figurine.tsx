@@ -14,6 +14,8 @@
 
 import React, { useState, useEffect, useMemo } from "react";
 import { Box, Text, useStdout, useInput } from "ink";
+import { getActiveModelId } from "../provider/resolve-model.js";
+import { getDefaultProvider } from "../config/api-keys.js";
 
 // ─── Brand colour ────────────────────────────────────────────────────────────
 const BRAND = "#3B5FE0";
@@ -47,12 +49,13 @@ const FONT: Record<string, string[]> = {
   U: ["1100011","1100011","1100011","1100011","1100011","1100011","1100011","1111111","0111110"],
 };
 
-// ─── MINI FONT for Sidebar (3 rows high) ─────────────────────────────────────
+// ─── MINI FONT for Sidebar (3 rows high, 4 wide for Z,O,U,A and 1 wide for I) ─
 const MINI_FONT: Record<string, string[]> = {
-  Z: ["██████", "    ██", "██████"],
-  I: ["██", "██", "██"],
-  O: ["██████", "██  ██", "██████"],
-  U: ["██  ██", "██  ██", "██████"],
+  Z: ["████", "  ██", "████"],
+  I: ["█", "█", "█"],
+  O: ["████", "█  █", "████"],
+  U: ["█  █", "█  █", "████"],
+  A: ["████", "████", "█  █"],
 };
 
 // ─── SPRITE COLORS ───────────────────────────────────────────────────────────
@@ -163,41 +166,15 @@ const BALL_H = 5;
 const BALL_POS_1 = { col: 13, row: 25 };
 const BALL_POS_2 = { col: 19, row: 22 };
 
-// ─── GOALPOST GENERATOR (16 tall × 26 wide) ──────────────────────────────────
-const GOALPOST_H = 16;
-const GOALPOST_W = 26;
-
-function generateGoalpostGrid(): string[][] {
-  const grid: string[][] = [];
-  for (let r = 0; r < GOALPOST_H; r++) {
-    const row: string[] = [];
-    for (let c = 0; c < GOALPOST_W; c++) {
-      const isLeftPost = (c === 1 || c === 2);
-      const isRightPost = (c === GOALPOST_W - 3 || c === GOALPOST_W - 2);
-      const isTopBar = (r === 0 || r === 1);
-      const insideFrame = c > 2 && c < GOALPOST_W - 3 && r > 1;
-      const netDot = insideFrame && ((r + c) % 3 === 0);
-
-      if (isTopBar || isLeftPost || isRightPost) {
-        row.push("P");
-      } else if (netDot) {
-        row.push("n");
-      } else {
-        row.push(".");
-      }
-    }
-    grid.push(row);
-  }
-  return grid;
-}
+// (Goalpost generator removed)
 
 // ─── Sizing Modes ────────────────────────────────────────────────────────────
 export type FigurineSizeMode = "full" | "compact" | "tiny" | "text-only";
 
 export function getFigurineSizeMode(cols: number): FigurineSizeMode {
-  if (cols >= 90) return "full";
-  if (cols >= 60) return "compact";
-  if (cols >= 40) return "tiny";
+  if (cols >= 96) return "full";
+  if (cols >= 84) return "compact";
+  if (cols >= 48) return "tiny";
   return "text-only";
 }
 
@@ -252,7 +229,8 @@ function SegmentRow({ segments }: { segments: Array<{ text: string; color: strin
 
 function Wordmark({ pixelChar, emptyChar, gap }: { pixelChar: string; emptyChar: string; gap: string }) {
   const word = "ZIZOU";
-  const rowCount = FONT.Z.length; // 9
+  const rowCount = 10; // Expanded to 10 rows for the 1-row vertical drop shadow
+  const colCount = 8;  // Expanded to 8 columns for the 1-col horizontal drop shadow
 
   const rows = useMemo(() => {
     const result: Array<Array<{ text: string; color: string | null }>> = [];
@@ -260,12 +238,40 @@ function Wordmark({ pixelChar, emptyChar, gap }: { pixelChar: string; emptyChar:
       const segments: Array<{ text: string; color: string | null }> = [];
       for (let li = 0; li < word.length; li++) {
         const letter = word[li];
-        const bits = FONT[letter]?.[r] ?? "0000000";
-        let letterStr = "";
-        for (const b of bits) {
-          letterStr += b === "1" ? pixelChar : emptyChar;
+        const bits = FONT[letter] ?? [];
+
+        let currentText = "";
+        let currentColor: string | null = null;
+
+        for (let c = 0; c < colCount; c++) {
+          const isForeground = r < 9 && c < 7 && bits[r]?.[c] === "1";
+          const isShadow = r > 0 && c > 0 && bits[r - 1]?.[c - 1] === "1";
+
+          let char = emptyChar;
+          let color: string | null = null;
+
+          if (isForeground) {
+            char = pixelChar;
+            color = BRAND; // Brand Blue Foreground
+          } else if (isShadow) {
+            char = pixelChar;
+            color = "#D43B3B"; // Nintendo Red Drop Shadow
+          }
+
+          if (color === currentColor) {
+            currentText += char;
+          } else {
+            if (currentText) {
+              segments.push({ text: currentText, color: currentColor });
+            }
+            currentColor = color;
+            currentText = char;
+          }
         }
-        segments.push({ text: letterStr, color: BRAND });
+        if (currentText) {
+          segments.push({ text: currentText, color: currentColor });
+        }
+
         if (li < word.length - 1) {
           segments.push({ text: gap, color: null });
         }
@@ -284,59 +290,58 @@ function Wordmark({ pixelChar, emptyChar, gap }: { pixelChar: string; emptyChar:
   );
 }
 
-// ─── Sprite + Goalpost + Ball Component ───────────────────────────────────────
+// ─── Sprite + Ball Component (Downsampled 15 rows high) ───────────────────────
 
-function SpriteWithBallAndGoalpost({ px, empty }: { px: string; empty: string }) {
-  const [frame, setFrame] = useState(0);
-
-  useEffect(() => {
-    const id = setInterval(() => {
-      setFrame((f) => (f === 0 ? 1 : 0));
-    }, 600);
-    return () => clearInterval(id);
-  }, []);
+function SpriteWithBall({ px, empty }: { px: string; empty: string }) {
+  const frame = 0;
 
   const compositeRows = useMemo(() => {
     const spriteRows = frame === 0 ? FRAME_1 : FRAME_2;
     const ballPos = frame === 0 ? BALL_POS_1 : BALL_POS_2;
-    const postGrid = generateGoalpostGrid();
 
-    // Create 26x30 grid
-    const canvas: string[][] = Array.from({ length: 30 }, () =>
-      Array.from({ length: CANVAS_W }, () => ".")
+    const miniSpriteW = 12;
+    const miniSpriteH = 15;
+    const canvasW = 13;
+    const canvasH = 15;
+
+    // Create 13x15 grid
+    const canvas: string[][] = Array.from({ length: canvasH }, () =>
+      Array.from({ length: canvasW }, () => ".")
     );
 
-    // 1. Layer goalpost on bottom 16 rows
-    for (let r = 0; r < GOALPOST_H; r++) {
-      const canvasRow = 14 + r;
-      for (let c = 0; c < GOALPOST_W; c++) {
-        const ch = postGrid[r][c];
+    // 1. Downsample and layer sprite (centered horizontally)
+    for (let r = 0; r < miniSpriteH; r++) {
+      const origRow = spriteRows[r * 2] ?? "";
+      for (let c = 0; c < miniSpriteW; c++) {
+        const ch = origRow[c * 2] ?? ".";
         if (ch !== ".") {
-          canvas[canvasRow][c] = ch;
+          canvas[r][c] = ch;
         }
       }
     }
 
-    // 2. Layer sprite (centered horizontally, starting at col 1)
-    for (let r = 0; r < 30; r++) {
-      const rowStr = spriteRows[r];
-      for (let c = 0; c < SPRITE_W; c++) {
-        const ch = rowStr[c];
-        if (ch !== ".") {
-          canvas[r][c + 1] = ch;
-        }
-      }
-    }
+    // 2. Downsample and layer ball
+    const miniBallW = 3;
+    const miniBallH = 3;
+    const miniBallPos = {
+      col: Math.floor(ballPos.col / 2),
+      row: Math.floor(ballPos.row / 2) - 1, // shift up slightly for better alignment
+    };
 
-    // 3. Layer ball
-    for (let br = 0; br < BALL_H; br++) {
-      const gridRow = ballPos.row + br;
-      if (gridRow < 0 || gridRow >= 30) continue;
-      for (let bc = 0; bc < BALL_W; bc++) {
-        const gridCol = ballPos.col + bc + 1;
-        if (gridCol < 0 || gridCol >= CANVAS_W) continue;
-        const ballCh = BALL_FRAME[br]?.[bc] ?? ".";
-        if (ballCh !== "." && ballCh !== " ") {
+    const miniBallFrame = [
+      ".F.",
+      "FfF",
+      ".g."
+    ];
+
+    for (let br = 0; br < miniBallH; br++) {
+      const gridRow = miniBallPos.row + br;
+      if (gridRow < 0 || gridRow >= canvasH) continue;
+      for (let bc = 0; bc < miniBallW; bc++) {
+        const gridCol = miniBallPos.col + bc;
+        if (gridCol < 0 || gridCol >= canvasW) continue;
+        const ballCh = miniBallFrame[br]?.[bc] ?? ".";
+        if (ballCh !== ".") {
           canvas[gridRow][gridCol] = ballCh;
         }
       }
@@ -357,7 +362,7 @@ function SpriteWithBallAndGoalpost({ px, empty }: { px: string; empty: string })
 // ─── Mini Sidebar Wordmark Component ─────────────────────────────────────────
 
 export function SidebarWordmark() {
-  const word = "ZIZOU";
+  const word = "ZIZOU AI";
   const rowCount = 3;
 
   const rows = useMemo(() => {
@@ -366,9 +371,13 @@ export function SidebarWordmark() {
       const segments: Array<{ text: string; color: string | null }> = [];
       for (let li = 0; li < word.length; li++) {
         const letter = word[li];
-        const art = MINI_FONT[letter]?.[r] ?? "      ";
+        if (letter === " ") {
+          segments.push({ text: "  ", color: null });
+          continue;
+        }
+        const art = MINI_FONT[letter]?.[r] ?? "    ";
         segments.push({ text: art, color: BRAND });
-        if (li < word.length - 1) {
+        if (li < word.length - 1 && word[li + 1] !== " ") {
           segments.push({ text: " ", color: null });
         }
       }
@@ -389,8 +398,17 @@ export function SidebarWordmark() {
 // ─── Main Splash Component ───────────────────────────────────────────────────
 
 export function Figurine() {
-  const { cols } = useTerminalSize();
+  const { cols, rows } = useTerminalSize();
   const mode = getFigurineSizeMode(cols);
+
+  const activeModel = useMemo(() => {
+    try {
+      const provider = getDefaultProvider() || "groq";
+      return getActiveModelId(provider);
+    } catch {
+      return "claude-sonnet-4-6";
+    }
+  }, []);
 
   const cwd = useMemo(() => {
     const home = process.env.HOME || process.env.USERPROFILE || "";
@@ -403,7 +421,7 @@ export function Figurine() {
 
   const px = mode === "tiny" ? "█" : "██";
   const empty = mode === "tiny" ? " " : "  ";
-  const wordGap = mode === "tiny" ? " " : "  ";
+  const wordGap = mode === "tiny" ? " " : (mode === "compact" ? " " : "  ");
 
   if (mode === "text-only") {
     return (
@@ -413,7 +431,7 @@ export function Figurine() {
         </Text>
         <Box marginTop={1}>
           <Text color="#6B7280">
-            <Text color={BRAND}>{">"}</Text> claude-sonnet-4-6 · {cwd}
+            <Text color={BRAND}>{">"}</Text> {activeModel} · {cwd}
           </Text>
         </Box>
       </Box>
@@ -423,7 +441,7 @@ export function Figurine() {
   return (
     <Box flexDirection="column" alignItems="center" paddingX={2} marginY={1} width="100%">
       {/* Welcome line */}
-      <Box marginBottom={1} width="100%">
+      <Box marginBottom={1} width="100%" justifyContent="center">
         <Text color="#8A8F98">
           Welcome to the <Text color={BRAND}>Zizou</Text> agent experience <Text color={BRAND}>*</Text>
         </Text>
@@ -431,18 +449,18 @@ export function Figurine() {
 
       {/* Stacked Wordmark + Sprite */}
       <Box flexDirection="column" alignItems="center" gap={1}>
-        {mode !== "tiny" && (
+        {mode !== "text-only" && (
           <Box marginBottom={1}>
-            <SpriteWithBallAndGoalpost px={px} empty={empty} />
+            <SpriteWithBall px="██" empty="  " />
           </Box>
         )}
         <Wordmark pixelChar={px} emptyChar={empty} gap={wordGap} />
       </Box>
 
       {/* Status bar */}
-      <Box marginTop={2} width="100%" borderStyle="single" borderTop={true} borderBottom={false} borderLeft={false} borderRight={false} borderColor="rgba(255,255,255,0.08)" paddingTop={1}>
+      <Box marginTop={1} width="100%" borderStyle="single" borderTop={true} borderBottom={false} borderLeft={false} borderRight={false} borderColor="rgba(255,255,255,0.08)" paddingTop={1} justifyContent="center">
         <Text color="#6B7280">
-          <Text color={BRAND}>{">"}</Text> claude-sonnet-4-6 · {cwd}
+          <Text color={BRAND}>{">"}</Text> {activeModel} · {cwd}
         </Text>
       </Box>
     </Box>

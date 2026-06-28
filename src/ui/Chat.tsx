@@ -395,7 +395,7 @@ export function Chat({ onChangeKeys }: ChatProps) {
                 </Box>
                 <Box flexDirection="row" gap={2}>
                   <Text color="gray">{formattedTokensStr} ({tokenStats.pctUsed}%)</Text>
-                  <Text color="gray">ctrl+p commands</Text>
+                  <Text color="gray">ctrl+p commands · <Text color="#3B5FE0" bold>zizou</Text></Text>
                 </Box>
               </Box>
             </Box>

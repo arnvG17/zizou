@@ -144,12 +144,12 @@ export function ApiKeySetup({ onComplete }: ApiKeySetupProps) {
   // ── Provider chooser ─────────────────────────────────────────────────────
   if (step === "choose-provider") {
     return (
-      <Box flexDirection="column" padding={1} borderStyle="round" borderColor="cyan">
-        <Text bold>Choose your AI provider to get started.</Text>
+      <Box flexDirection="column" padding={1} borderStyle="round" borderColor="#3B5FE0" backgroundColor="#15171C">
+        <Text bold color="white">Choose your AI provider to get started.</Text>
         <Text color="gray">(↑/↓ to select, Enter to confirm)</Text>
         <Box flexDirection="column" marginTop={1}>
           {PROVIDERS.map((p) => (
-            <Text key={p} color={provider === p ? "green" : undefined}>
+            <Text key={p} color={provider === p ? "#3B5FE0" : undefined} bold={provider === p}>
               {provider === p ? "❯ " : "  "}
               {PROVIDER_LABELS[p]}
             </Text>
@@ -167,18 +167,18 @@ export function ApiKeySetup({ onComplete }: ApiKeySetupProps) {
   // ── Ollama URL step ──────────────────────────────────────────────────────
   if (step === "enter-ollama-url") {
     return (
-      <Box flexDirection="column" padding={1} borderStyle="round" borderColor="cyan">
-        <Text bold>Ollama — Base URL</Text>
+      <Box flexDirection="column" padding={1} borderStyle="round" borderColor="#3B5FE0" backgroundColor="#15171C">
+        <Text bold color="white">Ollama — Base URL</Text>
         <Text color="gray">Leave blank to use the default (http://localhost:11434).</Text>
         <Text color="gray">Change this if Ollama is running on a different host/port.</Text>
         {validationError && (
-          <Box marginTop={1} paddingX={1} borderStyle="single" borderColor="red">
+          <Box marginTop={1} paddingX={1} borderStyle="single" borderColor="red" backgroundColor="#15171C">
             <Text color="red" bold>Error: </Text>
             <Text color="red">{validationError}</Text>
           </Box>
         )}
         <Box marginTop={1}>
-          <Text>URL: </Text>
+          <Text color="white">URL: </Text>
           <TextInput
             value={urlInput}
             onChange={setUrlInput}
@@ -193,20 +193,20 @@ export function ApiKeySetup({ onComplete }: ApiKeySetupProps) {
   // ── Ollama model step ────────────────────────────────────────────────────
   if (step === "enter-ollama-model") {
     return (
-      <Box flexDirection="column" padding={1} borderStyle="round" borderColor="cyan">
-        <Text bold>Ollama — Model name</Text>
+      <Box flexDirection="column" padding={1} borderStyle="round" borderColor="#3B5FE0" backgroundColor="#15171C">
+        <Text bold color="white">Ollama — Model name</Text>
         <Text color="gray">
           Enter a model you have pulled locally (e.g. llama3, mistral, gemma3, phi3, qwen2).
         </Text>
         <Text color="gray">Leave blank for default: {DEFAULT_MODELS["ollama"]}</Text>
         {validationError && (
-          <Box marginTop={1} paddingX={1} borderStyle="single" borderColor="red">
+          <Box marginTop={1} paddingX={1} borderStyle="single" borderColor="red" backgroundColor="#15171C">
             <Text color="red" bold>Error: </Text>
             <Text color="red">{validationError}</Text>
           </Box>
         )}
         <Box marginTop={1}>
-          <Text>Model: </Text>
+          <Text color="white">Model: </Text>
           {isValidating ? (
             <Text color="yellow">Connecting to Ollama… please wait.</Text>
           ) : (
@@ -224,19 +224,19 @@ export function ApiKeySetup({ onComplete }: ApiKeySetupProps) {
 
   // ── Regular API key entry ────────────────────────────────────────────────
   return (
-    <Box flexDirection="column" padding={1} borderStyle="round" borderColor="cyan">
-      <Text bold>Enter your {SHORT_LABELS[provider]} API Key</Text>
+    <Box flexDirection="column" padding={1} borderStyle="round" borderColor="#3B5FE0" backgroundColor="#15171C">
+      <Text bold color="white">Enter your {SHORT_LABELS[provider]} API Key</Text>
       <Text color="gray">This will be stored in plain text in your OS config directory.</Text>
 
       {validationError && (
-        <Box marginTop={1} paddingX={1} borderStyle="single" borderColor="red">
+        <Box marginTop={1} paddingX={1} borderStyle="single" borderColor="red" backgroundColor="#15171C">
           <Text color="red" bold>Validation failed: </Text>
           <Text color="red">{validationError}</Text>
         </Box>
       )}
 
       <Box marginTop={1}>
-        <Text>Key: </Text>
+        <Text color="white">Key: </Text>
         {isValidating ? (
           <Text color="yellow">Validating API key… please wait.</Text>
         ) : (
