@@ -57,7 +57,7 @@ export interface CodeSymbol {
 }
 
 const SKIP_DIRS = new Set(["node_modules", ".git", "dist", "build", ".next", "coverage"]);
-const CODE_FILE_PATTERN = /\.(ts|tsx|js|jsx|mjs|cjs)$/;
+const CODE_FILE_PATTERN = /\.(ts|tsx|js|jsx|mjs|cjs|html|css)$/;
 
 // Patterns for "things that look like a top-level declaration worth
 // surfacing in the map." Each one is intentionally narrow — see the
@@ -143,8 +143,18 @@ export function scanRepo(rootDir: string): CodeSymbol[] {
         walk(fullPath);
       } else if (CODE_FILE_PATTERN.test(entry)) {
         const content = readFileSync(fullPath, "utf-8");
-        const relPath = relative(rootDir, fullPath);
-        allSymbols.push(...extractSymbols(relPath, content));
+        const relPath = relative(rootDir, fullPath).replace(/\\/g, '/');
+        const fileSymbols = extractSymbols(relPath, content);
+        if (fileSymbols.length === 0) {
+          // Push a dummy symbol so the file at least appears in the map
+          allSymbols.push({
+            file: relPath,
+            line: 1,
+            signature: "(no exported symbols extracted)"
+          });
+        } else {
+          allSymbols.push(...fileSymbols);
+        }
       }
     }
   }

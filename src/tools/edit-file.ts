@@ -13,6 +13,7 @@
  */
 
 import { readFileSync, writeFileSync } from "node:fs";
+import { resolve } from "node:path";
 import { z } from "zod";
 import { tool } from "ai";
 
@@ -30,7 +31,12 @@ export const editFile = tool({
   }),
   execute: async ({ path, old_string, new_string }) => {
     try {
-      const contents = readFileSync(path, "utf-8");
+      const absPath = resolve(process.cwd(), path);
+      let contents = readFileSync(absPath, "utf-8");
+
+      // Normalize line endings to \n to avoid silent mismatch issues on Windows
+      contents = contents.replace(/\r\n/g, "\n");
+      old_string = old_string.replace(/\r\n/g, "\n");
 
       // Count occurrences of old_string
       let count = 0;
@@ -62,11 +68,11 @@ export const editFile = tool({
 
       // Exactly 1 occurrence: perform the replacement
       const updatedContents = contents.replace(old_string, new_string);
-      writeFileSync(path, updatedContents, "utf-8");
+      writeFileSync(absPath, updatedContents, "utf-8");
 
       return {
         success: true as const,
-        message: `Successfully replaced 1 occurrence in ${path}`,
+        message: `Successfully replaced 1 occurrence in ${absPath}`,
       };
     } catch (err) {
       const message =

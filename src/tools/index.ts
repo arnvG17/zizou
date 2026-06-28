@@ -20,4 +20,8 @@ export { listDir } from "./list-dir.js";
 export { openFile } from "./open-file.js";
 export { addFileToContext } from "./add-context.js";
 export { createRunBashTool } from "./run-bash.js";
+export { createRunBackgroundTool } from "./run-background.js";
+export { manageTasks } from "./manage-tasks.js";
+export { managePorts } from "./manage-ports.js";
+export { fileOperations } from "./file-operations.js";
 export type { ConfirmFn } from "./types.js";

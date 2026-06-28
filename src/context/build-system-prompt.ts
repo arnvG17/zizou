@@ -24,6 +24,7 @@ import { buildRepoMap } from "./repo-map.js";
 import { getContextMode } from "../config/api-keys.js";
 import { existsSync, readFileSync } from "fs";
 import { resolve } from "path";
+import { platform } from "os";
 
 export const pinnedContextFiles = new Set<string>();
 
@@ -38,6 +39,16 @@ export function addPinnedFile(projectRoot: string, filePath: string): string {
 
 export function clearPinnedFiles(): void {
   pinnedContextFiles.clear();
+}
+
+/**
+ * Detect the current operating system and shell for the system prompt.
+ */
+function getOSInfo(): { os: string; shell: string } {
+  const p = process.platform;
+  if (p === "win32") return { os: "Windows", shell: "PowerShell" };
+  if (p === "darwin") return { os: "macOS", shell: "bash/zsh" };
+  return { os: "Linux", shell: "bash" };
 }
 
 const BASE_INSTRUCTIONS = `You are Zizou, an AI coding agent operating inside a user's terminal,
@@ -55,6 +66,12 @@ You have two complementary ways to understand the codebase:
    doesn't exist.
 
 When creating a new file or completely replacing a file's contents, use the writeFile tool. When modifying existing files in a targeted way, use editFile with an old_string that exactly matches existing content and is unique in the file — never rewrite whole files from scratch if you are only making minor edits. Before running any shell command, know that the user will be asked to approve it; explain briefly what a command will do if it's not obvious.
+
+IMPORTANT — "Read Before Edit" Rule:
+Before calling editFile, you MUST first readFile the file to see its current contents.
+The old_string parameter must EXACTLY match text currently in the file — including all
+whitespace, indentation, and line breaks. If you guess at the content without reading
+the file first, the edit will almost certainly fail.
 
 For general knowledge questions, conversational chat, or queries that do not require workspace files or terminal command execution, answer directly from your internal knowledge. Do NOT use tools (such as grep, glob, readFile, or runBash) unless the task specifically requires accessing the project codebase or executing commands.
 
@@ -77,10 +94,14 @@ export async function buildSystemPrompt(projectRoot: string): Promise<string> {
     repoMap = buildRepoMap(projectRoot);
   }
 
+  const { os, shell } = getOSInfo();
+
   // Injected at runtime so the model always has the real workspace path.
   const SESSION_CONTEXT = `
 --- SESSION CONTEXT ---
 Workspace root (cwd): ${projectRoot}
+Operating system: ${os}
+Shell: ${shell}
 All relative paths you provide to tools are resolved from this root.
 When creating or writing a file, you can use either:
   - An absolute path  (e.g. ${projectRoot}/index.html)
@@ -91,17 +112,58 @@ TOOL GUIDE:
   listDir(path?)     → list immediate children of a directory. Use this FIRST
                        whenever you need to understand the folder structure or
                        decide where a new file should go.
-  readFile(path)     → read the full contents of an existing file.
+  readFile(path)     → read the full contents of an existing file. ALWAYS call
+                       this before editFile so you have the exact current text.
   writeFile(path, contents) → create a NEW file or FULLY REPLACE an existing one.
                        Use this for brand-new files or when you want to overwrite everything.
   editFile(path, old_string, new_string) → make a TARGETED replacement inside an existing
                        file. old_string must match exactly and be unique in the file.
-  glob(pattern)      → find files recursively by name pattern (e.g. "*.ts").
-  grep(query)        → search file contents by text pattern.
+                       IMPORTANT: Always readFile first to get the exact text.
+  glob(pattern)      → find files recursively by name pattern (e.g. "*.ts",
+                       "**/app.css"). Supports ** for any depth matching.
+  grep(pattern)      → search file contents by text or regex pattern across the project.
   runBash(command)   → run a shell command (user must approve first).
+                       On ${os} this runs in ${shell}.
+                       Has a 120-second timeout — suitable for short/medium installation & builds.
+  runBackground(command) → Run a shell command in the background (non-blocking).
+                       Perfect for long-running servers (e.g. 'npm run dev' or 'bun run dev').
+                       Returns a 'taskId' and 'pid' immediately.
+  manageTasks(action, taskId?) → Manage background tasks.
+                       - action="list": Return details of all tasks spawned in this session.
+                       - action="logs": Return stdout/stderr buffer from a task (helps check server state/logs).
+                       - action="kill": Terminate a background task (and its children).
+  managePorts(action, port) → Find and terminate processes on ports.
+                       - action="find": Find PID and name of process listening on 'port'.
+                       - action="kill": Kill the process listening on 'port'.
+                       Helps solve 'Address already in use' errors.
+  fileOperations(action, source, destination?) → Native file management.
+                       - action="delete": Recursively delete a file/folder.
+                       - action="createDirectory": Recursively create folders.
+                       - action="copy": Recursively copy a file/folder to destination.
+                       - action="move": Move/rename a file/folder to destination.
   openFile(path)     → open a file in the OS default app (HTML → browser,
                        images → viewer, etc.). Use after creating a file so the
                        user can immediately preview it.
+
+WORKFLOW FOR FINDING AND EDITING FILES:
+When the user asks you to modify a file you haven't seen yet:
+  1. Use glob("**/filename") or listDir() to FIND the file path
+  2. Use readFile(path) to READ its current contents
+  3. Use editFile(path, old_string, new_string) to EDIT it
+  Never skip step 2 — editFile needs an exact string match.
+
+PROJECT SCAFFOLDING (React, Next.js, Vite, etc.):
+When the user asks you to create a new project with a framework:
+  1. Use runBash to scaffold: e.g.
+     - React/Vite: npx -y create-vite@latest my-app -- --template react
+     - Next.js:    npx -y create-next-app@latest my-app --yes --use-npm
+     - Plain React: npx -y create-react-app my-app
+  2. Use runBash("cd my-app && npm install") if dependencies weren't auto-installed
+  3. Spin up development server in the background:
+     - runBackground("cd my-app && npm run dev")
+  4. Verify server running using:
+     - manageTasks("list")
+     - Wait a few seconds, then query logs using manageTasks("logs", taskId) to see server startup details.
 --- END SESSION CONTEXT ---`;
 
   let pinnedText = "";

@@ -13,6 +13,7 @@
  */
 
 import { readFileSync } from "node:fs";
+import { resolve } from "node:path";
 import { z } from "zod";
 import { tool } from "ai";
 
@@ -52,7 +53,8 @@ export const readFile = tool({
    */
   execute: async ({ path }) => {
     try {
-      const contents = readFileSync(path, "utf-8");
+      const absPath = resolve(process.cwd(), path);
+      const contents = readFileSync(absPath, "utf-8");
       return { success: true as const, contents };
     } catch (err) {
       const message =

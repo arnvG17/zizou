@@ -27,7 +27,7 @@
 // valve against an infinite loop.
 
 import { streamText, stepCountIs, type ModelMessage, type LanguageModel } from "ai";
-import { readFile, writeFile, editFile, glob, grep, listDir, openFile, addFileToContext, createRunBashTool, type ConfirmFn } from "../tools/index.js";
+import { readFile, writeFile, editFile, glob, grep, listDir, openFile, addFileToContext, createRunBashTool, createRunBackgroundTool, manageTasks, managePorts, fileOperations, type ConfirmFn } from "../tools/index.js";
 
 // --- Event types this module emits, for whatever UI is listening ---
 //
@@ -219,6 +219,34 @@ export async function* runTurn(
         returnShape: "{ success: true, output: string } | { success: false, error }",
         howPassed: "ConfirmFn suspends the agent loop (via Promise) until user presses y/n in the TUI. If approved, uses child_process.exec with 15s timeout + 1MB buffer."
       },
+      {
+        name: "runBackground",
+        description: "Execute a shell command in the background (non-blocking).",
+        parameters: { command: "string — the shell command" },
+        returnShape: "{ success: true, taskId: string, pid?: number } | { success: false, error: string }",
+        howPassed: "Uses child_process.spawn to run command in the background, registers it in the task registry."
+      },
+      {
+        name: "manageTasks",
+        description: "Manage background tasks spawned in the session.",
+        parameters: { action: "'list' | 'kill' | 'logs'", taskId: "string" },
+        returnShape: "{ success: true, ... } | { success: false, error: string }",
+        howPassed: "Queries active background task list, logs buffer, or terminates a task."
+      },
+      {
+        name: "managePorts",
+        description: "Find or terminate processes listening on a port.",
+        parameters: { action: "'find' | 'kill'", port: "number" },
+        returnShape: "{ success: true, ... } | { success: false, error: string }",
+        howPassed: "Invokes platform commands (netstat, taskkill, lsof, kill) to find or stop processes on local ports."
+      },
+      {
+        name: "fileOperations",
+        description: "Perform filesystem operations natively (delete, copy, move, create directories).",
+        parameters: { action: "'delete' | 'createDirectory' | 'copy' | 'move'", source: "string", destination: "string" },
+        returnShape: "{ success: true, message: string } | { success: false, error: string }",
+        howPassed: "Uses Node fs methods directly to modify directories and files."
+      },
     ];
 
     // ── BUILD PRE-TURN SECTION ───────────────────────────────────────────────
@@ -350,6 +378,10 @@ export async function* runTurn(
     openFile,
     addFileToContext,
     runBash: createRunBashTool(onConfirm),
+    runBackground: createRunBackgroundTool(onConfirm),
+    manageTasks,
+    managePorts,
+    fileOperations,
   };
 
   const result = streamText({
