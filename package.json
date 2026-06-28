@@ -1,14 +1,17 @@
 {
-  "name": "zizou",
-  "version": "0.1.0",
+  "name": "zizou-ai",
+  "version": "0.1.1",
   "type": "module",
   "description": "An open-source AI coding agent CLI tool",
   "bin": {
-    "zizou": "./src/cli.tsx"
+    "zizou": "./dist/cli.js"
   },
   "scripts": {
+    "dev": "bun run src/cli.tsx",
     "dev-harness": "bun run src/dev-harness.ts",
-    "typecheck": "tsc --noEmit -p tsconfig.json"
+    "typecheck": "tsc --noEmit -p tsconfig.json",
+    "build": "bun run build.ts",
+    "prepublishOnly": "npm run build"
   },
   "dependencies": {
     "@ai-sdk/anthropic": "^4.0.0",

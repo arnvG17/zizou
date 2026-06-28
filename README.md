@@ -2,8 +2,27 @@
 
 Zizou is an open-source AI coding agent CLI tool built with TypeScript, React (Ink), and the Vercel AI SDK. It allows you to chat with Claude 3.5 Sonnet or GPT-4o directly in your terminal, and grants the AI the ability to read files, edit files (safely), and run sandboxed terminal commands with your explicit approval.
 
-## Installation
+## Getting Started
 
+You can install and run Zizou using NPM, Docker, or from source. *(On first run, the CLI will present a setup screen asking you to select a provider and input an API key).*
+
+### Option 1: Using NPM (Recommended)
+You can download and install Zizou globally via NPM (requires Node.js):
+```bash
+npm install -g zizou-ai
+```
+Once installed, you can launch the CLI from anywhere by simply running:
+```bash
+zizou
+```
+
+### Option 2: Using Docker
+You can download and run Zizou inside an isolated Docker container without installing any dependencies:
+```bash
+docker run -it arnv17/zizou:latest
+```
+
+### Option 3: From Source (Development)
 Ensure you have [Bun](https://bun.sh) installed.
 
 ```bash
@@ -13,15 +32,10 @@ cd zizou
 
 # Install dependencies
 bun install
-```
 
-## Running Zizou
-
-You can run Zizou directly using Bun:
-```bash
+# Run the CLI
 bun run src/cli.tsx
 ```
-*(On first run, the CLI will present a setup screen asking you to select a provider and input an API key).*
 
 ## Core Features & Slash Commands
 
@@ -46,7 +60,10 @@ To connect to any of these, simply run `/keys` inside the CLI or provide an envi
 
 ## File Structure & Layering
 
-The codebase strictly adheres to a layered architecture. Higher layers may import from lower layers, but never vice-versa:
+The codebase strictly adheres to a layered architecture. Higher layers may import from lower layers, but never vice-versa.
+
+> [!NOTE]
+> **Inline Documentation & Reasoning:** The codebase is designed to be highly educational and is heavily documented inline. If you open any file (especially in `src/tools/` or `src/agent/`), you will find detailed block comments explaining not just *what* the code does, but the *reasoning* behind why it was built that way, why certain design decisions were made over alternatives, and how the data flows end-to-end.
 
 1. **`ui/`** (`App.tsx`, `Chat.tsx`, `ApiKeySetup.tsx`)
    - The React/Ink terminal interface. Responsible *only* for rendering state and handling user input.

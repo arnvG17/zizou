@@ -1,4 +1,4 @@
-#!/usr/bin/env bun
+
 /**
  * cli.tsx — Entry point for the Zizou CLI.
  *
