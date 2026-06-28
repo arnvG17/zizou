@@ -21,6 +21,24 @@
 // neither Chat.tsx nor run-turn.ts need to change at all.
 
 import { buildRepoMap } from "./repo-map.js";
+import { getContextMode } from "../config/api-keys.js";
+import { existsSync, readFileSync } from "fs";
+import { resolve } from "path";
+
+export const pinnedContextFiles = new Set<string>();
+
+export function addPinnedFile(projectRoot: string, filePath: string): string {
+  const absolutePath = resolve(projectRoot, filePath);
+  if (!existsSync(absolutePath)) {
+    throw new Error(`File not found: ${absolutePath}`);
+  }
+  pinnedContextFiles.add(absolutePath);
+  return absolutePath;
+}
+
+export function clearPinnedFiles(): void {
+  pinnedContextFiles.clear();
+}
 
 const BASE_INSTRUCTIONS = `You are Zizou, an AI coding agent operating inside a user's terminal,
 with direct access to their project's filesystem through tools.
@@ -40,6 +58,9 @@ When creating a new file or completely replacing a file's contents, use the writ
 
 For general knowledge questions, conversational chat, or queries that do not require workspace files or terminal command execution, answer directly from your internal knowledge. Do NOT use tools (such as grep, glob, readFile, or runBash) unless the task specifically requires accessing the project codebase or executing commands.
 
+CRITICAL INSTRUCTION FOR TOOL CALLING: You are interacting with a system that supports native tool calling (function calling). You MUST use the native tool calling protocol. 
+Do not output raw JSON text blocks to call tools. You must strictly invoke the tool using the API's designated function calling format.
+
 CRITICAL: When calling a tool, you must output the exact, clean name of the tool (e.g., 'runBash' or 'readFile') as a plain string in the tool name field. Do NOT concatenate, append, or embed any JSON arguments or parentheses into the tool name string itself. All arguments must be placed strictly inside the tool arguments object.`;
 
 /**
@@ -49,7 +70,12 @@ CRITICAL: When calling a tool, you must output the exact, clean name of the tool
  * would be wasteful — see src/ui/Chat.tsx for where this gets cached.
  */
 export async function buildSystemPrompt(projectRoot: string): Promise<string> {
-  const repoMap = buildRepoMap(projectRoot);
+  const mode = getContextMode();
+  let repoMap = "";
+  
+  if (mode !== "light") {
+    repoMap = buildRepoMap(projectRoot);
+  }
 
   // Injected at runtime so the model always has the real workspace path.
   const SESSION_CONTEXT = `
@@ -78,9 +104,23 @@ TOOL GUIDE:
                        user can immediately preview it.
 --- END SESSION CONTEXT ---`;
 
-  if (!repoMap) {
-    return `${BASE_INSTRUCTIONS}${SESSION_CONTEXT}\n\n(No repo map could be generated — the project may be empty or contain no recognized source files.)`;
+  let pinnedText = "";
+  if (pinnedContextFiles.size > 0) {
+    pinnedText = "\n\n--- PINNED FILES ---\nThe user has pinned the following files to your permanent context:\n";
+    for (const file of pinnedContextFiles) {
+      try {
+        const contents = readFileSync(file, "utf8");
+        pinnedText += `\nFile: ${file}\n\`\`\`\n${contents}\n\`\`\`\n`;
+      } catch (err) {
+        pinnedText += `\nFile: ${file} (Failed to read)\n`;
+      }
+    }
+    pinnedText += "--- END PINNED FILES ---";
   }
 
-  return `${BASE_INSTRUCTIONS}${SESSION_CONTEXT}\n\n--- REPO MAP ---\n${repoMap}\n--- END REPO MAP ---`;
+  if (!repoMap || mode === "light") {
+    return `${BASE_INSTRUCTIONS}${SESSION_CONTEXT}${pinnedText}\n\n(Repo map is disabled in '${mode}' mode, or no source files were found. Use tools like listDir to explore.)`;
+  }
+
+  return `${BASE_INSTRUCTIONS}${SESSION_CONTEXT}${pinnedText}\n\n--- REPO MAP ---\n${repoMap}\n--- END REPO MAP ---`;
 }

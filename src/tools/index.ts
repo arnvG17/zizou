@@ -18,5 +18,6 @@ export { glob } from "./glob.js";
 export { grep } from "./grep.js";
 export { listDir } from "./list-dir.js";
 export { openFile } from "./open-file.js";
+export { addFileToContext } from "./add-context.js";
 export { createRunBashTool } from "./run-bash.js";
 export type { ConfirmFn } from "./types.js";

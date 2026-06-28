@@ -8,7 +8,9 @@
 
 import Conf from "conf";
 
-export type ProviderChoice = "anthropic" | "openai" | "openrouter" | "google" | "groq";
+export type ProviderChoice = "anthropic" | "openai" | "openrouter" | "google" | "groq" | "ollama";
+
+export type ContextMode = "light" | "default" | "max";
 
 interface ConfigSchema {
   apiKeys: {
@@ -17,14 +19,23 @@ interface ConfigSchema {
     openrouter?: string;
     google?: string;
     groq?: string;
+    /** Optional — Ollama doesn't require a real API key by default */
+    ollama?: string;
   };
   defaultProvider?: ProviderChoice;
+  /** Custom model overrides per provider (e.g. "llama3:latest" for ollama) */
+  providerModels?: Partial<Record<ProviderChoice, string>>;
+  /** Ollama base URL — defaults to http://localhost:11434 */
+  ollamaBaseUrl?: string;
+  contextMode?: ContextMode;
 }
 
 const config = new Conf<ConfigSchema>({
   projectName: "zizou",
   defaults: {
     apiKeys: {},
+    providerModels: {},
+    contextMode: "default",
   },
 });
 
@@ -53,6 +64,12 @@ export function getApiKey(provider: ProviderChoice): string | undefined {
     if (process.env.GROQ_API_KEY) return process.env.GROQ_API_KEY;
     return config.get("apiKeys.groq");
   }
+  if (provider === "ollama") {
+    // Ollama doesn't need a real API key — but we support one if the user
+    // runs a secured/proxied instance. Default to the placeholder "ollama".
+    if (process.env.OLLAMA_API_KEY) return process.env.OLLAMA_API_KEY;
+    return config.get("apiKeys.ollama") ?? "ollama";
+  }
   return undefined;
 }
 
@@ -72,7 +89,9 @@ export function hasAnyApiKey(): boolean {
     getApiKey("openai") ||
     getApiKey("openrouter") ||
     getApiKey("google") ||
-    getApiKey("groq")
+    getApiKey("groq") ||
+    // Ollama is always "available" if chosen — no real key required
+    getDefaultProvider() === "ollama"
   );
 }
 
@@ -94,8 +113,54 @@ export function setDefaultProvider(provider: ProviderChoice): void {
 }
 
 /**
+ * Gets the active model override for a provider (or undefined = use built-in default).
+ */
+export function getProviderModel(provider: ProviderChoice): string | undefined {
+  const models = config.get("providerModels") ?? {};
+  return models[provider];
+}
+
+/**
+ * Sets a custom model string for a provider.
+ */
+export function setProviderModel(provider: ProviderChoice, model: string): void {
+  const models = config.get("providerModels") ?? {};
+  models[provider] = model;
+  config.set("providerModels", models);
+}
+
+/**
+ * Gets the Ollama base URL (defaults to http://localhost:11434).
+ */
+export function getOllamaBaseUrl(): string {
+  if (process.env.OLLAMA_BASE_URL) return process.env.OLLAMA_BASE_URL;
+  return config.get("ollamaBaseUrl") ?? "http://localhost:11434";
+}
+
+/**
+ * Sets the Ollama base URL.
+ */
+export function setOllamaBaseUrl(url: string): void {
+  config.set("ollamaBaseUrl", url);
+}
+
+/**
  * Resets/clears all stored configuration keys and provider choice.
  */
 export function clearApiKeys(): void {
   config.clear();
+}
+
+/**
+ * Retrieves the current context mode. Defaults to "default" if not set.
+ */
+export function getContextMode(): ContextMode {
+  return config.get("contextMode") || "default";
+}
+
+/**
+ * Saves the current context mode.
+ */
+export function setContextMode(mode: ContextMode): void {
+  config.set("contextMode", mode);
 }

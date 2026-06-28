@@ -10,8 +10,8 @@ import React, { useState, useRef, useEffect, useMemo } from "react";
 import { Box, Text, useInput } from "ink";
 import TextInput from "ink-text-input";
 import type { ModelMessage } from "ai";
-import { resolveModel } from "../provider/resolve-model.js";
-import { getDefaultProvider, ProviderChoice } from "../config/api-keys.js";
+import { resolveModel, getActiveModelId } from "../provider/resolve-model.js";
+import { getDefaultProvider, ProviderChoice, getContextMode } from "../config/api-keys.js";
 import type { ConfirmFn } from "../tools/index.js";
 import { runTurn } from "../agent/run-turn.js";
 import { buildSystemPrompt } from "../context/build-system-prompt.js";
@@ -81,7 +81,14 @@ function calculateTokenStats(
   }
 
   const totalTokens = inputTokens + outputTokens;
-  const pctUsed = Math.min(100, parseFloat(((totalTokens / 200000) * 100).toFixed(1)));
+  
+  const modelId = getActiveModelId(provider);
+  let contextLimit = 128000; // default for many modern models
+  if (modelId.includes("claude-3-5") || modelId.includes("claude-3-opus")) contextLimit = 200000;
+  else if (modelId.includes("gemini-2.0") || modelId.includes("gemini-1.5")) contextLimit = 1000000;
+  else if (modelId.includes("gemma-3") || modelId.includes("llama-3.3")) contextLimit = 128000;
+
+  const pctUsed = Math.min(100, parseFloat(((totalTokens / contextLimit) * 100).toFixed(1)));
 
   // Cost calculation based on provider rates
   let inputRate = 0.000003; // default $3/M (Anthropic)
@@ -96,14 +103,21 @@ function calculateTokenStats(
   } else if (provider === "groq") {
     inputRate = 0.00000059; // $0.59/M
     outputRate = 0.00000079; // $0.79/M
+  } else if (provider === "ollama") {
+    // Ollama runs locally — no cost
+    inputRate = 0;
+    outputRate = 0;
   }
 
   const cost = parseFloat((inputTokens * inputRate + outputTokens * outputRate).toFixed(4));
 
   return {
+    inputTokens,
+    outputTokens,
     totalTokens,
     pctUsed,
     cost,
+    contextLimit,
   };
 }
 
@@ -144,9 +158,12 @@ export function Chat({ onChangeKeys }: ChatProps) {
   const [systemPromptText, setSystemPromptText] = useState<string>("");
 
   const [tokenStats, setTokenStats] = useState({
+    inputTokens: 0,
+    outputTokens: 0,
     totalTokens: 0,
     pctUsed: 0,
     cost: 0,
+    contextLimit: 128000,
   });
 
   useEffect(() => {
@@ -178,21 +195,34 @@ export function Chat({ onChangeKeys }: ChatProps) {
   });
 
   async function handleSubmit(userText: string) {
-    if (!userText.trim() || busy) return;
+    if (!userText.trim()) return;
     setInput("");
 
     // --- Slash Commands Interceptor ---
+    // Slash commands bypass the busy guard so they work even while the agent is thinking
     const isCommand = handleSlashCommand({
       userText,
       history,
       systemPrompt: systemPromptRef.current,
       systemPromptText,
       onChangeKeys,
+      onContextChange: () => {
+        setContextReady(false);
+        buildSystemPrompt(process.cwd()).then((prompt) => {
+          systemPromptRef.current = prompt;
+          setSystemPromptText(prompt);
+          setContextReady(true);
+          const provider = getDefaultProvider() || "groq";
+          setTokenStats(calculateTokenStats(history.current, prompt, undefined, provider));
+        });
+      },
       setLog,
       setTokenStats,
       calculateTokenStats,
     });
     if (isCommand) return;
+
+    if (busy) return; // Only block normal messages, not commands
 
     setLog((l) => [...l, { kind: "user", text: userText }]);
     history.current.push({ role: "user", content: userText });
@@ -360,16 +390,8 @@ export function Chat({ onChangeKeys }: ChatProps) {
               {/* Input Footer */}
               <Box flexDirection="row" justifyContent="space-between" paddingX={1} marginTop={0}>
                 <Box flexDirection="row" gap={1}>
-                  <Text backgroundColor="#3B5FE0" color="white" bold> Build </Text>
-                  <Text color="gray">{
-                    ({
-                      groq: "llama-3.3-70b",
-                      google: "gemini-2.0-flash",
-                      openrouter: "claude-3.5-sonnet (or)",
-                      anthropic: "claude-3.5-sonnet",
-                      openai: "gpt-4o"
-                    } as Record<ProviderChoice, string>)[getDefaultProvider() || "groq"]
-                  }</Text>
+                  <Text backgroundColor="#3B5FE0" color="white" bold> Build ({getContextMode()}) </Text>
+                  <Text color="gray">{getActiveModelId(getDefaultProvider() || "groq")}</Text>
                 </Box>
                 <Box flexDirection="row" gap={2}>
                   <Text color="gray">{formattedTokensStr} ({tokenStats.pctUsed}%)</Text>
@@ -400,7 +422,9 @@ export function Chat({ onChangeKeys }: ChatProps) {
           {/* Section 2: Context statistics */}
           <Box flexDirection="column" marginBottom={1}>
             <Text color="#E6E6E6" bold marginBottom={0}>Context</Text>
-            <Text color="gray">{tokenStats.totalTokens.toLocaleString()} tokens</Text>
+            <Text color="gray">Max: {tokenStats.contextLimit.toLocaleString()} tokens</Text>
+            <Text color="gray">In:  {tokenStats.inputTokens.toLocaleString()}</Text>
+            <Text color="gray">Out: {tokenStats.outputTokens.toLocaleString()}</Text>
             <Text color="gray">{tokenStats.pctUsed}% used</Text>
             <Text color="gray">${tokenStats.cost.toFixed(4)} spent</Text>
           </Box>

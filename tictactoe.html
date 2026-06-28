@@ -1,0 +1,109 @@
+<!DOCTYPE html>
+<html>
+<head>
+    <title>Tic Tac Toe</title>
+    <style>
+        body {
+            font-family: Arial, sans-serif;
+            text-align: center;
+        }
+        #game-board {
+            display: grid;
+            grid-template-columns: repeat(3, 1fr);
+            grid-gap: 10px;
+            margin: 40px auto;
+            width: 300px;
+        }
+        .cell {
+            background-color: #f0f0f0;
+            padding: 20px;
+            border: none;
+            border-radius: 10px;
+            cursor: pointer;
+        }
+        .cell:hover {
+            background-color: #ccc;
+        }
+        .winner {
+            background-color: #66ff66;
+        }
+        .loser {
+            background-color: #ff6666;
+        }
+    </style>
+</head>
+<body>
+    <h1>Tic Tac Toe</h1>
+    <div id="game-board">
+        <button class="cell" id="cell-0"></button>
+        <button class="cell" id="cell-1"></button>
+        <button class="cell" id="cell-2"></button>
+        <button class="cell" id="cell-3"></button>
+        <button class="cell" id="cell-4"></button>
+        <button class="cell" id="cell-5"></button>
+        <button class="cell" id="cell-6"></button>
+        <button class="cell" id="cell-7"></button>
+        <button class="cell" id="cell-8"></button>
+    </div>
+    <button id="restart-button">Restart Game</button>
+    <script>
+        let currentPlayer = 'X';
+        let gameBoard = ['', '', '', '', '', '', '', '', ''];
+        let cells = document.querySelectorAll('.cell');
+        cells.forEach((cell, index) => {
+            cell.addEventListener('click', () => {
+                if (gameBoard[index] === '') {
+                    gameBoard[index] = currentPlayer;
+                    cell.textContent = currentPlayer;
+                    if (checkWin()) {
+                        alert(`Player ${currentPlayer} wins!`);
+                        toast(`Player ${currentPlayer} wins!`, 'winner');
+                        resetGame();
+                    } else {
+                        currentPlayer = currentPlayer === 'X' ? 'O' : 'X';
+                    }
+                }
+            });
+        });
+        document.getElementById('restart-button').addEventListener('click', () => {
+            resetGame();
+        });
+        function checkWin() {
+            let winConditions = [
+                [0, 1, 2],
+                [3, 4, 5],
+                [6, 7, 8],
+                [0, 3, 6],
+                [1, 4, 7],
+                [2, 5, 8],
+                [0, 4, 8],
+                [2, 4, 6]
+            ];
+            for (let condition of winConditions) {
+                if (gameBoard[condition[0]] === gameBoard[condition[1]] &&
+                    gameBoard[condition[1]] === gameBoard[condition[2]] &&
+                    gameBoard[condition[0]] !== '') {
+                    return true;
+                }
+            }
+            return false;
+        }
+        function resetGame() {
+            gameBoard = ['', '', '', '', '', '', '', '', ''];
+            cells.forEach((cell) => {
+                cell.textContent = '';
+            });
+            currentPlayer = 'X';
+        }
+        function toast(message, type) {
+            let toastElement = document.createElement('div');
+            toastElement.textContent = message;
+            toastElement.className = type;
+            document.body.appendChild(toastElement);
+            setTimeout(() => {
+                toastElement.remove();
+            }, 3000);
+        }
+    </script>
+</body>
+</html>
