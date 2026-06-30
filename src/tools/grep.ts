@@ -1,7 +1,7 @@
 // src/tools/grep.ts — Tool definition for searching file contents.
 //
 // LAYER: tools
-// Allowed imports: config (nothing above — no agent/, ui/, or provider/)
+// Allowed imports: config (nothing above — no agent/, ui/, or sdk/)
 //
 // Shells out to the real `grep` binary rather than reimplementing
 // search in JS — using a battle-tested existing tool beats hand-rolling

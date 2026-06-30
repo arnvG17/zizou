@@ -3,7 +3,7 @@
  *
  * Layer: tools
  * Allowed imports: other files in tools/, config/
- * NOT allowed to import from: agent/, ui/, provider/
+ * NOT allowed to import from: agent/, ui/, sdk/
  *
  * Every tool gets its own file (e.g. read-file.ts, grep.ts) and is
  * re-exported from here. This is the single import point that the agent

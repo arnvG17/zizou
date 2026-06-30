@@ -3,7 +3,7 @@
  *
  * Layer: config
  * Allowed imports: none from within the project (this is the base layer).
- * NOT allowed to import from: tools/, context/, provider/, ui/, agent/.
+ * NOT allowed to import from: tools/, context/, sdk/, ui/, agent/.
  */
 
 import Conf from "conf";

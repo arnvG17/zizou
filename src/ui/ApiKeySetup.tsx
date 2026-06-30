@@ -11,7 +11,7 @@ import {
   setOllamaBaseUrl,
   getOllamaBaseUrl,
 } from "../config/api-keys.js";
-import { resolveModel, DEFAULT_MODELS } from "../provider/resolve-model.js";
+import { resolveModel, DEFAULT_MODELS } from "../sdk/resolve-model.js";
 
 interface ApiKeySetupProps {
   onComplete: () => void;

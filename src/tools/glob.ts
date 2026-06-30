@@ -1,7 +1,7 @@
 // src/tools/glob.ts — Tool definition for finding files by pattern.
 //
 // LAYER: tools
-// Allowed imports: config (nothing above — no agent/, ui/, or provider/)
+// Allowed imports: config (nothing above — no agent/, ui/, or sdk/)
 //
 // This is "Level 0" codebase context (see src/context/repo-map.ts for
 // the bigger picture of the levels). Instead of pre-computing anything

@@ -1,7 +1,7 @@
 /**
- * provider/index.ts — Model provider abstraction layer.
+ * sdk/index.ts — Model provider abstraction layer.
  *
- * Layer: provider
+ * Layer: sdk
  * Allowed imports: config/
  * NOT allowed to import from: agent/, ui/, tools/
  *

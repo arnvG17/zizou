@@ -2,7 +2,7 @@
  * read-file.ts — Tool definition for reading a file's contents from disk.
  *
  * Layer: tools
- * Allowed imports: config (nothing above — no agent/, ui/, or provider/)
+ * Allowed imports: config (nothing above — no agent/, ui/, or sdk/)
  *
  * This is the first tool in Zizou's toolbelt. An LLM agent uses it to inspect
  * files on the user's machine. The tool receives a file path from the model,

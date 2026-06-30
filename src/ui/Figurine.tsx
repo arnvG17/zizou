@@ -14,7 +14,7 @@
 
 import React, { useState, useEffect, useMemo } from "react";
 import { Box, Text, useStdout, useInput } from "ink";
-import { getActiveModelId } from "../provider/resolve-model.js";
+import { getActiveModelId } from "../sdk/resolve-model.js";
 import { getDefaultProvider } from "../config/api-keys.js";
 
 // ─── Brand colour ────────────────────────────────────────────────────────────
@@ -227,13 +227,29 @@ function SegmentRow({ segments }: { segments: Array<{ text: string; color: strin
 
 // ─── Wordmark Component ──────────────────────────────────────────────────────
 
-function Wordmark({ pixelChar, emptyChar, gap }: { pixelChar: string; emptyChar: string; gap: string }) {
+function getDitherChar(stage: number, px: string): string {
+  const isDouble = px === "██";
+  if (stage === 0) return isDouble ? "  " : " ";
+  if (stage === 1) return isDouble ? "░░" : "░";
+  if (stage === 2) return isDouble ? "▒▒" : "▒";
+  if (stage === 3) return isDouble ? "▓▓" : "▓";
+  return px; // stage 4 or more
+}
+
+function Wordmark({ pixelChar, emptyChar, gap, stage }: { pixelChar: string; emptyChar: string; gap: string; stage: number }) {
   const word = "ZIZOU";
   const rowCount = 10; // Expanded to 10 rows for the 1-row vertical drop shadow
   const colCount = 8;  // Expanded to 8 columns for the 1-col horizontal drop shadow
 
   const rows = useMemo(() => {
     const result: Array<Array<{ text: string; color: string | null }>> = [];
+    
+    // Resolve the dither pixel characters based on animation stage
+    const fgChar = getDitherChar(stage, pixelChar);
+    // Delay the drop shadow by 1 stage to make the depth pop dynamically
+    const shadowStage = Math.max(0, stage - 1);
+    const shChar = getDitherChar(shadowStage, pixelChar);
+
     for (let r = 0; r < rowCount; r++) {
       const segments: Array<{ text: string; color: string | null }> = [];
       for (let li = 0; li < word.length; li++) {
@@ -251,10 +267,10 @@ function Wordmark({ pixelChar, emptyChar, gap }: { pixelChar: string; emptyChar:
           let color: string | null = null;
 
           if (isForeground) {
-            char = pixelChar;
+            char = fgChar;
             color = BRAND; // Brand Blue Foreground
           } else if (isShadow) {
-            char = pixelChar;
+            char = shChar;
             color = "#D43B3B"; // Nintendo Red Drop Shadow
           }
 
@@ -279,7 +295,7 @@ function Wordmark({ pixelChar, emptyChar, gap }: { pixelChar: string; emptyChar:
       result.push(segments);
     }
     return result;
-  }, [pixelChar, emptyChar, gap]);
+  }, [pixelChar, emptyChar, gap, stage]);
 
   return (
     <Box flexDirection="column" alignItems="center">
@@ -292,7 +308,7 @@ function Wordmark({ pixelChar, emptyChar, gap }: { pixelChar: string; emptyChar:
 
 // ─── Sprite + Ball Component (Downsampled 15 rows high) ───────────────────────
 
-function SpriteWithBall({ px, empty }: { px: string; empty: string }) {
+function SpriteWithBall({ px, empty, stage }: { px: string; empty: string; stage: number }) {
   const frame = 0;
 
   const compositeRows = useMemo(() => {
@@ -303,6 +319,9 @@ function SpriteWithBall({ px, empty }: { px: string; empty: string }) {
     const miniSpriteH = 15;
     const canvasW = 13;
     const canvasH = 15;
+
+    // Resolve the dither pixel character for the sprite based on stage
+    const spritePx = getDitherChar(stage, px);
 
     // Create 13x15 grid
     const canvas: string[][] = Array.from({ length: canvasH }, () =>
@@ -347,8 +366,8 @@ function SpriteWithBall({ px, empty }: { px: string; empty: string }) {
       }
     }
 
-    return canvas.map((row) => buildPixelRow(row, SPRITE_COLORS, px, empty));
-  }, [frame, px, empty]);
+    return canvas.map((row) => buildPixelRow(row, SPRITE_COLORS, spritePx, empty));
+  }, [frame, px, empty, stage]);
 
   return (
     <Box flexDirection="column" alignItems="center">
@@ -401,6 +420,20 @@ export function Figurine() {
   const { cols, rows } = useTerminalSize();
   const mode = getFigurineSizeMode(cols);
 
+  const [stage, setStage] = useState(0);
+
+  useEffect(() => {
+    let currentStage = 0;
+    const timer = setInterval(() => {
+      currentStage += 1;
+      setStage(currentStage);
+      if (currentStage >= 4) {
+        clearInterval(timer);
+      }
+    }, 70); // 70ms * 4 stages = 280ms transition duration
+    return () => clearInterval(timer);
+  }, []);
+
   const activeModel = useMemo(() => {
     try {
       const provider = getDefaultProvider() || "groq";
@@ -451,10 +484,10 @@ export function Figurine() {
       <Box flexDirection="column" alignItems="center" gap={1}>
         {mode !== "text-only" && (
           <Box marginBottom={1}>
-            <SpriteWithBall px="██" empty="  " />
+            <SpriteWithBall px="██" empty="  " stage={stage} />
           </Box>
         )}
-        <Wordmark pixelChar={px} emptyChar={empty} gap={wordGap} />
+        <Wordmark pixelChar={px} emptyChar={empty} gap={wordGap} stage={stage} />
       </Box>
 
       {/* Status bar */}

@@ -9,8 +9,9 @@
 import React, { useState, useRef, useEffect, useMemo } from "react";
 import { Box, Text, useInput } from "ink";
 import TextInput from "ink-text-input";
+import pkg from "../../package.json";
 import type { ModelMessage } from "ai";
-import { resolveModel, getActiveModelId } from "../provider/resolve-model.js";
+import { resolveModel, getActiveModelId } from "../sdk/resolve-model.js";
 import { getDefaultProvider, ProviderChoice, getContextMode } from "../config/api-keys.js";
 import type { ConfirmFn } from "../tools/index.js";
 import { runTurn } from "../agent/run-turn.js";
@@ -476,7 +477,7 @@ export function Chat({ onChangeKeys }: ChatProps) {
             <Box flexDirection="row" gap={1} alignItems="center">
               <Text color="#5FB87A">●</Text>
               <Text color="#E6E6E6" bold>Zizou</Text>
-              <Text color="gray">1.0.0</Text>
+              <Text color="gray">{pkg.version}</Text>
             </Box>
           </Box>
         </Box>

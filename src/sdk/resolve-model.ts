@@ -1,7 +1,7 @@
 /**
  * resolve-model.ts — Resolves a LanguageModel instance based on configuration.
  *
- * Layer: provider
+ * Layer: sdk
  * Allowed imports: config/
  * NOT allowed to import from: tools/, ui/, agent/.
  */

@@ -11,7 +11,7 @@ import {
   setContextMode,
 } from "../config/api-keys.js";
 import { addPinnedFile, clearPinnedFiles } from "../context/build-system-prompt.js";
-import { getActiveModelId } from "../provider/resolve-model.js";
+import { getActiveModelId } from "../sdk/resolve-model.js";
 import { existsSync, readdirSync } from "fs";
 import { join } from "path";
 

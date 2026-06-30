@@ -3,7 +3,7 @@
  *
  * Layer: tools
  * Allowed imports: none (or standard library types)
- * NOT allowed to import from: agent/, ui/, provider/, or config/
+ * NOT allowed to import from: agent/, ui/, sdk/, or config/
  *
  * This file contains types that need to be shared across multiple tool definitions.
  */
