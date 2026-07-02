@@ -20,6 +20,7 @@ export async function* runPlanMode(
     const plan = await callPlanner(history, systemPrompt, model);
     state.pendingPlanItems = plan;
     state.itemRetries = {};
+    log.logPlanCreated(plan);
     yield { kind: "plan-created", plan };
   }
 
@@ -43,6 +44,7 @@ export async function* runPlanMode(
     // Process actionable items. To ensure UI gets live updates, we process them sequentially for now,
     // which satisfies the 1-3 parallel limit (1 is within 1-3).
     for (const item of actionable) {
+      log.logPlanItemStarted(item);
       yield { kind: "plan-item-started", item };
       
       let fileContent: string | null = null;
@@ -56,6 +58,7 @@ export async function* runPlanMode(
       const toolDef = tools[item.action];
       if (!toolDef) {
         item.status = 'failed';
+        log.logPlanItemFailed(item, `Tool ${item.action} not found`);
         yield { kind: "plan-item-failed", item, error: `Tool ${item.action} not found` };
         continue;
       }
@@ -64,16 +67,16 @@ export async function* runPlanMode(
       
       for await (const p of stream) {
         if (p.type === "tool-call") {
+          log.logToolCall(p.toolName, p.toolCallId, p.args);
           yield { kind: "tool-call", toolCallId: p.toolCallId, toolName: p.toolName, input: p.args };
-          
-          // Execute the tool since the executor just emits the call via streamText but we need to run it.
-          // Wait, callExecutor uses streamText with `tools` provided, so streamText WILL execute the tool 
-          // and yield the "tool-result". We don't need to manually execute it!
         } else if (p.type === "tool-result") {
+          log.logToolResult(p.toolName, p.toolCallId, p.result);
           yield { kind: "tool-result", toolCallId: p.toolCallId, toolName: p.toolName, output: p.result };
         } else if (p.type === "text-delta") {
+          log.logTextDelta(p.textDelta);
           yield { kind: "text-delta", text: p.textDelta };
         } else if (p.type === "tool-error") {
+          log.logToolError(p.toolName, p.toolCallId, p.error);
           yield { kind: "tool-error", toolCallId: p.toolCallId, toolName: p.toolName, error: p.error };
         }
       }
@@ -96,9 +99,11 @@ export async function* runPlanMode(
 
       if (success) {
         item.status = 'done';
+        log.logPlanItemVerified(item);
         yield { kind: "plan-item-verified", item };
       } else {
         item.status = 'failed';
+        log.logPlanItemFailed(item, errorMsg);
         state.itemRetries = state.itemRetries || {};
         state.itemRetries[item.id] = (state.itemRetries[item.id] || 0) + 1;
 
@@ -109,6 +114,7 @@ export async function* runPlanMode(
           const replanned = await callReplanner(item, errorMsg, history, model);
           const idx = state.pendingPlanItems.findIndex(i => i.id === item.id);
           state.pendingPlanItems.splice(idx, 1, ...replanned);
+          log.logReplanTriggered(item, replanned);
           yield { kind: "replan-triggered", item };
         }
       }
@@ -117,6 +123,7 @@ export async function* runPlanMode(
     hasPending = state.pendingPlanItems.some(i => i.status === 'pending');
   }
 
+  log.logTurnEnd();
   yield { kind: "turn-complete" };
-  return [...history]; 
+  return [...history];  
 }
