@@ -34,7 +34,12 @@ type LogEntry =
       duration?: string;
       status: "running" | "success" | "error";
     }
-  | { kind: "error"; text: string };
+  | { kind: "error"; text: string }
+  | { kind: "plan-created"; planLength: number }
+  | { kind: "plan-item-started"; itemId: string; action: string; target: string }
+  | { kind: "plan-item-verified"; itemId: string }
+  | { kind: "plan-item-failed"; itemId: string; error: string }
+  | { kind: "replan-triggered"; itemId: string };
 
 function formatDuration(ms: number): string {
   if (ms < 1000) {
@@ -337,6 +342,31 @@ export function Chat({ onChangeKeys }: ChatProps) {
               )
             );
           }
+        } else if (event.kind === "plan-created") {
+          setLog((l) => [
+            ...l,
+            { kind: "plan-created", planLength: event.plan.length }
+          ]);
+        } else if (event.kind === "plan-item-started") {
+          setLog((l) => [
+            ...l,
+            { kind: "plan-item-started", itemId: event.item.id, action: event.item.action, target: event.item.target }
+          ]);
+        } else if (event.kind === "plan-item-verified") {
+          setLog((l) => [
+            ...l,
+            { kind: "plan-item-verified", itemId: event.item.id }
+          ]);
+        } else if (event.kind === "plan-item-failed") {
+          setLog((l) => [
+            ...l,
+            { kind: "plan-item-failed", itemId: event.item.id, error: event.error }
+          ]);
+        } else if (event.kind === "replan-triggered") {
+          setLog((l) => [
+            ...l,
+            { kind: "replan-triggered", itemId: event.item.id }
+          ]);
         }
 
         result = await turn.next();
@@ -579,6 +609,41 @@ function LogLine({ entry }: { entry: LogEntry }) {
     return (
       <Box marginBottom={1}>
         <Text color="red">Error: {entry.text}</Text>
+      </Box>
+    );
+  }
+  if (entry.kind === "plan-created") {
+    return (
+      <Box marginBottom={1} paddingLeft={2} borderLeft={true} borderColor="#D08A4E">
+        <Text color="#D08A4E">Created execution plan with {entry.planLength} steps.</Text>
+      </Box>
+    );
+  }
+  if (entry.kind === "plan-item-started") {
+    return (
+      <Box marginBottom={1}>
+        <Text color="yellow">▶ Executing step: {entry.action} on {entry.target}</Text>
+      </Box>
+    );
+  }
+  if (entry.kind === "plan-item-verified") {
+    return (
+      <Box marginBottom={1}>
+        <Text color="#5FB87A">✔ Step verified.</Text>
+      </Box>
+    );
+  }
+  if (entry.kind === "plan-item-failed") {
+    return (
+      <Box marginBottom={1}>
+        <Text color="red">✖ Step failed: {entry.error}</Text>
+      </Box>
+    );
+  }
+  if (entry.kind === "replan-triggered") {
+    return (
+      <Box marginBottom={1}>
+        <Text color="#D08A4E">⚠ Replanning failed step...</Text>
       </Box>
     );
   }

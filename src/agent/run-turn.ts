@@ -38,12 +38,15 @@ import {
   type ConfirmFn,
 } from "../tools/index.js";
 import { TurnLogger } from "./debug/index.js";
-
+import { getContextMode } from "../config/api-keys.js";
+import { runPlanMode } from "./orchestrator.js";
 // ─── Event types emitted to whatever UI is listening ─────────────────────────
 //
 // We collapse the AI SDK's ~15 stream-part variants into 5 cases so the
 // UI layer stays simple. If the SDK adds new event types later, only
 // THIS file needs to learn about them.
+
+export type PlanItem = { id: string; action: string; target: string; spec: string; dependsOn?: string[]; status: 'pending' | 'done' | 'failed' };
 
 export type AgentEvent =
   | { kind: "text-delta"; text: string }
@@ -54,7 +57,12 @@ export type AgentEvent =
   | { kind: "finish"; usage?: { inputTokens: number; outputTokens: number } }
   | { kind: "auto-recovered"; toolName: string; summary: string }
   | { kind: "verification-failed"; message: string }
-  | { kind: "auto-continue"; message: string };
+  | { kind: "auto-continue"; message: string }
+  | { kind: "plan-created"; plan: PlanItem[] }
+  | { kind: "plan-item-started"; item: PlanItem }
+  | { kind: "plan-item-verified"; item: PlanItem }
+  | { kind: "plan-item-failed"; item: PlanItem; error: string }
+  | { kind: "replan-triggered"; item: PlanItem };
 
 // ─── Options ─────────────────────────────────────────────────────────────────
 
@@ -142,8 +150,6 @@ function extractAssistantText(msg: ModelMessage): string {
   return "";
 }
 
-type PlanItem = { action: string; target: string; status: 'pending' | 'done' | 'failed' };
-
 function isTaskShaped(text: string): boolean {
   return /(?:change|fix|create|move|refactor|split|add|delete)\b/i.test(text) || /\w+\.\w+/.test(text);
 }
@@ -156,6 +162,7 @@ function isTaskShaped(text: string): boolean {
 export interface RunTurnState {
   pendingPlanItems: PlanItem[];
   autoContinueCount: number;
+  itemRetries?: Record<string, number>;
 }
 
 export async function* runTurn(
@@ -201,6 +208,11 @@ export async function* runTurn(
     fileOperations,
   };
 
+  const mode = getContextMode();
+  if (mode === "plan") {
+    return yield* runPlanMode(history, systemPrompt || "", model, tools as any, state, log);
+  }
+
   // ── Call the LLM ───────────────────────────────────────────────────────
 
   const result = streamText({
@@ -241,12 +253,12 @@ export async function* runTurn(
         turnDidToolCall = true;
         if (p.toolName === "writeFile" || p.toolName === "editFile") {
           const target = (p.input as any).path || (p.input as any).targetFile || (p.input as any).target;
-          if (target) state.pendingPlanItems.push({ action: p.toolName, target, status: 'pending' });
+          if (target) state.pendingPlanItems.push({ id: Math.random().toString(36).slice(2), action: p.toolName, target, spec: "", status: 'pending' });
         } else if (p.toolName === "fileOperations") {
           const ops = (p.input as any).operations || [];
           for (const op of ops) {
             const target = op.path || op.targetFile || op.target;
-            if (target) state.pendingPlanItems.push({ action: "fileOperations", target, status: 'pending' });
+            if (target) state.pendingPlanItems.push({ id: Math.random().toString(36).slice(2), action: "fileOperations", target, spec: "", status: 'pending' });
           }
         }
         log.logToolCall(p.toolName, p.toolCallId, p.input);
@@ -313,12 +325,12 @@ export async function* runTurn(
       turnDidToolCall = true;
       if (rawToolCall.name === "writeFile" || rawToolCall.name === "editFile") {
         const target = rawToolCall.arguments.path || rawToolCall.arguments.targetFile || rawToolCall.arguments.target;
-        if (target) state.pendingPlanItems.push({ action: rawToolCall.name, target, status: 'pending' });
+        if (target) state.pendingPlanItems.push({ id: Math.random().toString(36).slice(2), action: rawToolCall.name, target, spec: "", status: 'pending' });
       } else if (rawToolCall.name === "fileOperations") {
         const ops = rawToolCall.arguments.operations || [];
         for (const op of ops) {
           const target = op.path || op.targetFile || op.target;
-          if (target) state.pendingPlanItems.push({ action: "fileOperations", target, status: 'pending' });
+          if (target) state.pendingPlanItems.push({ id: Math.random().toString(36).slice(2), action: "fileOperations", target, spec: "", status: 'pending' });
         }
       }
     }

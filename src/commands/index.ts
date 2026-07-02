@@ -270,7 +270,7 @@ export function handleSlashCommand(ctx: CommandContext): boolean {
 
   if (command === "context") {
     const mode = args[0]?.toLowerCase() as ContextMode | undefined;
-    const validModes: ContextMode[] = ["light", "default", "max"];
+    const validModes: ContextMode[] = ["light", "default", "max", "plan"];
 
     if (!mode || !validModes.includes(mode)) {
       const current = getContextMode();
@@ -279,7 +279,7 @@ export function handleSlashCommand(ctx: CommandContext): boolean {
         { kind: "user", text },
         {
           kind: "assistant",
-          text: `Current context mode: ${current}\nUsage: /context <mode>\nModes: ${validModes.join(", ")}\n\n  light   - Minimal prompt, no repo map (best for 3B/4B models)\n  default - Standard repo map\n  max     - Expanded repo map`,
+          text: `Current context mode: ${current}\nUsage: /context <mode>\nModes: ${validModes.join(", ")}\n\n  light   - Minimal prompt, no repo map (best for 3B/4B models)\n  default - Standard repo map\n  max     - Expanded repo map\n  plan    - Planner / Executor split (default)`,
         },
       ]);
       return true;

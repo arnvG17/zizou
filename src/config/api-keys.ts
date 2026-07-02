@@ -10,7 +10,7 @@ import Conf from "conf";
 
 export type ProviderChoice = "anthropic" | "openai" | "openrouter" | "google" | "groq" | "ollama";
 
-export type ContextMode = "light" | "default" | "max";
+export type ContextMode = "light" | "default" | "max" | "plan";
 
 interface ConfigSchema {
   apiKeys: {
@@ -35,7 +35,7 @@ const config = new Conf<ConfigSchema>({
   defaults: {
     apiKeys: {},
     providerModels: {},
-    contextMode: "default",
+    contextMode: "plan",
   },
 });
 
@@ -155,7 +155,7 @@ export function clearApiKeys(): void {
  * Retrieves the current context mode. Defaults to "default" if not set.
  */
 export function getContextMode(): ContextMode {
-  return config.get("contextMode") || "default";
+  return config.get("contextMode") || "plan";
 }
 
 /**
