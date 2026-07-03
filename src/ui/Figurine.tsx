@@ -15,7 +15,7 @@
 import React, { useState, useEffect, useMemo } from "react";
 import { Box, Text, useStdout, useInput } from "ink";
 import { getActiveModelId } from "../sdk/resolve-model.js";
-import { getDefaultProvider } from "../config/api-keys.js";
+import { getDefaultProvider, getContextMode } from "../config/api-keys.js";
 
 // ─── Brand colour ────────────────────────────────────────────────────────────
 const BRAND = "#3B5FE0";
@@ -417,8 +417,7 @@ export function SidebarWordmark() {
 // ─── Main Splash Component ───────────────────────────────────────────────────
 
 export function Figurine() {
-  const { cols, rows } = useTerminalSize();
-  const mode = getFigurineSizeMode(cols);
+  const { cols } = useTerminalSize();
 
   const [stage, setStage] = useState(0);
 
@@ -452,50 +451,173 @@ export function Figurine() {
     return full.replace(/\\/g, "/");
   }, []);
 
-  const px = mode === "tiny" ? "█" : "██";
-  const empty = mode === "tiny" ? " " : "  ";
-  const wordGap = mode === "tiny" ? " " : (mode === "compact" ? " " : "  ");
+  const provider = useMemo(() => {
+    return getDefaultProvider() || "groq";
+  }, []);
 
-  if (mode === "text-only") {
+  const username = process.env.USER || process.env.USERNAME || "developer";
+
+  if (cols < 80) {
     return (
       <Box flexDirection="column" paddingX={2} marginY={1}>
-        <Text color="#8A8F98">
-          Welcome to the <Text color={BRAND} bold>Zizou</Text> agent experience <Text color={BRAND}>*</Text>
-        </Text>
-        <Box marginTop={1}>
-          <Text color="#6B7280">
-            <Text color={BRAND}>{">"}</Text> {activeModel} · {cwd}
-          </Text>
+        <Box borderStyle="round" borderColor="#E06C45" padding={1} flexDirection="column">
+          <Text bold color="#E06C45">Welcome back!</Text>
+          <Text color="gray">{activeModel} · {cwd}</Text>
         </Box>
       </Box>
     );
   }
 
   return (
-    <Box flexDirection="column" alignItems="center" paddingX={2} marginY={1} width="100%">
-      {/* Welcome line */}
-      <Box marginBottom={1} width="100%" justifyContent="center">
-        <Text color="#8A8F98">
-          Welcome to the <Text color={BRAND}>Zizou</Text> agent experience <Text color={BRAND}>*</Text>
-        </Text>
-      </Box>
-
-      {/* Stacked Wordmark + Sprite */}
-      <Box flexDirection="column" alignItems="center" gap={1}>
-        {mode !== "text-only" && (
-          <Box marginBottom={1}>
+    <Box flexDirection="column" paddingX={2} marginY={1} width="100%">
+      {/* Main dashboard box */}
+      <Box
+        borderStyle="round"
+        borderColor="#E06C45"
+        paddingX={2}
+        paddingY={1}
+        flexDirection="row"
+        width="100%"
+      >
+        {/* Left Column: Welcome & Figurine Sprite & Wordmark */}
+        <Box flexDirection="column" flexGrow={2} flexBasis={0} justifyContent="center" alignItems="center">
+          <Text bold color="#E6E6E6">
+            Welcome back!
+          </Text>
+          <Box marginY={1}>
             <SpriteWithBall px="██" empty="  " stage={stage} />
           </Box>
-        )}
-        <Wordmark pixelChar={px} emptyChar={empty} gap={wordGap} stage={stage} />
-      </Box>
+          <Box marginBottom={1}>
+            <Wordmark pixelChar="█" emptyChar=" " gap=" " stage={stage} />
+          </Box>
+          <Box flexDirection="column" alignItems="center" marginBottom={1}>
+            <Text bold color="#3B5FE0">ZIZOU AI — Pair Programming Agent</Text>
+            <Text color="#E6E6E6">How can I help you today?</Text>
+            <Text color="gray">Ask me to edit files, run commands, or design features.</Text>
+          </Box>
+          <Text color="#3B5FE0">
+            {activeModel} ({getContextMode()} context) · Active Provider: {provider.toUpperCase()}
+          </Text>
+          <Text color="gray" dimColor>
+            {cwd}
+          </Text>
+        </Box>
 
-      {/* Status bar */}
-      <Box marginTop={1} width="100%" borderStyle="single" borderTop={true} borderBottom={false} borderLeft={false} borderRight={false} borderColor="rgba(255,255,255,0.08)" paddingTop={1} justifyContent="center">
-        <Text color="#6B7280">
-          <Text color={BRAND}>{">"}</Text> {activeModel} · {cwd}
-        </Text>
+        {/* Right Column: Tips & Updates */}
+        <Box
+          flexDirection="column"
+          flexGrow={1}
+          flexBasis={0}
+          paddingLeft={2}
+          borderStyle="single"
+          borderLeft={true}
+          borderRight={false}
+          borderTop={false}
+          borderBottom={false}
+          borderColor="gray"
+        >
+          {/* Section 1: Tips */}
+          <Box flexDirection="column" marginBottom={1}>
+            <Text bold color="#E06C45">
+              Tips for getting started
+            </Text>
+            <Text color="gray">Run /help to see all commands</Text>
+            <Text color="gray">Type /context to toggle repo map</Text>
+          </Box>
+
+          {/* Section 2: What's new */}
+          <Box flexDirection="column" marginBottom={1}>
+            <Text bold color="#E06C45">
+              What's new
+            </Text>
+            <Text color="gray">Added / autocomplete menu</Text>
+            <Text color="gray">Use Arrow keys to select</Text>
+            <Text color="gray">Press Tab/Enter to autocomplete</Text>
+            <Box height={1} />
+            <Text color="#3B5FE0">
+              Type <Text bold color="#3B5FE0">/</Text> in the chat input below to try it out.
+            </Text>
+            <Text color="gray" dimColor>
+              Run <Text bold color="#3B5FE0">/settings</Text> to manage API keys.
+            </Text>
+          </Box>
+
+          {/* Section 3: Autocomplete Controls */}
+          <Box flexDirection="column">
+            <Text bold color="#E06C45">
+              Autocomplete Controls
+            </Text>
+            <Text color="gray">Type / to open suggestions</Text>
+            <Text color="gray">• Up/Down to navigate list</Text>
+            <Text color="gray">• Tab/Enter to select item</Text>
+            <Text color="gray">• Escape to close popup</Text>
+          </Box>
+        </Box>
       </Box>
+    </Box>
+  );
+}
+
+export function SidebarMountains() {
+  const grid = [
+    "............w.............",
+    "...........www............",
+    "..........wwwoo...........",
+    ".........wwwooobb.........",
+    "........wwwooobbbb........",
+    "...w...wwwooobbbbbb...w...",
+    "..wwo.wwwooobbbbbbbb.wwo..",
+    ".wwwo.wwooobbbbbbbbb.wwo..",
+    "wwwwowwwooobbbbbbbbbwwwo..",
+    "..t.t..tt.t.tt.t.tt..t.t..",
+    "tttttttttttttttttttttttttt",
+  ];
+
+  const colors: Record<string, string> = {
+    w: "#FFFFFF", // Snow
+    o: "#E06C45", // Orange rock
+    b: "#3B5FE0", // Blue shadow
+    t: "#1D2330", // Dark tree green/gray
+  };
+
+  return (
+    <Box flexDirection="column" alignItems="center">
+      {grid.map((line, r) => {
+        const segments: Array<{ text: string; color: string | null }> = [];
+        let currentText = "";
+        let currentColor: string | null = null;
+
+        for (let c = 0; c < line.length; c++) {
+          const ch = line[c];
+          const color = colors[ch] ?? null;
+          const char = ch === "." ? " " : "█";
+
+          if (color === currentColor) {
+            currentText += char;
+          } else {
+            if (currentText) {
+              segments.push({ text: currentText, color: currentColor });
+            }
+            currentColor = color;
+            currentText = char;
+          }
+        }
+        if (currentText) {
+          segments.push({ text: currentText, color: currentColor });
+        }
+
+        return (
+          <Text key={r}>
+            {segments.map((seg, i) =>
+              seg.color ? (
+                <Text key={i} color={seg.color}>{seg.text}</Text>
+              ) : (
+                <Text key={i}>{seg.text}</Text>
+              )
+            )}
+          </Text>
+        );
+      })}
     </Box>
   );
 }

@@ -15,6 +15,33 @@ import { getActiveModelId } from "../sdk/resolve-model.js";
 import { existsSync, readdirSync } from "fs";
 import { join } from "path";
 
+export interface SlashCommandInfo {
+  command: string;
+  description: string;
+}
+
+export const SLASH_COMMANDS: SlashCommandInfo[] = [
+  { command: "/settings", description: "Modify agent configuration (aliases: /keys)" },
+  { command: "/model", description: "Switch provider and/or set custom model name" },
+  { command: "/modelid", description: "Set custom model ID for the active provider" },
+  { command: "/ollama", description: "Set the Ollama base URL" },
+  { command: "/context", description: "Set context mode (light, default, max)" },
+  { command: "/add", description: "Pin a file's contents permanently to context" },
+  { command: "/file", description: "Pin a file's contents permanently to context (alias: /add)" },
+  { command: "/prompt", description: "Dump the full system prompt sent to LLM" },
+  { command: "/skills", description: "List available custom agent skills" },
+  { command: "/clear", description: "Reset conversation history & start new session" },
+  { command: "/help", description: "Show available commands & active provider" },
+  { command: "/exit", description: "Close Zizou" },
+];
+
+export const WELCOME_MESSAGE = `\x1b[1m\x1b[38;2;59;95;224mZIZOU AI — Pair Programming Agent\x1b[0m
+
+\x1b[1m\x1b[38;5;208mHow can I help you today?\x1b[0m
+Ask me to edit files, run commands, or design features.
+
+Type \x1b[38;2;59;95;224m/help\x1b[0m for all settings. Let's create something cool!`;
+
 // Types matching the Chat UI state
 export type LogEntry =
   | { kind: "user"; text: string }
@@ -39,7 +66,7 @@ const SHORT_LABELS: Record<ProviderChoice, string> = {
   ollama: "Ollama (local)",
 };
 
-function getSkills(): string[] {
+export function getSkills(): string[] {
   const skills: string[] = [];
   const globalPath = "C:\\Users\\Arnv\\.gemini\\config\\skills";
   const localPath = join(process.cwd(), ".agents", "skills");
@@ -69,6 +96,7 @@ export interface CommandContext {
   systemPrompt: string;
   systemPromptText: string;
   onChangeKeys?: () => void;
+  onSelectModel?: () => void;
   onContextChange?: () => void;
   setLog: (updater: (prev: LogEntry[]) => LogEntry[]) => void;
   setTokenStats: (stats: any) => void;
@@ -134,14 +162,12 @@ export function handleSlashCommand(ctx: CommandContext): boolean {
     ctx.history.current = [];
     clearPinnedFiles();
     const provider = getDefaultProvider() || "groq";
-    ctx.setLog((_l: LogEntry[]) => [
-      { kind: "assistant", text: "Conversation history and pinned files cleared. Starting a new session." },
-    ]);
+    ctx.setLog((_l: LogEntry[]) => []);
     ctx.setTokenStats(ctx.calculateTokenStats([], ctx.systemPrompt, undefined, provider));
     return true;
   }
 
-  if (command === "keys") {
+  if (command === "keys" || command === "settings") {
     if (ctx.onChangeKeys) {
       ctx.onChangeKeys();
     }
@@ -171,6 +197,10 @@ export function handleSlashCommand(ctx: CommandContext): boolean {
     const customModel = args[1]; // optional second arg: specific model name
 
     if (!choice) {
+      if (ctx.onSelectModel) {
+        ctx.onSelectModel();
+        return true;
+      }
       // Show current state
       const provider = getDefaultProvider() || "groq";
       const modelId = getActiveModelId(provider);
@@ -313,13 +343,13 @@ export function handleSlashCommand(ctx: CommandContext): boolean {
     return true;
   }
 
-  if (command === "add") {
+  if (command === "add" || command === "file") {
     const filePath = args.join(" ");
     if (!filePath) {
       ctx.setLog((l: LogEntry[]) => [
         ...l,
         { kind: "user", text },
-        { kind: "assistant", text: "Usage: /add <filepath>\nPins a file to the system prompt so the AI always has its contents in context." },
+        { kind: "assistant", text: `Usage: /${command} <filepath>\nPins a file to the system prompt so the AI always has its contents in context.` },
       ]);
       return true;
     }

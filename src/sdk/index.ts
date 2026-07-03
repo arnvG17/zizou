@@ -48,8 +48,8 @@ const groq = createGroq({
 export function getModel(provider: ProviderName = "openrouter") {
   switch (provider) {
     case "google":
-      // Using Gemini 2.0 Flash
-      return google("gemini-2.0-flash");
+      // Using Gemini 2.5 Flash
+      return google("gemini-2.5-flash");
     case "groq":
       // Using LLaMA 3.3 70B on Groq
       return groq("llama-3.3-70b-versatile");

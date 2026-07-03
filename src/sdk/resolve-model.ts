@@ -25,7 +25,7 @@ export const DEFAULT_MODELS: Record<ProviderChoice, string> = {
   anthropic: "claude-3-5-sonnet-latest",
   openrouter: "google/gemma-3-27b-it:free",
   openai: "gpt-4o",
-  google: "gemini-2.0-flash",
+  google: "gemini-2.5-flash",
   groq: "llama-3.3-70b-versatile",
   ollama: "llama3",
 };

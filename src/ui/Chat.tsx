@@ -12,12 +12,63 @@ import TextInput from "ink-text-input";
 import pkg from "../../package.json";
 import type { ModelMessage } from "ai";
 import { resolveModel, getActiveModelId } from "../sdk/resolve-model.js";
-import { getDefaultProvider, ProviderChoice, getContextMode } from "../config/api-keys.js";
+import {
+  getDefaultProvider,
+  setDefaultProvider,
+  setProviderModel,
+  ProviderChoice,
+  getContextMode,
+} from "../config/api-keys.js";
 import type { ConfirmFn } from "../tools/index.js";
 import { runTurn } from "../agent/run-turn.js";
 import { buildSystemPrompt } from "../context/build-system-prompt.js";
-import { useTerminalSize, SidebarWordmark } from "./Figurine.js";
-import { handleSlashCommand } from "../commands/index.js";
+import { buildRepoMap } from "../context/repo-map.js";
+import { useTerminalSize, SidebarWordmark, SidebarMountains } from "./Figurine.js";
+import { handleSlashCommand, SLASH_COMMANDS, WELCOME_MESSAGE, getSkills } from "../commands/index.js";
+import { readdirSync, statSync } from "fs";
+import { join, relative } from "path";
+
+const PROVIDERS: ProviderChoice[] = ["groq", "google", "openrouter", "anthropic", "openai", "ollama"];
+
+const SHORT_LABELS: Record<ProviderChoice, string> = {
+  groq: "Groq",
+  google: "Google Gemini",
+  openrouter: "OpenRouter",
+  anthropic: "Anthropic",
+  openai: "OpenAI",
+  ollama: "Ollama (local)",
+};
+
+const COMMON_MODELS: Record<ProviderChoice, string[]> = {
+  groq: ["llama-3.3-70b-versatile", "mixtral-8x7b-32768", "llama-3.1-8b-instant", "gemma2-9b-it"],
+  google: ["gemini-2.0-flash", "gemini-1.5-pro", "gemini-1.5-flash"],
+  openrouter: ["google/gemma-3-27b-it:free", "meta-llama/llama-3.3-70b-instruct:free", "deepseek/deepseek-chat"],
+  anthropic: ["claude-3-5-sonnet-latest", "claude-3-5-haiku-latest", "claude-3-opus-20240229"],
+  openai: ["gpt-4o", "gpt-4o-mini", "o1-mini"],
+  ollama: ["llama3", "mistral", "phi3"],
+};
+
+interface ModelOption {
+  label: string;
+  provider: ProviderChoice;
+  modelId: string;
+}
+
+const MODEL_OPTIONS: ModelOption[] = [
+  { label: "LLaMA 3.3 70B (Groq)", provider: "groq", modelId: "llama-3.3-70b-versatile" },
+  { label: "Mixtral 8x7B (Groq)", provider: "groq", modelId: "mixtral-8x7b-32768" },
+  { label: "LLaMA 3.1 8B (Groq)", provider: "groq", modelId: "llama-3.1-8b-instant" },
+  { label: "Gemini 2.5 Flash (Google)", provider: "google", modelId: "gemini-2.5-flash" },
+  { label: "Gemini 2.5 Pro (Google)", provider: "google", modelId: "gemini-2.5-pro" },
+  { label: "Claude 3.5 Sonnet (Anthropic)", provider: "anthropic", modelId: "claude-3-5-sonnet-latest" },
+  { label: "Claude 3.5 Haiku (Anthropic)", provider: "anthropic", modelId: "claude-3-5-haiku-latest" },
+  { label: "GPT-4o (OpenAI)", provider: "openai", modelId: "gpt-4o" },
+  { label: "GPT-4o Mini (OpenAI)", provider: "openai", modelId: "gpt-4o-mini" },
+  { label: "Gemma 3 27B (OpenRouter - Free)", provider: "openrouter", modelId: "google/gemma-3-27b-it:free" },
+  { label: "LLaMA 3.3 70B (OpenRouter - Free)", provider: "openrouter", modelId: "meta-llama/llama-3.3-70b-instruct:free" },
+  { label: "LLaMA 3 (Ollama - Local)", provider: "ollama", modelId: "llama3" },
+  { label: "Mistral (Ollama - Local)", provider: "ollama", modelId: "mistral" },
+];
 
 // --- Types for our scrolling log ---
 type LogEntry =
@@ -122,6 +173,25 @@ function calculateTokenStats(
   };
 }
 
+function getAllFilesRecursively(dir: string, rootDir: string): string[] {
+  const files: string[] = [];
+  const skip = new Set(["node_modules", ".git", "dist", "build", ".next", "coverage"]);
+  try {
+    const entries = readdirSync(dir);
+    for (const entry of entries) {
+      if (skip.has(entry)) continue;
+      const full = join(dir, entry);
+      const stat = statSync(full);
+      if (stat.isDirectory()) {
+        files.push(...getAllFilesRecursively(full, rootDir));
+      } else {
+        files.push(relative(rootDir, full).replace(/\\/g, "/"));
+      }
+    }
+  } catch {}
+  return files;
+}
+
 export interface ChatProps {
   onChangeKeys?: () => void;
 }
@@ -135,8 +205,14 @@ export function Chat({ onChangeKeys }: ChatProps) {
     resolve: (approved: boolean) => void;
   } | null>(null);
 
+  const [isSelectingModel, setIsSelectingModel] = useState(false);
+  const [modelSelectStep, setModelSelectStep] = useState<"choose-provider" | "choose-model" | "enter-custom-model">("choose-model");
+  const [selectedProvider, setSelectedProvider] = useState<ProviderChoice>("groq");
+  const [selectedModelIndex, setSelectedModelIndex] = useState(0);
+  const [customModelInput, setCustomModelInput] = useState("");
+
   const { cols } = useTerminalSize();
-  const showSidebar = cols >= 90;
+  const showSidebar = cols >= 90 && log.length > 0;
 
   const sessionId = useMemo(() => {
     const d = new Date();
@@ -157,6 +233,7 @@ export function Chat({ onChangeKeys }: ChatProps) {
   const systemPromptRef = useRef<string>("");
   const [contextReady, setContextReady] = useState(false);
   const [systemPromptText, setSystemPromptText] = useState<string>("");
+  const [repoMap, setRepoMap] = useState<string>("");
 
   const [tokenStats, setTokenStats] = useState({
     inputTokens: 0,
@@ -175,6 +252,10 @@ export function Chat({ onChangeKeys }: ChatProps) {
       const provider = getDefaultProvider() || "groq";
       setTokenStats(calculateTokenStats(history.current, prompt, undefined, provider));
     });
+    try {
+      const map = buildRepoMap(process.cwd());
+      setRepoMap(map);
+    } catch {}
   }, []);
 
   const confirmFn: ConfirmFn = (description) => {
@@ -183,19 +264,335 @@ export function Chat({ onChangeKeys }: ChatProps) {
     });
   };
 
-  useInput((inputChar) => {
-    if (pendingConfirm) {
+  // Load workspace files and available skills list
+  const allFilesRef = useRef<string[]>([]);
+  const [availableSkills, setAvailableSkills] = useState<string[]>([]);
+
+  useEffect(() => {
+    try {
+      allFilesRef.current = getAllFilesRecursively(process.cwd(), process.cwd());
+    } catch {}
+    try {
+      setAvailableSkills(getSkills());
+    } catch {}
+  }, []);
+
+  // Autocomplete popup state
+  const [selectedIndex, setSelectedIndex] = useState(0);
+  const [scrollOffset, setScrollOffset] = useState(0);
+  const [closedSuggestions, setClosedSuggestions] = useState(false);
+
+  // If input doesn't start with / or is reset, reset closedSuggestions
+  useEffect(() => {
+    if (!input.startsWith("/")) {
+      setClosedSuggestions(false);
+    }
+  }, [input]);
+
+  const showSuggestions = input.startsWith("/") && !closedSuggestions;
+
+  const suggestionMode = useMemo(() => {
+    if (!showSuggestions) return null;
+    if (input.startsWith("/file ") || input.startsWith("/add ")) return "files";
+    if (input.startsWith("/skills ")) return "skills";
+    if (input.startsWith("/model ")) {
+      const parts = input.trim().split(/\s+/);
+      if (parts.length === 2 && input.endsWith(" ")) {
+        return "model-names";
+      }
+      if (parts.length > 2) {
+        return "model-names";
+      }
+      return "model-providers";
+    }
+    if (input.includes(" ")) return null; // normal typing, no autocomplete
+    return "commands";
+  }, [input, showSuggestions]);
+
+  const filteredCommands = useMemo(() => {
+    if (suggestionMode !== "commands") return [];
+    return SLASH_COMMANDS.filter((cmd) =>
+      cmd.command.toLowerCase().startsWith(input.toLowerCase())
+    );
+  }, [input, suggestionMode]);
+
+  const fileSearchQuery = useMemo(() => {
+    if (input.startsWith("/file ")) return input.slice("/file ".length).trim();
+    if (input.startsWith("/add ")) return input.slice("/add ".length).trim();
+    return "";
+  }, [input]);
+
+  const filteredFiles = useMemo(() => {
+    if (suggestionMode !== "files") return [];
+    return allFilesRef.current
+      .filter((file) => file.toLowerCase().includes(fileSearchQuery.toLowerCase()))
+      .slice(0, 30);
+  }, [suggestionMode, fileSearchQuery]);
+
+  const skillSearchQuery = useMemo(() => {
+    if (input.startsWith("/skills ")) return input.slice("/skills ".length).trim();
+    return "";
+  }, [input]);
+
+  const filteredSkills = useMemo(() => {
+    if (suggestionMode !== "skills") return [];
+    return availableSkills
+      .filter((skill) => skill.toLowerCase().includes(skillSearchQuery.toLowerCase()))
+      .slice(0, 30);
+  }, [suggestionMode, skillSearchQuery, availableSkills]);
+
+  const providerSearchQuery = useMemo(() => {
+    if (!input.startsWith("/model ")) return "";
+    const parts = input.split(/\s+/);
+    return parts[1] || "";
+  }, [input]);
+
+  const filteredProviders = useMemo(() => {
+    if (suggestionMode !== "model-providers") return [];
+    return PROVIDERS.filter((p) => p.startsWith(providerSearchQuery.toLowerCase()));
+  }, [suggestionMode, providerSearchQuery]);
+
+  const modelSearchQuery = useMemo(() => {
+    if (!input.startsWith("/model ")) return { provider: "", query: "" };
+    const parts = input.split(/\s+/);
+    const provider = parts[1] || "";
+    const query = parts[2] || "";
+    return { provider: provider.toLowerCase(), query: query.toLowerCase() };
+  }, [input]);
+
+  const filteredModelNames = useMemo(() => {
+    if (suggestionMode !== "model-names") return [];
+    const { provider, query } = modelSearchQuery;
+    const models = COMMON_MODELS[provider as ProviderChoice] || [];
+    return models.filter((m) => m.toLowerCase().includes(query));
+  }, [suggestionMode, modelSearchQuery]);
+
+  const activeSuggestions = useMemo(() => {
+    if (suggestionMode === "commands") {
+      return filteredCommands.map((c) => ({ value: c.command, description: c.description }));
+    }
+    if (suggestionMode === "files") {
+      return filteredFiles.map((f) => ({ value: f, description: "file" }));
+    }
+    if (suggestionMode === "skills") {
+      return filteredSkills.map((s) => ({ value: s, description: "agent skill" }));
+    }
+    if (suggestionMode === "model-providers") {
+      return filteredProviders.map((p) => ({ value: p, description: "provider" }));
+    }
+    if (suggestionMode === "model-names") {
+      return filteredModelNames.map((m) => ({ value: m, description: "model" }));
+    }
+    return [];
+  }, [suggestionMode, filteredCommands, filteredFiles, filteredSkills, filteredProviders, filteredModelNames]);
+
+  const completedValue = useMemo(() => {
+    if (activeSuggestions.length === 0 || selectedIndex >= activeSuggestions.length) return "";
+    const selected = activeSuggestions[selectedIndex].value;
+    if (suggestionMode === "commands") {
+      return selected + " ";
+    }
+    if (suggestionMode === "files") {
+      const prefix = input.startsWith("/file ") ? "/file " : "/add ";
+      return prefix + selected + " ";
+    }
+    if (suggestionMode === "skills") {
+      return "/skills " + selected + " ";
+    }
+    if (suggestionMode === "model-providers") {
+      return "/model " + selected + " ";
+    }
+    if (suggestionMode === "model-names") {
+      const provider = modelSearchQuery.provider;
+      return `/model ${provider} ${selected} `;
+    }
+    return "";
+  }, [input, suggestionMode, activeSuggestions, selectedIndex, modelSearchQuery]);
+
+  // Reset indices when filtered list changes
+  useEffect(() => {
+    setSelectedIndex(0);
+    setScrollOffset(0);
+  }, [activeSuggestions.length]);
+
+  const MAX_VISIBLE_SUGGESTIONS = 6;
+
+  // Sync scrollOffset when selectedIndex changes
+  useEffect(() => {
+    if (activeSuggestions.length === 0) return;
+    if (selectedIndex < scrollOffset) {
+      setScrollOffset(selectedIndex);
+    } else if (selectedIndex >= scrollOffset + MAX_VISIBLE_SUGGESTIONS) {
+      setScrollOffset(selectedIndex - MAX_VISIBLE_SUGGESTIONS + 1);
+    }
+  }, [selectedIndex, activeSuggestions.length, scrollOffset]);
+
+  const visibleCommands = useMemo(() => {
+    return activeSuggestions.slice(scrollOffset, scrollOffset + MAX_VISIBLE_SUGGESTIONS);
+  }, [activeSuggestions, scrollOffset]);
+
+  const remainingBelow = activeSuggestions.length - (scrollOffset + MAX_VISIBLE_SUGGESTIONS);
+
+  // Ref to always access the latest values inside useInput
+  const inputStateRef = useRef({
+    pendingConfirm,
+    showSuggestions,
+    activeSuggestions,
+    selectedIndex,
+    completedValue,
+    isSelectingModel,
+    modelSelectStep,
+    selectedProvider,
+    selectedModelIndex,
+    customModelInput,
+    suggestionMode,
+  });
+  inputStateRef.current = {
+    pendingConfirm,
+    showSuggestions,
+    activeSuggestions,
+    selectedIndex,
+    completedValue,
+    isSelectingModel,
+    modelSelectStep,
+    selectedProvider,
+    selectedModelIndex,
+    customModelInput,
+    suggestionMode,
+  };
+
+  useInput((inputChar, key) => {
+    const state = inputStateRef.current;
+    if (state.pendingConfirm) {
       if (inputChar.toLowerCase() === "y") {
-        pendingConfirm.resolve(true);
+        state.pendingConfirm.resolve(true);
         setPendingConfirm(null);
       } else if (inputChar.toLowerCase() === "n") {
-        pendingConfirm.resolve(false);
+        state.pendingConfirm.resolve(false);
         setPendingConfirm(null);
+      }
+      return;
+    }
+
+    if (state.isSelectingModel) {
+      if (state.modelSelectStep === "choose-model") {
+        if (key.downArrow) {
+          setSelectedModelIndex((prev) => (prev + 1) % (MODEL_OPTIONS.length + 1));
+        } else if (key.upArrow) {
+          setSelectedModelIndex((prev) => (prev - 1 + MODEL_OPTIONS.length + 1) % (MODEL_OPTIONS.length + 1));
+        } else if (key.return) {
+          if (state.selectedModelIndex < MODEL_OPTIONS.length) {
+            const option = MODEL_OPTIONS[state.selectedModelIndex];
+            setDefaultProvider(option.provider);
+            setProviderModel(option.provider, option.modelId);
+            setLog((l) => [
+              ...l,
+              { kind: "assistant", text: `Switched provider to ${SHORT_LABELS[option.provider]} and model to ${option.modelId}` },
+            ]);
+            setIsSelectingModel(false);
+          } else {
+            setModelSelectStep("choose-provider");
+            setSelectedProvider("groq");
+          }
+        } else if (key.escape) {
+          setIsSelectingModel(false);
+        }
+      } else if (state.modelSelectStep === "choose-provider") {
+        if (key.downArrow) {
+          setSelectedProvider((prev) => {
+            const idx = PROVIDERS.indexOf(prev);
+            return PROVIDERS[(idx + 1) % PROVIDERS.length];
+          });
+        } else if (key.upArrow) {
+          setSelectedProvider((prev) => {
+            const idx = PROVIDERS.indexOf(prev);
+            return PROVIDERS[(idx - 1 + PROVIDERS.length) % PROVIDERS.length];
+          });
+        } else if (key.return) {
+          setModelSelectStep("enter-custom-model");
+          setCustomModelInput("");
+        } else if (key.escape) {
+          setModelSelectStep("choose-model");
+          setSelectedModelIndex(0);
+        }
+      } else if (state.modelSelectStep === "enter-custom-model") {
+        if (key.escape) {
+          setModelSelectStep("choose-model");
+          setSelectedModelIndex(0);
+        }
+      }
+      return;
+    }
+
+    if (state.showSuggestions && state.activeSuggestions.length > 0) {
+      if (key.downArrow) {
+        setSelectedIndex((prev) => (prev + 1) % state.activeSuggestions.length);
+      } else if (key.upArrow) {
+        setSelectedIndex((prev) => (prev - 1 + state.activeSuggestions.length) % state.activeSuggestions.length);
+      } else if (key.tab) {
+        setInput(state.completedValue);
+      } else if (key.escape) {
+        setClosedSuggestions(true);
       }
     }
   });
 
   async function handleSubmit(userText: string) {
+    if (showSuggestions && activeSuggestions.length > 0) {
+      const selected = activeSuggestions[selectedIndex].value;
+      const cmdToRun = completedValue.trim();
+
+      let shouldExecute = false;
+
+      if (suggestionMode === "commands") {
+        const executableCommands = [
+          "/settings", "/keys", "/clear", "/reset", "/exit", "/quit", "/prompt", "/skills", "/help", "/model"
+        ];
+        if (executableCommands.includes(selected)) {
+          shouldExecute = true;
+        }
+      } else if (suggestionMode === "files" || suggestionMode === "skills") {
+        shouldExecute = true;
+      }
+
+      if (shouldExecute) {
+        setInput("");
+        const isCommand = handleSlashCommand({
+          userText: cmdToRun,
+          history,
+          systemPrompt: systemPromptRef.current,
+          systemPromptText,
+          onChangeKeys,
+          onSelectModel: () => {
+            setIsSelectingModel(true);
+            setModelSelectStep("choose-model");
+            setSelectedModelIndex(0);
+          },
+          onContextChange: () => {
+            setContextReady(false);
+            buildSystemPrompt(process.cwd()).then((prompt) => {
+              systemPromptRef.current = prompt;
+              setSystemPromptText(prompt);
+              setContextReady(true);
+              const provider = getDefaultProvider() || "groq";
+              setTokenStats(calculateTokenStats(history.current, prompt, undefined, provider));
+            });
+            try {
+              const map = buildRepoMap(process.cwd());
+              setRepoMap(map);
+            } catch {}
+          },
+          setLog,
+          setTokenStats,
+          calculateTokenStats,
+        });
+        return;
+      }
+
+      setInput(completedValue);
+      return;
+    }
+
     if (!userText.trim()) return;
     setInput("");
 
@@ -207,6 +604,11 @@ export function Chat({ onChangeKeys }: ChatProps) {
       systemPrompt: systemPromptRef.current,
       systemPromptText,
       onChangeKeys,
+      onSelectModel: () => {
+        setIsSelectingModel(true);
+        setModelSelectStep("choose-model");
+        setSelectedModelIndex(0);
+      },
       onContextChange: () => {
         setContextReady(false);
         buildSystemPrompt(process.cwd()).then((prompt) => {
@@ -216,6 +618,10 @@ export function Chat({ onChangeKeys }: ChatProps) {
           const provider = getDefaultProvider() || "groq";
           setTokenStats(calculateTokenStats(history.current, prompt, undefined, provider));
         });
+        try {
+          const map = buildRepoMap(process.cwd());
+          setRepoMap(map);
+        } catch {}
       },
       setLog,
       setTokenStats,
@@ -380,9 +786,123 @@ export function Chat({ onChangeKeys }: ChatProps) {
             </Box>
           ) : !contextReady ? (
             <Text dimColor>Scanning project for context…</Text>
+          ) : isSelectingModel ? (
+            <Box flexDirection="column" borderStyle="round" borderColor="#3B5FE0" paddingX={1} paddingY={1} backgroundColor="#15171C">
+              {modelSelectStep === "choose-model" && (
+                <Box flexDirection="column">
+                  <Text bold color="white">Select Active Model</Text>
+                  <Text color="gray">(↑/↓ to select, Enter to confirm, Esc to cancel)</Text>
+                  <Box flexDirection="column" marginTop={1}>
+                    {MODEL_OPTIONS.map((opt, idx) => {
+                      const isSel = idx === selectedModelIndex;
+                      return (
+                        <Text key={opt.label} color={isSel ? "#3B5FE0" : undefined} bold={isSel}>
+                          {isSel ? "❯ " : "  "}
+                          {opt.label}
+                        </Text>
+                      );
+                    })}
+                    <Text color={selectedModelIndex === MODEL_OPTIONS.length ? "#3B5FE0" : undefined} bold={selectedModelIndex === MODEL_OPTIONS.length}>
+                      {selectedModelIndex === MODEL_OPTIONS.length ? "❯ " : "  "}
+                      Custom model...
+                    </Text>
+                  </Box>
+                </Box>
+              )}
+              {modelSelectStep === "choose-provider" && (
+                <Box flexDirection="column">
+                  <Text bold color="white">Select Provider for Custom Model</Text>
+                  <Text color="gray">(↑/↓ to select, Enter to confirm, Esc to go back)</Text>
+                  <Box flexDirection="column" marginTop={1}>
+                    {PROVIDERS.map((p) => {
+                      const isSel = p === selectedProvider;
+                      return (
+                        <Text key={p} color={isSel ? "#3B5FE0" : undefined} bold={isSel}>
+                          {isSel ? "❯ " : "  "}
+                          {SHORT_LABELS[p]}
+                        </Text>
+                      );
+                    })}
+                  </Box>
+                </Box>
+              )}
+              {modelSelectStep === "enter-custom-model" && (
+                <Box flexDirection="column">
+                  <Text bold color="white">Enter Custom Model Name for {SHORT_LABELS[selectedProvider]}</Text>
+                  <Text color="gray">(Enter to confirm, Esc to go back)</Text>
+                  <Box marginTop={1} flexDirection="row">
+                    <Text color="#3B5FE0" bold>❯ </Text>
+                    <TextInput
+                      value={customModelInput}
+                      onChange={setCustomModelInput}
+                      onSubmit={(val) => {
+                        const modelName = val.trim();
+                        if (modelName) {
+                          setDefaultProvider(selectedProvider);
+                          setProviderModel(selectedProvider, modelName);
+                          setLog((l) => [
+                            ...l,
+                            { kind: "assistant", text: `Switched provider to ${SHORT_LABELS[selectedProvider]} and model to ${modelName}` },
+                          ]);
+                          setIsSelectingModel(false);
+                        }
+                      }}
+                    />
+                  </Box>
+                </Box>
+              )}
+            </Box>
           ) : (
             <Box flexDirection="column">
-              <Box borderStyle="round" borderColor="#3B5FE0" paddingX={1} backgroundColor="#15171C">
+              {showSuggestions && activeSuggestions.length > 0 && (
+                <Box
+                  flexDirection="column"
+                  borderStyle="round"
+                  borderColor="gray"
+                  backgroundColor="#15171C"
+                  paddingY={0}
+                  paddingX={0}
+                  marginBottom={1}
+                >
+                  {scrollOffset > 0 && (
+                    <Box paddingX={1} paddingY={0}>
+                      <Text color="gray">
+                        {"  "}▲ {scrollOffset} more
+                      </Text>
+                    </Box>
+                  )}
+                  {visibleCommands.map((cmd, idx) => {
+                    const actualIdx = scrollOffset + idx;
+                    const isSelected = actualIdx === selectedIndex;
+                    return (
+                      <Box
+                        key={cmd.value}
+                        flexDirection="row"
+                        justifyContent="space-between"
+                        backgroundColor={isSelected ? "cyan" : undefined}
+                        paddingX={1}
+                      >
+                        <Text color={isSelected ? "black" : "white"} bold={isSelected}>
+                          {isSelected ? "> " : "  "}
+                          {cmd.value}
+                        </Text>
+                        <Text color={isSelected ? "black" : "gray"}>
+                          {cmd.description}
+                        </Text>
+                      </Box>
+                    );
+                  })}
+                  {remainingBelow > 0 && (
+                    <Box paddingX={1} paddingY={0}>
+                      <Text color="gray">
+                        {"  "}▼ {remainingBelow} more
+                      </Text>
+                    </Box>
+                  )}
+                </Box>
+              )}
+
+              <Box borderStyle="round" borderColor="#3B5FE0" paddingX={1} paddingY={1} backgroundColor="#15171C">
                 <Text color="#3B5FE0" bold>{"❯ "}</Text>
                 <TextInput value={input} onChange={setInput} onSubmit={handleSubmit} />
                 {busy && <Text dimColor> (thinking…)</Text>}
@@ -436,27 +956,26 @@ export function Chat({ onChangeKeys }: ChatProps) {
             <Text color="gray">LSPs are disabled</Text>
           </Box>
 
-          {/* Section 4: System Prompt live view */}
+          {/* Section 4: Repo Map live view */}
           <Box flexDirection="column" marginBottom={1}>
-            <Text color="#E6E6E6" bold>System Prompt</Text>
-            {!contextReady ? (
+            <Text color="#E6E6E6" bold>Repo Map</Text>
+            {getContextMode() === "light" ? (
+              <Text color="gray" dimColor>repo map is disabled in light mode</Text>
+            ) : !contextReady || !repoMap ? (
               <Text color="gray" dimColor>loading…</Text>
             ) : (
               <>
                 <Text color="gray" dimColor>
-                  {systemPromptText.length.toLocaleString()} chars
-                  {" · "}
-                  {systemPromptText.split("\n").length} lines
+                  {repoMap.split("\n").length} lines
                 </Text>
-                {systemPromptText.split("\n").slice(0, 8).map((line, i) => (
+                {repoMap.split("\n").slice(0, 10).map((line, i) => (
                   <Text key={i} color="#4A5568" dimColor wrap="truncate">
                     {line || " "}
                   </Text>
                 ))}
-                {systemPromptText.split("\n").length > 8 && (
+                {repoMap.split("\n").length > 10 && (
                   <Text color="#4A5568" dimColor>
-                    … ({systemPromptText.split("\n").length - 8} more lines)
-                    {" · type /prompt for full text"}
+                    … ({repoMap.split("\n").length - 10} more lines)
                   </Text>
                 )}
               </>
@@ -465,6 +984,11 @@ export function Chat({ onChangeKeys }: ChatProps) {
 
           {/* Spacer */}
           <Box flexGrow={1} />
+
+          {/* Mountains Art */}
+          <Box justifyContent="center" paddingBottom={1} width="100%">
+            <SidebarMountains />
+          </Box>
 
           {/* Sidebar Wordmark */}
           <Box justifyContent="center" paddingY={1} width="100%">
