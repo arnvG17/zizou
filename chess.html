@@ -1,0 +1,117 @@
+<html>
+<head>
+	<title>Chess Board</title>
+	<style>
+		.chess-board {
+			display: grid;
+			grid-template-columns: repeat(8, 1fr);
+			grid-gap: 1px;
+		}
+		.chess-board div {
+			height: 50px;
+			width: 50px;
+			background-color: #CCCCCC;
+			border: 1px solid #000000;
+		}
+		.chess-board div:hover {
+			background-color: #AAAAAA;
+		}
+	</style>
+</head>
+<body>
+	<div class="chess-board">
+		<!-- rows -->
+		<div class="row">
+			<!-- columns -->
+			<div class="cell" id="A1"></div>
+			<div class="cell" id="B1"></div>
+			<div class="cell" id="C1"></div>
+			<div class="cell" id="D1"></div>
+			<div class="cell" id="E1"></div>
+			<div class="cell" id="F1"></div>
+			<div class="cell" id="G1"></div>
+			<div class="cell" id="H1"></div>
+		</div>
+		<div class="row">
+			<div class="cell" id="A2"></div>
+			<div class="cell" id="B2"></div>
+			<div class="cell" id="C2"></div>
+			<div class="cell" id="D2"></div>
+			<div class="cell" id="E2"></div>
+			<div class="cell" id="F2"></div>
+			<div class="cell" id="G2"></div>
+			<div class="cell" id="H2"></div>
+		</div>
+		<div class="row">
+			<div class="cell" id="A3"></div>
+			<div class="cell" id="B3"></div>
+			<div class="cell" id="C3"></div>
+			<div class="cell" id="D3"></div>
+			<div class="cell" id="E3"></div>
+			<div class="cell" id="F3"></div>
+			<div class="cell" id="G3"></div>
+			<div class="cell" id="H3"></div>
+		</div>
+		<div class="row">
+			<div class="cell" id="A4"></div>
+			<div class="cell" id="B4"></div>
+			<div class="cell" id="C4"></div>
+			<div class="cell" id="D4"></div>
+			<div class="cell" id="E4"></div>
+			<div class="cell" id="F4"></div>
+			<div class="cell" id="G4"></div>
+			<div class="cell" id="H4"></div>
+		</div>
+		<div class="row">
+			<div class="cell" id="A5"></div>
+			<div class="cell" id="B5"></div>
+			<div class="cell" id="C5"></div>
+			<div class="cell" id="D5"></div>
+			<div class="cell" id="E5"></div>
+			<div class="cell" id="F5"></div>
+			<div class="cell" id="G5"></div>
+			<div class="cell" id="H5"></div>
+		</div>
+		<div class="row">
+			<div class="cell" id="A6"></div>
+			<div class="cell" id="B6"></div>
+			<div class="cell" id="C6"></div>
+			<div class="cell" id="D6"></div>
+			<div class="cell" id="E6"></div>
+			<div class="cell" id="F6"></div>
+			<div class="cell" id="G6"></div>
+			<div class="cell" id="H6"></div>
+		</div>
+		<div class="row">
+			<div class="cell" id="A7"></div>
+			<div class="cell" id="B7"></div>
+			<div class="cell" id="C7"></div>
+			<div class="cell" id="D7"></div>
+			<div class="cell" id="E7"></div>
+			<div class="cell" id="F7"></div>
+			<div class="cell" id="G7"></div>
+			<div class="cell" id="H7"></div>
+		</div>
+		<div class="row">
+			<div class="cell" id="A8"></div>
+			<div class="cell" id="B8"></div>
+			<div class="cell" id="C8"></div>
+			<div class="cell" id="D8"></div>
+			<div class="cell" id="E8"></div>
+			<div class="cell" id="F8"></div>
+			<div class="cell" id="G8"></div>
+			<div class="cell" id="H8"></div>
+		</div>
+	</div>
+	<script>
+		// Add event listener to each cell
+		const cells = document.querySelectorAll('.cell');
+		cells.forEach(cell => {
+			cell.addEventListener('click', () => {
+				// Handle cell click event
+				console.log(`Cell ${cell.id} clicked`);
+			});
+		});
+	</script>
+</body>
+</html>

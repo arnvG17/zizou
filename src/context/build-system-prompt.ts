@@ -19,12 +19,38 @@
 // retrieval of specific files relevant to the user's actual question),
 // every one of those changes is isolated to this file and repo-map.ts —
 // neither Chat.tsx nor run-turn.ts need to change at all.
+//
+// ROLE-AWARE REPO MAP (new):
+//   The repo-map inclusion decision is now gated by WHICH AGENT ROLE is
+//   requesting context, not just by the budget level alone:
+//     - "clarifier" / "planner": ALWAYS include the repo map, even under
+//       "light" budget. Taking the repo map away from planning causes the
+//       write-before-scaffold ordering bug — the planner needs a project
+//       overview to know what files already exist.
+//     - "executor": follows the existing budget-scaled behavior. Under
+//       "light", the executor works from an explicit target file supplied
+//       by the plan step, so it doesn't need the repo overview.
+//     - undefined (backward compat): treated as executor, so existing
+//       call sites (Chat.tsx) continue to work without changes.
 
 import { buildRepoMap } from "./repo-map.js";
 import { getContextMode } from "../config/api-keys.js";
 import { existsSync, readFileSync } from "fs";
 import { resolve } from "path";
 import { platform } from "os";
+
+// ─── Agent Role Type ─────────────────────────────────────────────────────────
+//
+// Identifies which orchestrator module is requesting context. Each role
+// has different context needs:
+//   "clarifier" — needs the repo map to ask informed questions about the
+//                  project structure.
+//   "planner"   — needs the repo map to generate a plan that respects
+//                  existing file layout and avoids write-before-scaffold.
+//   "executor"  — works from an explicit PlanStep with targetFiles,
+//                  so the repo map is optional (follows budget setting).
+
+export type AgentRole = "clarifier" | "planner" | "executor";
 
 export const pinnedContextFiles = new Set<string>();
 
@@ -80,17 +106,57 @@ Do not output raw JSON text blocks to call tools. You must strictly invoke the t
 
 CRITICAL: When calling a tool, you must output the exact, clean name of the tool (e.g., 'runBash' or 'readFile') as a plain string in the tool name field. Do NOT concatenate, append, or embed any JSON arguments or parentheses into the tool name string itself. All arguments must be placed strictly inside the tool arguments object.`;
 
+// ─── Role-Aware Repo Map Decision ────────────────────────────────────────────
+//
+// This is the core fix for the "Light budget strips repo map from
+// planner" bug. The decision tree is:
+//
+//   role = clarifier or planner?
+//     → YES: always include repo map, regardless of budget.
+//            These roles NEED the project overview to do their job.
+//     → NO (executor or undefined):
+//            Follow the existing budget-scaled behavior:
+//            - "light"   → no repo map
+//            - "default" → include repo map
+//            - "max"     → include repo map
+//
+// This function is pure — no side effects, no LLM call.
+
+function shouldIncludeRepoMap(role: AgentRole | undefined, budget: string): boolean {
+  // Clarifier and planner always need the repo map to understand project
+  // structure. Without it, the planner generates plans that reference
+  // files that don't exist or miss existing scaffolding.
+  if (role === "clarifier" || role === "planner") return true;
+
+  // Executor (or undefined for backward compat): existing budget behavior.
+  // Under "light", the executor has explicit targetFiles from the plan step
+  // and doesn't need the full repo overview.
+  return budget !== "light";
+}
+
 /**
  * Builds the complete system prompt for a session: base instructions +
  * the project's repo map. Called once per session (not per turn) since
  * walking the filesystem and re-running extraction on every message
  * would be wasteful — see src/ui/Chat.tsx for where this gets cached.
+ *
+ * @param projectRoot - Absolute path to the workspace root.
+ * @param role - Which agent role is requesting context. Determines whether
+ *               the repo map is included. Defaults to undefined (treated
+ *               as executor for backward compatibility with existing call
+ *               sites in Chat.tsx that don't pass a role).
  */
-export async function buildSystemPrompt(projectRoot: string): Promise<string> {
+export async function buildSystemPrompt(
+  projectRoot: string,
+  role?: AgentRole,
+): Promise<string> {
   const mode = getContextMode();
   let repoMap = "";
   
-  if (mode !== "light") {
+  // Use the role-aware decision function instead of the old blanket
+  // `mode !== "light"` check. This ensures clarifier and planner always
+  // get the repo map even when the user has set --context light.
+  if (shouldIncludeRepoMap(role, mode)) {
     repoMap = buildRepoMap(projectRoot);
   }
 
@@ -180,8 +246,11 @@ When the user asks you to create a new project with a framework:
     pinnedText += "--- END PINNED FILES ---";
   }
 
-  if (!repoMap || mode === "light") {
-    return `${BASE_INSTRUCTIONS}${SESSION_CONTEXT}${pinnedText}\n\n(Repo map is disabled in '${mode}' mode, or no source files were found. Use tools like listDir to explore.)`;
+  // If we didn't build a repo map (either because the role-aware check
+  // said "no" or because scanRepo found no source files), tell the model
+  // to use tools for exploration instead.
+  if (!repoMap) {
+    return `${BASE_INSTRUCTIONS}${SESSION_CONTEXT}${pinnedText}\n\n(Repo map is disabled for this context configuration, or no source files were found. Use tools like listDir to explore.)`;
   }
 
   return `${BASE_INSTRUCTIONS}${SESSION_CONTEXT}${pinnedText}\n\n--- REPO MAP ---\n${repoMap}\n--- END REPO MAP ---`;

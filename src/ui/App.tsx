@@ -3,6 +3,11 @@
  *
  * Layer: ui
  * Allowed imports: config/, ui/ components
+ *
+ * UPDATED: Now threads `mode` and `initialPrompt` props from the CLI
+ * entry point down to the Chat component. The Chat component uses these
+ * to determine which orchestrator path to take and to auto-submit
+ * the initial prompt if one was provided on the command line.
  */
 
 import React, { useState } from "react";
@@ -11,8 +16,24 @@ import { hasAnyApiKey } from "../config/api-keys.js";
 import { ApiKeySetup } from "./ApiKeySetup.js";
 import { Figurine } from "./Figurine.js";
 import { Chat } from "./Chat.js";
+import type { Mode } from "../agent/mode.js";
 
-export function App({ forceSetup = false }: { forceSetup?: boolean }) {
+/**
+ * Props for the root App component.
+ *
+ * @param forceSetup - If true, forces the API key setup flow.
+ * @param mode - The operating mode (build or plan) determined by CLI args.
+ *               Defaults to "build" if not specified.
+ * @param initialPrompt - If provided, the Chat component will auto-submit
+ *                        this prompt on startup. Supports `zizou "prompt"`.
+ */
+interface AppProps {
+  forceSetup?: boolean;
+  mode?: Mode;
+  initialPrompt?: string;
+}
+
+export function App({ forceSetup = false, mode = "build", initialPrompt }: AppProps) {
   const [hasKey, setHasKey] = useState(() => {
     if (process.env.GROQ_API_KEY) return true;
     if (forceSetup) return false;
@@ -28,7 +49,11 @@ export function App({ forceSetup = false }: { forceSetup?: boolean }) {
             <ApiKeySetup onComplete={() => setHasKey(true)} />
           </Box>
         ) : (
-          <Chat onChangeKeys={() => setHasKey(false)} />
+          <Chat
+            onChangeKeys={() => setHasKey(false)}
+            mode={mode}
+            initialPrompt={initialPrompt}
+          />
         )}
       </Box>
     </Box>

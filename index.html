@@ -1,1 +1,112 @@
-<script>const stepCodeDiv = document.getElementById('step-code');</script>
+<!DOCTYPE html>
+<html>
+<head>
+	<title>Chess Board</title>
+	<style>
+		body {
+			font-family: Arial, sans-serif;
+		}
+		.chess-board {
+			border: 1px solid #000;
+			width: 400px;
+			height: 400px;
+			display: grid;
+			grid-template-columns: repeat(8, 1fr);
+			grid-template-rows: repeat(8, 1fr);
+		}
+		.chess-square {
+			padding: 10px;
+			border: 1px solid #000;
+		}
+		.chess-square.light {
+			background-color: #FFF;
+		}
+		.chess-square.dark {
+			background-color: #666;
+		}
+	</style>
+</head>
+<body>
+	<div class="chess-board">
+		<!-- Row 1 -->
+		<div class="chess-square light"></div>
+		<div class="chess-square dark"></div>
+		<div class="chess-square light"></div>
+		<div class="chess-square dark"></div>
+		<div class="chess-square light"></div>
+		<div class="chess-square dark"></div>
+		<div class="chess-square light"></div>
+		<div class="chess-square dark"></div>
+		
+		<!-- Row 2 -->
+		<div class="chess-square dark"></div>
+		<div class="chess-square light"></div>
+		<div class="chess-square dark"></div>
+		<div class="chess-square light"></div>
+		<div class="chess-square dark"></div>
+		<div class="chess-square light"></div>
+		<div class="chess-square dark"></div>
+		<div class="chess-square light"></div>
+		
+		<!-- Row 3 -->
+		<div class="chess-square light"></div>
+		<div class="chess-square dark"></div>
+		<div class="chess-square light"></div>
+		<div class="chess-square dark"></div>
+		<div class="chess-square light"></div>
+		<div class="chess-square dark"></div>
+		<div class="chess-square light"></div>
+		<div class="chess-square dark"></div>
+		
+		<!-- Row 4 -->
+		<div class="chess-square dark"></div>
+		<div class="chess-square light"></div>
+		<div class="chess-square dark"></div>
+		<div class="chess-square light"></div>
+		<div class="chess-square dark"></div>
+		<div class="chess-square light"></div>
+		<div class="chess-square dark"></div>
+		<div class="chess-square light"></div>
+		
+		<!-- Row 5 -->
+		<div class="chess-square light"></div>
+		<div class="chess-square dark"></div>
+		<div class="chess-square light"></div>
+		<div class="chess-square dark"></div>
+		<div class="chess-square light"></div>
+		<div class="chess-square dark"></div>
+		<div class="chess-square light"></div>
+		<div class="chess-square dark"></div>
+		
+		<!-- Row 6 -->
+		<div class="chess-square dark"></div>
+		<div class="chess-square light"></div>
+		<div class="chess-square dark"></div>
+		<div class="chess-square light"></div>
+		<div class="chess-square dark"></div>
+		<div class="chess-square light"></div>
+		<div class="chess-square dark"></div>
+		<div class="chess-square light"></div>
+		
+		<!-- Row 7 -->
+		<div class="chess-square light"></div>
+		<div class="chess-square dark"></div>
+		<div class="chess-square light"></div>
+		<div class="chess-square dark"></div>
+		<div class="chess-square light"></div>
+		<div class="chess-square dark"></div>
+		<div class="chess-square light"></div>
+		<div class="chess-square dark"></div>
+		
+		<!-- Row 8 -->
+		<div class="chess-square dark"></div>
+		<div class="chess-square light"></div>
+		<div class="chess-square dark"></div>
+		<div class="chess-square light"></div>
+		<div class="chess-square dark"></div>
+		<div class="chess-square light"></div>
+		<div class="chess-square dark"></div>
+		<div class="chess-square light"></div>
+	</div>
+</body>
+</html>

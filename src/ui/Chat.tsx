@@ -5,6 +5,20 @@
 // - Left column: Conversation log and pill-style input box with badges.
 // - Right column: Sidebar with session info, estimated tokens/cost, LSP status,
 //   and the mini-wordmark. Automatically hidden on narrower terminals.
+//
+// ORCHESTRATOR INTEGRATION (new):
+//   The Chat component now routes user input through the orchestrator
+//   instead of calling runTurn() directly. The orchestrator manages the
+//   full pipeline (clarify → plan → execute → verify) and yields events
+//   that the Chat renders as new log entry types.
+//
+//   New log entry kinds:
+//     - "plan-display"   → shows the structured plan for Y/n confirmation
+//     - "step-progress"  → shows which step is executing (e.g., "Step 2/5")
+//     - "verification"   → shows per-step verification result
+//     - "escalation"     → shows escalation prompt with Y/n
+//     - "mode-switch"    → shows mode change notifications
+//     - "clarification"  → shows clarifying questions from the clarifier
 
 import React, { useState, useRef, useEffect, useMemo } from "react";
 import { Box, Text, useInput } from "ink";
@@ -27,6 +41,12 @@ import { useTerminalSize, SidebarWordmark, SidebarMountains } from "./Figurine.j
 import { handleSlashCommand, SLASH_COMMANDS, WELCOME_MESSAGE, getSkills } from "../commands/index.js";
 import { readdirSync, statSync } from "fs";
 import { join, relative } from "path";
+
+// ─── Orchestrator imports ────────────────────────────────────────────────────
+// These enable the full clarify → plan → execute → verify pipeline.
+import type { Mode } from "../agent/mode.js";
+import { runOrchestrator, type OrchestratorEvent } from "../agent/orchestrator.js";
+import type { PlanStep, ClarifyingQuestion } from "../agent/types.js";
 
 const PROVIDERS: ProviderChoice[] = ["groq", "google", "openrouter", "anthropic", "openai", "ollama"];
 
@@ -71,6 +91,10 @@ const MODEL_OPTIONS: ModelOption[] = [
 ];
 
 // --- Types for our scrolling log ---
+//
+// EXTENDED: New entry kinds for orchestrator events (plan display,
+// verification results, escalation prompts, step progress, etc.).
+// The original kinds (user, assistant, tool-call, error) are unchanged.
 type LogEntry =
   | { kind: "user"; text: string }
   | { kind: "assistant"; text: string; thoughtDuration?: string }
@@ -85,7 +109,15 @@ type LogEntry =
       duration?: string;
       status: "running" | "success" | "error";
     }
-  | { kind: "error"; text: string };
+  | { kind: "error"; text: string }
+  // ── New orchestrator log entry kinds ──────────────────────────────────
+  // Displayed by the LogLine component below to show orchestrator state.
+  | { kind: "plan-display"; steps: PlanStep[] }         // Full plan for user review
+  | { kind: "step-progress"; stepIndex: number; totalSteps: number; description: string }
+  | { kind: "verification"; stepIndex: number; verified: boolean; mismatches: string[] }
+  | { kind: "escalation"; reason: string }               // Escalation notification
+  | { kind: "mode-switch"; mode: Mode; reason: string }  // Mode change notification
+  | { kind: "clarification"; questions: ClarifyingQuestion[] }; // Clarifier questions
 
 function formatDuration(ms: number): string {
   if (ms < 1000) {
@@ -194,9 +226,13 @@ function getAllFilesRecursively(dir: string, rootDir: string): string[] {
 
 export interface ChatProps {
   onChangeKeys?: () => void;
+  /** The operating mode (build or plan) determined by CLI args. */
+  mode?: Mode;
+  /** If provided, auto-submit this prompt on startup. */
+  initialPrompt?: string;
 }
 
-export function Chat({ onChangeKeys }: ChatProps) {
+export function Chat({ onChangeKeys, mode: initialMode = "build", initialPrompt }: ChatProps) {
   const [log, setLog] = useState<LogEntry[]>([]);
   const [input, setInput] = useState("");
   const [busy, setBusy] = useState(false);
@@ -234,6 +270,20 @@ export function Chat({ onChangeKeys }: ChatProps) {
   const [contextReady, setContextReady] = useState(false);
   const [systemPromptText, setSystemPromptText] = useState<string>("");
   const [repoMap, setRepoMap] = useState<string>("");
+
+  // ─── Orchestrator state ──────────────────────────────────────────────
+  //
+  // Tracks the current operating mode, any pending orchestrator flow
+  // state (clarification answers, approved plans), and the original
+  // prompt for escalation re-entry.
+  const [currentMode, setCurrentMode] = useState<Mode>(initialMode);
+  const [pendingClarifications, setPendingClarifications] = useState<ClarifyingQuestion[]>([]);
+  const [clarificationAnswers, setClarificationAnswers] = useState<Record<string, string>>({});
+  const [currentClarificationIndex, setCurrentClarificationIndex] = useState(0);
+  const [pendingPlan, setPendingPlan] = useState<PlanStep[] | null>(null);
+  const [originalPrompt, setOriginalPrompt] = useState<string>("");
+  const [isInClarificationFlow, setIsInClarificationFlow] = useState(false);
+  const [isAwaitingPlanApproval, setIsAwaitingPlanApproval] = useState(false);
 
   const [tokenStats, setTokenStats] = useState({
     inputTokens: 0,
@@ -546,7 +596,7 @@ export function Chat({ onChangeKeys }: ChatProps) {
 
       if (suggestionMode === "commands") {
         const executableCommands = [
-          "/settings", "/keys", "/clear", "/reset", "/exit", "/quit", "/prompt", "/skills", "/help", "/model"
+          "/settings", "/keys", "/clear", "/reset", "/exit", "/quit", "/prompt", "/skills", "/help", "/model", "/plan", "/build"
         ];
         if (executableCommands.includes(selected)) {
           shouldExecute = true;
@@ -582,6 +632,8 @@ export function Chat({ onChangeKeys }: ChatProps) {
               setRepoMap(map);
             } catch {}
           },
+          onModeChange: (mode: "build" | "plan") => setCurrentMode(mode),
+          getCurrentMode: () => currentMode,
           setLog,
           setTokenStats,
           calculateTokenStats,
@@ -623,6 +675,8 @@ export function Chat({ onChangeKeys }: ChatProps) {
           setRepoMap(map);
         } catch {}
       },
+      onModeChange: (mode: "build" | "plan") => setCurrentMode(mode),
+      getCurrentMode: () => currentMode,
       setLog,
       setTokenStats,
       calculateTokenStats,
@@ -631,125 +685,332 @@ export function Chat({ onChangeKeys }: ChatProps) {
 
     if (busy) return; // Only block normal messages, not commands
 
+    // ── Clarification flow: user is answering clarifying questions ────
+    // When the orchestrator has yielded clarification questions, we
+    // intercept user input as answers instead of new prompts.
+    if (isInClarificationFlow && pendingClarifications.length > 0) {
+      const currentQ = pendingClarifications[currentClarificationIndex];
+      const newAnswers = { ...clarificationAnswers, [currentQ.question]: userText };
+      setClarificationAnswers(newAnswers);
+
+      setLog((l) => [
+        ...l,
+        { kind: "user", text: userText },
+      ]);
+
+      // Move to next question or finish clarification
+      if (currentClarificationIndex + 1 < pendingClarifications.length) {
+        setCurrentClarificationIndex(currentClarificationIndex + 1);
+        const nextQ = pendingClarifications[currentClarificationIndex + 1];
+        setLog((l) => [
+          ...l,
+          { kind: "assistant", text: `${nextQ.required ? "(required) " : ""}${nextQ.question}` },
+        ]);
+      } else {
+        // All questions answered — re-invoke orchestrator with answers
+        setIsInClarificationFlow(false);
+        setPendingClarifications([]);
+        setCurrentClarificationIndex(0);
+
+        // Re-run orchestrator in plan mode with collected answers
+        runOrchestratorFlow(originalPrompt, newAnswers);
+      }
+      return;
+    }
+
+    // ── Plan approval flow: user is saying Y/n to a displayed plan ────
+    if (isAwaitingPlanApproval && pendingPlan) {
+      const answer = userText.trim().toLowerCase();
+      setLog((l) => [...l, { kind: "user", text: userText }]);
+
+      if (answer === "y" || answer === "yes") {
+        setIsAwaitingPlanApproval(false);
+        const approvedSteps = pendingPlan;
+        setPendingPlan(null);
+
+        // Re-invoke orchestrator with the approved plan
+        runOrchestratorFlow(originalPrompt, clarificationAnswers, approvedSteps);
+      } else {
+        setIsAwaitingPlanApproval(false);
+        setPendingPlan(null);
+        setLog((l) => [
+          ...l,
+          { kind: "assistant", text: "Plan cancelled. You can modify your request and try again." },
+        ]);
+        setBusy(false);
+      }
+      return;
+    }
+
     setLog((l) => [...l, { kind: "user", text: userText }]);
     history.current.push({ role: "user", content: userText });
     setBusy(true);
+    setOriginalPrompt(userText);
 
     // Update token stats immediately for the user prompt
     const provider = getDefaultProvider() || "groq";
     setTokenStats(calculateTokenStats(history.current, systemPromptRef.current, undefined, provider));
 
+    // ── Route through orchestrator ───────────────────────────────────────
+    // Both build and plan mode now go through the orchestrator.
+    // The orchestrator yields OrchestratorEvents that we render as log entries.
+    runOrchestratorFlow(userText);
+  }
+
+  // ─── Orchestrator Flow Runner ────────────────────────────────────────
+  //
+  // Drives the orchestrator async generator and translates its events
+  // into log entries and UI state changes. Separated from handleSubmit
+  // so it can be re-invoked during clarification/plan-approval flows.
+  async function runOrchestratorFlow(
+    prompt: string,
+    answers?: Record<string, string>,
+    approvedSteps?: PlanStep[],
+  ) {
+    setBusy(true);
     const submitTime = Date.now();
     let currentAssistantText = "";
     let assistantEntryAdded = false;
     let firstPartReceived = false;
     let thoughtDuration = "";
-
     let hasActualUsage = false;
 
     try {
       const provider = getDefaultProvider() || "groq";
       const model = resolveModel(provider);
+      const budget = getContextMode() as "light" | "default" | "max";
 
-      const turn = runTurn({
-        history: history.current,
-        model,
-        onConfirm: confirmFn,
+      // Build the project context for the orchestrator
+      const projectContext = {
+        projectRoot: process.cwd(),
         systemPrompt: systemPromptRef.current,
-      });
+        budget,
+      };
 
-      let result = await turn.next();
+      // Build the mode context — use current mode state
+      const modeContext = {
+        mode: currentMode,
+        reason: "user-flag" as const,
+      };
+
+      // ── Drive the orchestrator ──────────────────────────────────────────
+      const orchestrator = runOrchestrator(
+        prompt,
+        modeContext,
+        projectContext,
+        model,
+        confirmFn,
+        answers,
+        approvedSteps,
+      );
+
+      let result = await orchestrator.next();
       while (!result.done) {
         const event = result.value;
 
-        if (!firstPartReceived && (event.kind === "text-delta" || event.kind === "tool-call")) {
-          firstPartReceived = true;
-          thoughtDuration = formatDuration(Date.now() - submitTime);
-        }
+        // ── Handle orchestrator-level events ──────────────────────────────
+        switch (event.kind) {
+          case "mode-info":
+            // Update the mode badge in the footer and show a mode notification
+            setCurrentMode(event.mode);
+            setLog((l) => [
+              ...l,
+              { kind: "mode-switch", mode: event.mode, reason: event.reason },
+            ]);
+            break;
 
-        if (event.kind === "text-delta") {
-          currentAssistantText += event.text;
-          setLog((l) => {
-            if (!assistantEntryAdded) {
-              assistantEntryAdded = true;
-              return [
+          case "clarification-needed":
+            // The clarifier generated questions — enter clarification flow.
+            // Present questions one at a time and collect answers.
+            setPendingClarifications(event.questions);
+            setCurrentClarificationIndex(0);
+            setIsInClarificationFlow(true);
+
+            // Show the clarification UI
+            setLog((l) => [
+              ...l,
+              { kind: "clarification", questions: event.questions },
+              { kind: "assistant", text: `${event.questions[0].required ? "(required) " : ""}${event.questions[0].question}` },
+            ]);
+
+            // STOP processing — we'll re-invoke after answers are collected
+            setBusy(false);
+            return;
+
+          case "plan-ready":
+            // The planner generated a plan — display it for Y/n approval.
+            setPendingPlan(event.steps);
+            setIsAwaitingPlanApproval(true);
+
+            setLog((l) => [
+              ...l,
+              { kind: "plan-display", steps: event.steps },
+              { kind: "assistant", text: "Execute this plan? (y/n)" },
+            ]);
+
+            // STOP processing — we'll re-invoke after Y/n
+            setBusy(false);
+            return;
+
+          case "step-start":
+            // Show step progress in the log
+            setLog((l) => [
+              ...l,
+              {
+                kind: "step-progress",
+                stepIndex: event.step.index,
+                totalSteps: event.totalSteps,
+                description: event.step.description,
+              },
+            ]);
+            break;
+
+          case "step-verified":
+            // Show verification result
+            setLog((l) => [
+              ...l,
+              {
+                kind: "verification",
+                stepIndex: event.step.index,
+                verified: event.verification.verified,
+                mismatches: event.verification.mismatches,
+              },
+            ]);
+            break;
+
+          case "escalation-prompt":
+            // Build mode: the step exceeded expected scope.
+            // Show escalation message and use pendingConfirm for Y/n.
+            setLog((l) => [
+              ...l,
+              { kind: "escalation", reason: event.trigger.reason },
+            ]);
+
+            // Ask the user whether to switch to plan mode
+            const shouldSwitch = await new Promise<boolean>((resolve) => {
+              setPendingConfirm({
+                description: `This touched more than expected (${event.trigger.reason}). Switch to plan mode?`,
+                resolve,
+              });
+            });
+
+            if (shouldSwitch) {
+              // Switch to plan mode and re-enter from scratch
+              setCurrentMode("plan");
+              setClarificationAnswers({});
+              setLog((l) => [
                 ...l,
-                { kind: "assistant", text: currentAssistantText, thoughtDuration },
-              ];
+                { kind: "mode-switch", mode: "plan", reason: "Escalated from build mode" },
+              ]);
+              // Re-invoke orchestrator in plan mode with the original prompt
+              runOrchestratorFlow(originalPrompt);
+              return;
+            } else {
+              setLog((l) => [
+                ...l,
+                { kind: "assistant", text: "Continuing in build mode. Results may need manual review." },
+              ]);
             }
-            const updated = [...l];
-            updated[updated.length - 1] = {
-              kind: "assistant",
-              text: currentAssistantText,
-              thoughtDuration,
-            };
-            return updated;
-          });
-        } else if (event.kind === "tool-call") {
-          assistantEntryAdded = false;
-          currentAssistantText = "";
-          setLog((l) => [
-            ...l,
-            {
-              kind: "tool-call",
-              toolCallId: event.toolCallId,
-              name: event.toolName,
-              input: event.input,
-              startTime: Date.now(),
-              status: "running",
-            },
-          ]);
-        } else if (event.kind === "tool-result") {
-          setLog((l) =>
-            l.map((entry) => {
-              if (entry.kind === "tool-call" && entry.toolCallId === event.toolCallId) {
-                return {
-                  ...entry,
-                  status: "success",
-                  output: event.output,
-                  duration: formatDuration(Date.now() - entry.startTime),
+            break;
+
+          case "agent-event": {
+            // Forward raw agent events — same rendering as before
+            const agentEvent = event.event;
+
+            if (!firstPartReceived && (agentEvent.kind === "text-delta" || agentEvent.kind === "tool-call")) {
+              firstPartReceived = true;
+              thoughtDuration = formatDuration(Date.now() - submitTime);
+            }
+
+            if (agentEvent.kind === "text-delta") {
+              currentAssistantText += agentEvent.text;
+              setLog((l) => {
+                if (!assistantEntryAdded) {
+                  assistantEntryAdded = true;
+                  return [
+                    ...l,
+                    { kind: "assistant", text: currentAssistantText, thoughtDuration },
+                  ];
+                }
+                const updated = [...l];
+                updated[updated.length - 1] = {
+                  kind: "assistant",
+                  text: currentAssistantText,
+                  thoughtDuration,
                 };
-              }
-              return entry;
-            })
-          );
-        } else if (event.kind === "tool-error") {
-          const errMsg = String(event.error);
-          setLog((l) =>
-            l.map((entry) => {
-              if (entry.kind === "tool-call" && entry.toolCallId === event.toolCallId) {
-                return {
-                  ...entry,
-                  status: "error",
-                  errorMessage: errMsg,
-                  duration: formatDuration(Date.now() - entry.startTime),
-                };
-              }
-              return entry;
-            })
-          );
-        } else if (event.kind === "finish") {
-          if (event.usage) {
-            hasActualUsage = true;
-            setTokenStats(
-              calculateTokenStats(
-                history.current,
-                systemPromptRef.current,
+                return updated;
+              });
+            } else if (agentEvent.kind === "tool-call") {
+              assistantEntryAdded = false;
+              currentAssistantText = "";
+              setLog((l) => [
+                ...l,
                 {
-                  inputTokens: event.usage.inputTokens,
-                  outputTokens: event.usage.outputTokens,
+                  kind: "tool-call",
+                  toolCallId: agentEvent.toolCallId,
+                  name: agentEvent.toolName,
+                  input: agentEvent.input,
+                  startTime: Date.now(),
+                  status: "running",
                 },
-                provider
-              )
-            );
+              ]);
+            } else if (agentEvent.kind === "tool-result") {
+              setLog((l) =>
+                l.map((entry) => {
+                  if (entry.kind === "tool-call" && entry.toolCallId === agentEvent.toolCallId) {
+                    return {
+                      ...entry,
+                      status: "success",
+                      output: agentEvent.output,
+                      duration: formatDuration(Date.now() - entry.startTime),
+                    };
+                  }
+                  return entry;
+                })
+              );
+            } else if (agentEvent.kind === "tool-error") {
+              const errMsg = String(agentEvent.error);
+              setLog((l) =>
+                l.map((entry) => {
+                  if (entry.kind === "tool-call" && entry.toolCallId === agentEvent.toolCallId) {
+                    return {
+                      ...entry,
+                      status: "error",
+                      errorMessage: errMsg,
+                      duration: formatDuration(Date.now() - entry.startTime),
+                    };
+                  }
+                  return entry;
+                })
+              );
+            } else if (agentEvent.kind === "finish") {
+              if (agentEvent.usage) {
+                hasActualUsage = true;
+                setTokenStats(
+                  calculateTokenStats(
+                    history.current,
+                    systemPromptRef.current,
+                    {
+                      inputTokens: agentEvent.usage.inputTokens,
+                      outputTokens: agentEvent.usage.outputTokens,
+                    },
+                    provider
+                  )
+                );
+              }
+            }
+            break;
           }
+
+          case "complete":
+            // Orchestration finished successfully
+            break;
         }
 
-        result = await turn.next();
+        result = await orchestrator.next();
       }
 
-      history.current = result.value;
-      // Update token stats at the end of the turn if actual usage wasn't received
+      // Update token stats at the end if actual usage wasn't received
       if (!hasActualUsage) {
         setTokenStats(calculateTokenStats(history.current, systemPromptRef.current, undefined, provider));
       }
@@ -911,7 +1172,7 @@ export function Chat({ onChangeKeys }: ChatProps) {
               {/* Input Footer */}
               <Box flexDirection="row" justifyContent="space-between" paddingX={1} marginTop={0}>
                 <Box flexDirection="row" gap={1}>
-                  <Text backgroundColor="#3B5FE0" color="white" bold> Build ({getContextMode()}) </Text>
+                  <Text backgroundColor={currentMode === "plan" ? "#D08A4E" : "#3B5FE0"} color="white" bold> {currentMode === "plan" ? "Plan" : "Build"} ({getContextMode()}) </Text>
                   <Text color="gray">{getActiveModelId(getDefaultProvider() || "groq")}</Text>
                 </Box>
                 <Box flexDirection="row" gap={2}>
@@ -938,6 +1199,10 @@ export function Chat({ onChangeKeys }: ChatProps) {
           <Box flexDirection="column" marginBottom={1}>
             <Text color="#E6E6E6" bold>New session</Text>
             <Text color="gray">{sessionId}</Text>
+            <Box flexDirection="row" gap={1} marginTop={0}>
+              <Text color={currentMode === "plan" ? "#D08A4E" : "#3B5FE0"} bold>{currentMode === "plan" ? "◆ Plan" : "● Build"}</Text>
+              <Text color="gray">mode</Text>
+            </Box>
           </Box>
 
           {/* Section 2: Context statistics */}
@@ -1106,5 +1371,109 @@ function LogLine({ entry }: { entry: LogEntry }) {
       </Box>
     );
   }
+
+  // ── New orchestrator log entry renderers ────────────────────────────
+
+  if (entry.kind === "plan-display") {
+    // Renders the structured plan as a numbered list for user review.
+    // Each step shows its description and target files.
+    return (
+      <Box flexDirection="column" marginBottom={1} borderStyle="round" borderColor="#D08A4E" paddingX={1} paddingY={1} backgroundColor="#15171C">
+        <Text color="#D08A4E" bold>📋 Execution Plan</Text>
+        <Text color="gray" dimColor>─────────────────────</Text>
+        {entry.steps.map((step) => (
+          <Box key={step.index} flexDirection="column" marginTop={step.index > 0 ? 1 : 0}>
+            <Box flexDirection="row" gap={1}>
+              <Text color="#3B5FE0" bold>Step {step.index + 1}.</Text>
+              <Text color="#E6E6E6">{step.description}</Text>
+            </Box>
+            {step.targetFiles.length > 0 && (
+              <Box paddingLeft={2} flexDirection="column">
+                {step.targetFiles.map((file, fi) => (
+                  <Text key={fi} color="gray" dimColor>↳ {file}</Text>
+                ))}
+              </Box>
+            )}
+            {step.dependsOn.length > 0 && (
+              <Box paddingLeft={2}>
+                <Text color="gray" dimColor>⤷ depends on: step {step.dependsOn.map(d => d + 1).join(", ")}</Text>
+              </Box>
+            )}
+          </Box>
+        ))}
+      </Box>
+    );
+  }
+
+  if (entry.kind === "step-progress") {
+    // Shows which step is currently executing (e.g., "Step 2/5: ...")
+    return (
+      <Box marginBottom={1} flexDirection="row" gap={1}>
+        <Text color="#3B5FE0" bold>▶</Text>
+        <Text color="#E6E6E6" bold>Step {entry.stepIndex + 1}/{entry.totalSteps}:</Text>
+        <Text color="gray">{entry.description}</Text>
+      </Box>
+    );
+  }
+
+  if (entry.kind === "verification") {
+    // Shows verification result — green check for pass, red X for fail
+    return (
+      <Box marginBottom={1} flexDirection="column">
+        <Box flexDirection="row" gap={1}>
+          <Text color={entry.verified ? "#5FB87A" : "red"}>{entry.verified ? "✓" : "✗"}</Text>
+          <Text color={entry.verified ? "#5FB87A" : "red"} bold>
+            Step {entry.stepIndex + 1} verification {entry.verified ? "passed" : "failed"}
+          </Text>
+        </Box>
+        {entry.mismatches.length > 0 && (
+          <Box paddingLeft={2} flexDirection="column">
+            {entry.mismatches.map((m, i) => (
+              <Text key={i} color="red" dimColor>↳ {m}</Text>
+            ))}
+          </Box>
+        )}
+      </Box>
+    );
+  }
+
+  if (entry.kind === "escalation") {
+    // Shows escalation notification with warning styling
+    return (
+      <Box marginBottom={1} borderStyle="round" borderColor="yellow" paddingX={1} backgroundColor="#15171C">
+        <Text color="yellow" bold>⚠ Escalation: </Text>
+        <Text color="yellow">{entry.reason === "verification-failed" ? "Verification failed — execution may not have completed correctly." : entry.reason === "touched-too-many-files" ? "This touched more files than expected for a simple fix." : "Step implies additional dependencies."}</Text>
+      </Box>
+    );
+  }
+
+  if (entry.kind === "mode-switch") {
+    // Shows mode change notification
+    return (
+      <Box marginBottom={1} flexDirection="row" gap={1}>
+        <Text color={entry.mode === "plan" ? "#D08A4E" : "#3B5FE0"} bold>
+          {entry.mode === "plan" ? "◆" : "●"}
+        </Text>
+        <Text color="#E6E6E6">{entry.reason}</Text>
+      </Box>
+    );
+  }
+
+  if (entry.kind === "clarification") {
+    // Shows the list of clarifying questions from the clarifier
+    return (
+      <Box flexDirection="column" marginBottom={1} borderStyle="round" borderColor="#3B5FE0" paddingX={1} paddingY={1} backgroundColor="#15171C">
+        <Text color="#3B5FE0" bold>❓ Clarifying Questions</Text>
+        <Text color="gray" dimColor>Please answer the following before planning begins:</Text>
+        {entry.questions.map((q, i) => (
+          <Box key={i} flexDirection="row" gap={1} marginTop={1}>
+            <Text color="gray">{i + 1}.</Text>
+            <Text color={q.required ? "#E6E6E6" : "gray"}>{q.required ? "(required) " : ""}{q.question}</Text>
+          </Box>
+        ))}
+      </Box>
+    );
+  }
+
   return null;
 }

@@ -22,6 +22,8 @@ export interface SlashCommandInfo {
 
 export const SLASH_COMMANDS: SlashCommandInfo[] = [
   { command: "/settings", description: "Modify agent configuration (aliases: /keys)" },
+  { command: "/plan", description: "Switch to plan mode (clarify → plan → execute → verify)" },
+  { command: "/build", description: "Switch to build mode (single-step execution)" },
   { command: "/model", description: "Switch provider and/or set custom model name" },
   { command: "/modelid", description: "Set custom model ID for the active provider" },
   { command: "/ollama", description: "Set the Ollama base URL" },
@@ -98,6 +100,10 @@ export interface CommandContext {
   onChangeKeys?: () => void;
   onSelectModel?: () => void;
   onContextChange?: () => void;
+  /** Callback to switch between build and plan mode from within the TUI. */
+  onModeChange?: (mode: "build" | "plan") => void;
+  /** Returns the current mode so /help can display it. */
+  getCurrentMode?: () => "build" | "plan";
   setLog: (updater: (prev: LogEntry[]) => LogEntry[]) => void;
   setTokenStats: (stats: any) => void;
   calculateTokenStats: (
@@ -124,9 +130,44 @@ export function handleSlashCommand(ctx: CommandContext): boolean {
     process.exit(0);
   }
 
+  // ── /plan and /build — switch orchestrator mode ────────────────────────
+  // Toggles between the two operating modes from within the TUI.
+  // /plan  → full pipeline: clarifier → planner → execute → verify
+  // /build → single-step execution (default)
+  if (command === "plan") {
+    if (ctx.onModeChange) {
+      ctx.onModeChange("plan");
+    }
+    ctx.setLog((l: LogEntry[]) => [
+      ...l,
+      { kind: "user", text },
+      {
+        kind: "assistant",
+        text: `Switched to ◆ Plan mode.\nYour next prompt will run: clarify → plan → confirm → execute → verify.\nUse /build to switch back to single-step mode.`,
+      },
+    ]);
+    return true;
+  }
+
+  if (command === "build") {
+    if (ctx.onModeChange) {
+      ctx.onModeChange("build");
+    }
+    ctx.setLog((l: LogEntry[]) => [
+      ...l,
+      { kind: "user", text },
+      {
+        kind: "assistant",
+        text: `Switched to ● Build mode.\nYour next prompt will execute directly as a single step.\nUse /plan to switch to multi-step planning mode.`,
+      },
+    ]);
+    return true;
+  }
+
   if (command === "help") {
     const provider = getDefaultProvider() || "groq";
     const modelId = getActiveModelId(provider);
+    const currentMode = ctx.getCurrentMode ? ctx.getCurrentMode() : "build";
     ctx.setLog((l: LogEntry[]) => [
       ...l,
       { kind: "user", text },
@@ -134,6 +175,8 @@ export function handleSlashCommand(ctx: CommandContext): boolean {
         kind: "assistant",
         text: `Available slash commands:
 
+  /plan                     Switch to plan mode (clarify → plan → execute → verify)
+  /build                    Switch to build mode (single-step execution)
   /model <provider>         Switch active provider
                             Providers: groq, google, openrouter, anthropic, openai, ollama
   /model <provider> <name>  Switch provider AND set a custom model name
@@ -151,7 +194,8 @@ export function handleSlashCommand(ctx: CommandContext): boolean {
   /clear                    Reset conversation history & start new session
   /exit                     Close Zizou
 
-  Active: ${SHORT_LABELS[provider]} › ${modelId}
+  Mode:    ${currentMode === "plan" ? "◆ Plan" : "● Build"}
+  Active:  ${SHORT_LABELS[provider]} › ${modelId}
   Context: ${getContextMode()}`,
       },
     ]);

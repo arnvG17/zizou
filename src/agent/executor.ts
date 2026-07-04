@@ -1,0 +1,216 @@
+// src/agent/executor.ts
+//
+// LAYER: agent/
+//
+// Step-scoped execution wrapper — takes a single PlanStep and executes it
+// by driving the existing runTurn() agent loop with a scoped context.
+//
+// PURPOSE:
+//   The executor is the module that actually DOES things: reads files,
+//   writes code, runs commands. It receives one PlanStep at a time from
+//   the orchestrator, builds a focused context for just that step, calls
+//   runTurn(), and collects the results (which files were touched, which
+//   tool calls were made) into a StepResult for the verifier to check.
+//
+// KEY DESIGN DECISIONS:
+//   1. STEP-SCOPED CONTEXT: Each step gets a fresh, minimal context.
+//      The system prompt includes only the step's description and target
+//      files, not the full plan. This keeps the context window focused
+//      and prevents the model from "wandering" into other steps.
+//   2. TOOL CALL TRACKING: As the runTurn() stream emits tool-call and
+//      tool-result events, the executor captures them to build the
+//      claimedFiles list (from writeFile/editFile calls) and the full
+//      toolCallsMade log. The verifier uses these.
+//   3. BOTH MODES: The executor is used in both build mode (single step
+//      from raw prompt) and plan mode (one step at a time from the plan).
+//
+// CONTEXT:
+//   Calls buildSystemPrompt({ role: "executor" }) — repo map follows
+//   existing budget scaling (excluded under "light" budget). The executor
+//   works from explicit targetFiles, so it doesn't need the full repo
+//   overview when running lean.
+//
+// DEPENDENCY DIRECTION: imports from agent/run-turn.ts, agent/types.ts,
+// context/. Must NOT import from ui/, config/, or provider/.
+
+import { type LanguageModel, type ModelMessage } from "ai";
+import { buildSystemPrompt, type AgentRole } from "../context/build-system-prompt.js";
+import { runTurn, type AgentEvent } from "./run-turn.js";
+import type { ConfirmFn } from "../tools/types.js";
+import type { PlanStep, StepResult, ToolCall, ProjectContext } from "./types.js";
+
+// ─── Step Prompt Builder ─────────────────────────────────────────────────────
+//
+// Constructs the user message for the executor. This is NOT the system
+// prompt — it's the "user" message that tells the model what specific
+// step to execute. The system prompt comes from buildSystemPrompt().
+
+/**
+ * Builds a focused user message for a single step execution.
+ * Includes the step description and target files so the model knows
+ * exactly what to do without needing the full plan context.
+ */
+function buildStepPrompt(step: PlanStep): string {
+  let prompt = `Execute the following task:\n\n${step.description}`;
+
+  if (step.targetFiles.length > 0) {
+    prompt += `\n\nTarget files to create or modify:\n`;
+    for (const file of step.targetFiles) {
+      prompt += `  - ${file}\n`;
+    }
+    prompt += `\nFocus ONLY on the files listed above. Do not modify other files.`;
+  }
+
+  return prompt;
+}
+
+// ─── File Extraction from Tool Calls ─────────────────────────────────────────
+//
+// Extracts the list of files the executor claims to have modified from
+// the tool call stream. We look at writeFile and editFile calls specifically,
+// since those are the tools that modify the filesystem.
+
+/**
+ * Checks if a tool call is a file-modifying operation and extracts the
+ * target file path if so.
+ */
+function extractFileFromToolCall(toolName: string, input: unknown): string | null {
+  // writeFile and editFile both take a "path" or "filePath" parameter
+  // that tells us which file was modified.
+  if (toolName === "writeFile" || toolName === "editFile") {
+    if (typeof input === "object" && input !== null) {
+      const obj = input as Record<string, unknown>;
+      // The AI SDK tool definitions use "path" for both writeFile and editFile
+      const filePath = obj.path ?? obj.filePath ?? obj.file;
+      if (typeof filePath === "string") return filePath;
+    }
+  }
+  return null;
+}
+
+// ─── Main Execute Function ───────────────────────────────────────────────────
+
+/**
+ * Executes a single PlanStep and returns a StepResult.
+ *
+ * This is the core execution function used in both modes:
+ *   - Build mode: orchestrator synthesizes a single step, calls this once.
+ *   - Plan mode: orchestrator calls this for each step in dependency order.
+ *
+ * The function drives runTurn() with a step-scoped context and captures
+ * the tool call stream to build the StepResult.
+ *
+ * @param step - The plan step to execute.
+ * @param context - Ambient project info (root, prompt, budget).
+ * @param model - The resolved LLM to use for execution.
+ * @param onConfirm - Callback for user confirmation of shell commands.
+ * @param onEvent - Optional callback to forward agent events to the UI.
+ *                  The orchestrator uses this to stream events to Chat.tsx.
+ * @returns StepResult with claimed files and tool call log.
+ */
+export async function executeStep(
+  step: PlanStep,
+  context: ProjectContext,
+  model: LanguageModel,
+  onConfirm: ConfirmFn,
+  onEvent?: (event: AgentEvent) => void,
+): Promise<StepResult> {
+  // Build a system prompt with the executor role — repo map follows
+  // existing budget scaling (excluded under "light").
+  const systemPrompt = await buildSystemPrompt(
+    context.projectRoot,
+    "executor" as AgentRole,
+  );
+
+  // Build the step-specific user message
+  const stepPrompt = buildStepPrompt(step);
+
+  // Initialize the conversation history with just the step prompt.
+  // Each step gets a fresh conversation — no carryover from previous
+  // steps. This prevents context pollution and keeps the model focused.
+  const history: ModelMessage[] = [
+    { role: "user", content: stepPrompt },
+  ];
+
+  // Tracking collections for building the StepResult
+  const claimedFiles = new Set<string>();
+  const toolCallsMade: ToolCall[] = [];
+
+  // Track in-progress tool calls so we can pair call → result
+  const pendingToolCalls = new Map<string, { toolName: string; input: unknown }>();
+
+  // ── Drive the runTurn loop ─────────────────────────────────────────────
+  //
+  // runTurn is an async generator that yields AgentEvents. We consume
+  // every event, forward it to the UI (if onEvent is provided), and
+  // capture tool calls for the StepResult.
+  const turn = runTurn({
+    history,
+    model,
+    onConfirm,
+    systemPrompt,
+    maxSteps: 15,
+  });
+
+  let result = await turn.next();
+  while (!result.done) {
+    const event = result.value;
+
+    // Forward the event to the UI so the user sees real-time progress
+    if (onEvent) {
+      onEvent(event);
+    }
+
+    // ── Capture tool calls ───────────────────────────────────────────
+    if (event.kind === "tool-call") {
+      // Record the pending tool call so we can pair it with its result
+      pendingToolCalls.set(event.toolCallId, {
+        toolName: event.toolName,
+        input: event.input,
+      });
+
+      // Check if this is a file-modifying tool call and track the file
+      const filePath = extractFileFromToolCall(event.toolName, event.input);
+      if (filePath) {
+        claimedFiles.add(filePath);
+      }
+    }
+
+    // ── Capture tool results ─────────────────────────────────────────
+    if (event.kind === "tool-result") {
+      const pending = pendingToolCalls.get(event.toolCallId);
+      if (pending) {
+        toolCallsMade.push({
+          toolName: pending.toolName,
+          toolCallId: event.toolCallId,
+          input: pending.input,
+          output: event.output,
+        });
+        pendingToolCalls.delete(event.toolCallId);
+      }
+    }
+
+    // ── Capture tool errors (still record the call, with error output)
+    if (event.kind === "tool-error") {
+      const pending = pendingToolCalls.get(event.toolCallId);
+      if (pending) {
+        toolCallsMade.push({
+          toolName: pending.toolName,
+          toolCallId: event.toolCallId,
+          input: pending.input,
+          output: { error: String(event.error) },
+        });
+        pendingToolCalls.delete(event.toolCallId);
+      }
+    }
+
+    result = await turn.next();
+  }
+
+  // Return the StepResult for the verifier to check
+  return {
+    stepIndex: step.index,
+    claimedFiles: Array.from(claimedFiles),
+    toolCallsMade,
+  };
+}
