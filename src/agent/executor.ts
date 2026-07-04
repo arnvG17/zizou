@@ -38,6 +38,7 @@ import { buildSystemPrompt, type AgentRole } from "../context/build-system-promp
 import { runTurn, type AgentEvent } from "./run-turn.js";
 import type { ConfirmFn } from "../tools/types.js";
 import type { PlanStep, StepResult, ToolCall, ProjectContext } from "./types.js";
+import { SessionLogger } from "./debug/index.js";
 
 // ─── Step Prompt Builder ─────────────────────────────────────────────────────
 //
@@ -120,10 +121,14 @@ export async function executeStep(
   const systemPrompt = await buildSystemPrompt(
     context.projectRoot,
     "executor" as AgentRole,
+    step.targetFiles,
   );
 
   // Build the step-specific user message
   const stepPrompt = buildStepPrompt(step);
+
+  SessionLogger.logExecutorStepStart(step, context.budget);
+  SessionLogger.logExecutorStepLLM(systemPrompt, stepPrompt);
 
   // Initialize the conversation history with just the step prompt.
   // Each step gets a fresh conversation — no carryover from previous
@@ -135,6 +140,15 @@ export async function executeStep(
   // Tracking collections for building the StepResult
   const claimedFiles = new Set<string>();
   const toolCallsMade: ToolCall[] = [];
+  let fullResponseText = "";
+
+  // ── Conversation history tracking for subsequent rounds ─────────────────────
+  const loggedHistory: ModelMessage[] = [
+    { role: "user", content: stepPrompt }
+  ];
+  let roundIndex = 1;
+  let currentAssistantParts: any[] = [];
+  let currentToolParts: any[] = [];
 
   // Track in-progress tool calls so we can pair call → result
   const pendingToolCalls = new Map<string, { toolName: string; input: unknown }>();
@@ -159,6 +173,87 @@ export async function executeStep(
     // Forward the event to the UI so the user sees real-time progress
     if (onEvent) {
       onEvent(event);
+    }
+
+    // ── Round Transition Detection ───────────────────────────────────
+    // If we receive a new text chunk or tool-call but we have already
+    // executed tools in the previous round, we are transitioning to a
+    // new LLM request.
+    if ((event.kind === "text-delta" || event.kind === "tool-call") && currentToolParts.length > 0) {
+      loggedHistory.push({ role: "assistant", content: [...currentAssistantParts] });
+      loggedHistory.push({ role: "tool", content: [...currentToolParts] });
+      currentAssistantParts = [];
+      currentToolParts = [];
+      roundIndex++;
+      SessionLogger.logLLMRoundStart(roundIndex, systemPrompt, loggedHistory);
+    }
+
+    // ── Log high-level events to session log (silencing text-deltas) ──
+    if (event.kind === "text-delta") {
+      fullResponseText += event.text;
+
+      // Accumulate text part for history tracking
+      let textPart = currentAssistantParts.find(p => p.type === "text");
+      if (!textPart) {
+        textPart = { type: "text", text: "" };
+        currentAssistantParts.unshift(textPart); // Keep text at the beginning
+      }
+      textPart.text += event.text;
+    } else if (event.kind === "tool-call") {
+      const argsStr = JSON.stringify(event.input, null, 2);
+      SessionLogger.logExecutorStreamEvent(
+        `\n  [TOOL CALL INITIATED]\n` +
+        `    Tool Name: ${event.toolName}\n` +
+        `    ID       : ${event.toolCallId}\n` +
+        `    How Sent : Sent via native JSON tool-calling protocol (function calling) in LLM API payload\n` +
+        `    Arguments:\n` +
+        argsStr.split("\n").map(l => `      ${l}`).join("\n") + "\n"
+      );
+
+      // Accumulate tool-call part for history tracking
+      currentAssistantParts.push({
+        type: "tool-call",
+        toolCallId: event.toolCallId,
+        toolName: event.toolName,
+        args: event.input
+      });
+    } else if (event.kind === "tool-result") {
+      const outputStr = JSON.stringify(event.output, null, 2);
+      const outputPreview = outputStr.length > 2000 ? outputStr.slice(0, 2000) + "\n      ... (truncated)" : outputStr;
+      SessionLogger.logExecutorStreamEvent(
+        `\n  [TOOL CALL COMPLETED]\n` +
+        `    Tool Name: ${event.toolName}\n` +
+        `    ID       : ${event.toolCallId}\n` +
+        `    Result   :\n` +
+        outputPreview.split("\n").map(l => `      ${l}`).join("\n") + "\n"
+      );
+
+      // Accumulate tool-result part for history tracking
+      currentToolParts.push({
+        type: "tool-result",
+        toolCallId: event.toolCallId,
+        toolName: event.toolName,
+        result: event.output,
+        isError: false
+      });
+    } else if (event.kind === "tool-error") {
+      SessionLogger.logExecutorStreamEvent(
+        `\n  [TOOL CALL ERROR]\n` +
+        `    Tool Name: ${event.toolName}\n` +
+        `    ID       : ${event.toolCallId}\n` +
+        `    Error    : ${String(event.error)}\n`
+      );
+
+      // Accumulate tool-error part as tool-result for history tracking
+      currentToolParts.push({
+        type: "tool-result",
+        toolCallId: event.toolCallId,
+        toolName: event.toolName,
+        result: { error: String(event.error) },
+        isError: true
+      });
+    } else if (event.kind === "finish") {
+      SessionLogger.logExecutorStreamEvent(`\n  [LLM FINISHED GENERATION] usage=${JSON.stringify(event.usage ?? {})}\n`);
     }
 
     // ── Capture tool calls ───────────────────────────────────────────
@@ -207,10 +302,17 @@ export async function executeStep(
     result = await turn.next();
   }
 
-  // Return the StepResult for the verifier to check
-  return {
+  const finalResult = {
     stepIndex: step.index,
     claimedFiles: Array.from(claimedFiles),
     toolCallsMade,
   };
+
+  SessionLogger.logExecutorStepEnd({
+    ...finalResult,
+    fullResponseText,
+  });
+
+  // Return the StepResult for the verifier to check
+  return finalResult;
 }

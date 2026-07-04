@@ -34,6 +34,7 @@
 import { generateText, type LanguageModel } from "ai";
 import { buildSystemPrompt, type AgentRole } from "../context/build-system-prompt.js";
 import type { ClarifyingQuestion, ProjectContext } from "./types.js";
+import { SessionLogger } from "./debug/index.js";
 
 // ─── Clarifier System Prompt Extension ───────────────────────────────────────
 //
@@ -94,18 +95,23 @@ export async function clarify(
     "clarifier" as AgentRole,
   );
 
+  SessionLogger.logClarifierStart(userPrompt, projectContext.budget);
+
   // Ask the model to generate clarifying questions. We use generateText
   // (not streamText) because:
   //   1. The output is small (a JSON array of questions)
   //   2. We need the complete response to parse JSON
   //   3. There's no value in streaming a JSON array to the user
+  const systemText = `${systemPrompt}\n\n${CLARIFIER_INSTRUCTIONS}`;
+  const userText = `Please analyze this request and generate clarifying questions if needed:\n\n${userPrompt}`;
+
   const result = await generateText({
     model,
-    system: `${systemPrompt}\n\n${CLARIFIER_INSTRUCTIONS}`,
+    system: systemText,
     messages: [
       {
         role: "user",
-        content: `Please analyze this request and generate clarifying questions if needed:\n\n${userPrompt}`,
+        content: userText,
       },
     ],
   });
@@ -115,11 +121,16 @@ export async function clarify(
   // formatting issues (markdown code blocks, extra text around JSON).
   const responseText = result.text.trim();
 
+  // Log verbatim prompts and response
+  SessionLogger.logClarifierLLM(systemText, userText, responseText);
+
+  let finalQuestions: ClarifyingQuestion[] = [];
+
   try {
     // Try direct JSON parse first (ideal case)
     const parsed = JSON.parse(responseText);
     if (Array.isArray(parsed)) {
-      return validateQuestions(parsed);
+      finalQuestions = validateQuestions(parsed);
     }
   } catch {
     // Model may have wrapped the JSON in markdown code blocks
@@ -129,7 +140,7 @@ export async function clarify(
       try {
         const parsed = JSON.parse(jsonMatch[0]);
         if (Array.isArray(parsed)) {
-          return validateQuestions(parsed);
+          finalQuestions = validateQuestions(parsed);
         }
       } catch {
         // Fall through to empty array — if the model can't produce
@@ -138,10 +149,8 @@ export async function clarify(
     }
   }
 
-  // If parsing fails entirely, return empty array. The planner will
-  // proceed without clarifications, making its own assumptions. This
-  // is better than blocking the entire flow on a parse error.
-  return [];
+  SessionLogger.logClarifierEnd(finalQuestions);
+  return finalQuestions;
 }
 
 // ─── Validation ──────────────────────────────────────────────────────────────

@@ -29,6 +29,7 @@
 import { statSync } from "fs";
 import { resolve } from "path";
 import type { PlanStep, StepResult, VerificationResult } from "./types.js";
+import { SessionLogger } from "./debug/index.js";
 
 // ─── File State Snapshot ─────────────────────────────────────────────────────
 //
@@ -126,6 +127,8 @@ export async function verifyStep(
 ): Promise<VerificationResult> {
   const mismatches: string[] = [];
 
+  SessionLogger.logVerifierStart(step, result.claimedFiles);
+
   // ── Check 1: Did every claimed file actually change? ───────────────────
   //
   // The executor says it wrote/edited these files. Verify that each one
@@ -186,8 +189,11 @@ export async function verifyStep(
   }
 
   // Verification passes only if there are zero mismatches.
-  return {
+  const finalResult = {
     verified: mismatches.length === 0,
     mismatches,
   };
+
+  SessionLogger.logVerifierEnd(finalResult);
+  return finalResult;
 }

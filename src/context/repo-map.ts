@@ -59,6 +59,11 @@ export interface CodeSymbol {
 const SKIP_DIRS = new Set(["node_modules", ".git", "dist", "build", ".next", "coverage"]);
 const CODE_FILE_PATTERN = /\.(ts|tsx|js|jsx|mjs|cjs|html|css)$/;
 
+// Root-level scratch/demo files that are not part of the Zizou codebase.
+// Longer term, consider a .zizouignore file (same syntax as .gitignore)
+// so this list doesn't need to live in source — flagged as a follow-up.
+const EXCLUDED_FILES = new Set(["chess.html", "tictactoe.html", "todo.js", "todo.css"]);
+
 // Patterns for "things that look like a top-level declaration worth
 // surfacing in the map." Each one is intentionally narrow — see the
 // header comment above for why broadening these is the wrong fix.
@@ -132,6 +137,7 @@ export function scanRepo(rootDir: string): CodeSymbol[] {
 
     for (const entry of entries) {
       if (SKIP_DIRS.has(entry)) continue;
+      if (EXCLUDED_FILES.has(entry)) continue;
       const fullPath = join(dir, entry);
       let stat;
       try {
@@ -145,14 +151,9 @@ export function scanRepo(rootDir: string): CodeSymbol[] {
         const content = readFileSync(fullPath, "utf-8");
         const relPath = relative(rootDir, fullPath).replace(/\\/g, '/');
         const fileSymbols = extractSymbols(relPath, content);
-        if (fileSymbols.length === 0) {
-          // Push a dummy symbol so the file at least appears in the map
-          allSymbols.push({
-            file: relPath,
-            line: 1,
-            signature: "(no exported symbols extracted)"
-          });
-        } else {
+        // Only include files that have at least one extracted symbol.
+        // Files with zero symbols add noise without information value.
+        if (fileSymbols.length > 0) {
           allSymbols.push(...fileSymbols);
         }
       }

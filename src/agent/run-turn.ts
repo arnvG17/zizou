@@ -156,6 +156,13 @@ export async function* runTurn(
   };
 
   // ── Call the LLM ───────────────────────────────────────────────────────
+  //
+  // maxRetries: 0 disables the AI SDK's built-in retry logic.
+  // WHY: The SDK default is maxRetries:2 (= 3 total attempts). On a
+  // rate-limit 429, each retry resends the FULL payload (system prompt +
+  // tools + history), tripling token consumption for zero benefit. We
+  // surface the error immediately instead so the user can wait or switch
+  // providers without burning their daily quota.
 
   const result = streamText({
     model,
@@ -163,6 +170,7 @@ export async function* runTurn(
     tools,
     stopWhen: stepCountIs(maxSteps),
     messages: history,
+    maxRetries: 0,
   });
 
   // ── Consume the live stream ────────────────────────────────────────────
@@ -173,45 +181,95 @@ export async function* runTurn(
 
   let stepIndex = 0;
 
-  for await (const part of result.fullStream) {
-    switch (part.type) {
-      case "step-start":
-        stepIndex++;
-        log.logStepStart(stepIndex);
-        break;
+  let rateLimitCaught = false;
 
-      case "step-finish":
-        log.logStepFinish(stepIndex, (part as any).finishReason ?? "unknown", (part as any).usage);
-        break;
+  try {
+    for await (const part of result.fullStream) {
+      switch (part.type) {
+        case "step-start":
+          stepIndex++;
+          log.logStepStart(stepIndex);
+          break;
 
-      case "text-delta":
-        log.logTextDelta(part.text);
-        yield { kind: "text-delta", text: part.text };
-        break;
+        case "step-finish":
+          log.logStepFinish(stepIndex, (part as any).finishReason ?? "unknown", (part as any).usage);
+          break;
 
-      case "tool-call":
-        log.logToolCall(part.toolName, part.toolCallId, part.input);
-        yield { kind: "tool-call", toolCallId: part.toolCallId, toolName: part.toolName, input: part.input };
-        break;
+        case "text-delta":
+          log.logTextDelta(part.text);
+          yield { kind: "text-delta", text: part.text };
+          break;
 
-      case "tool-result":
-        log.logToolResult(part.toolName, part.toolCallId, part.output);
-        yield { kind: "tool-result", toolCallId: part.toolCallId, toolName: part.toolName, output: part.output };
-        break;
+        case "tool-call":
+          log.logToolCall(part.toolName, part.toolCallId, part.input);
+          yield { kind: "tool-call", toolCallId: part.toolCallId, toolName: part.toolName, input: part.input };
+          break;
 
-      case "tool-error":
-        // Fires when execute() itself THREW — not a controlled { success: false } return.
-        log.logToolError(part.toolName, part.toolCallId, part.error);
-        yield { kind: "tool-error", toolCallId: part.toolCallId, toolName: part.toolName, error: part.error };
-        break;
+        case "tool-result":
+          log.logToolResult(part.toolName, part.toolCallId, part.output);
+          yield { kind: "tool-result", toolCallId: part.toolCallId, toolName: part.toolName, output: part.output };
+          break;
 
-      case "finish":
-        log.logFinish((part as any).finishReason ?? "unknown", (part as any).usage);
-        break;
+        case "tool-error":
+          // Fires when execute() itself THREW — not a controlled { success: false } return.
+          log.logToolError(part.toolName, part.toolCallId, part.error);
+          yield { kind: "tool-error", toolCallId: part.toolCallId, toolName: part.toolName, error: part.error };
+          break;
 
-      // Other part types (reasoning-*, source, file, start, abort, raw)
-      // are intentionally not forwarded to the UI.
+        case "finish":
+          log.logFinish((part as any).finishReason ?? "unknown", (part as any).usage);
+          break;
+
+        // Other part types (reasoning-*, source, file, start, abort, raw)
+        // are intentionally not forwarded to the UI.
+      }
     }
+  } catch (err: any) {
+    // ── Rate-limit detection ───────────────────────────────────────────
+    //
+    // Detect API rate-limit errors (HTTP 429 / "Rate limit" in message)
+    // and surface a clean, actionable message instead of a raw stack trace.
+    // This prevents the old behavior where the SDK would silently retry 3×,
+    // tripling token waste for zero benefit.
+    const errMsg = String(err?.message ?? err ?? "");
+    const isRateLimit =
+      errMsg.includes("Rate limit") ||
+      errMsg.includes("rate_limit") ||
+      errMsg.includes("429") ||
+      errMsg.includes("Too Many Requests") ||
+      errMsg.includes("tokens per") ||
+      errMsg.includes("TPD") ||
+      errMsg.includes("TPM") ||
+      errMsg.includes("RPM") ||
+      errMsg.includes("RPD");
+
+    if (isRateLimit) {
+      rateLimitCaught = true;
+
+      // Extract the "try again in Xm Ys" hint if present
+      const waitMatch = errMsg.match(/try again in\s+([^\\.]+)/i);
+      const waitHint = waitMatch ? ` Wait ${waitMatch[1].trim()}.` : "";
+
+      const friendlyMsg =
+        `⚠️  Rate limit hit — your API provider rejected this request.${waitHint}\n` +
+        `Tip: Switch to a different provider/model, or wait for your quota to reset.\n` +
+        `(No retries attempted — this saves your remaining token budget.)`;
+
+      yield { kind: "text-delta", text: friendlyMsg };
+    } else {
+      // Re-throw non-rate-limit errors so the caller handles them normally
+      throw err;
+    }
+  }
+
+  // ── Early exit on rate limit ────────────────────────────────────────────
+  //
+  // If we caught a rate-limit error, the stream never completed — accessing
+  // result.responseMessages would re-throw the same error. Bail out
+  // gracefully by returning the current history unchanged.
+  if (rateLimitCaught) {
+    yield { kind: "turn-complete" };
+    return history;
   }
 
   // ── Collect response messages ──────────────────────────────────────────

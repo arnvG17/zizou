@@ -36,6 +36,7 @@
 import { generateText, type LanguageModel } from "ai";
 import { buildSystemPrompt, type AgentRole } from "../context/build-system-prompt.js";
 import type { PlanStep, ProjectContext } from "./types.js";
+import { SessionLogger } from "./debug/index.js";
 
 // ─── Planner System Prompt Extension ─────────────────────────────────────────
 //
@@ -132,29 +133,39 @@ export async function plan(
     }
   }
 
+  SessionLogger.logPlannerStart(userPrompt, clarifications);
+
   // Generate the plan. We use generateText (not streamText) because:
   //   1. The output is a complete JSON array that needs full parsing
   //   2. Streaming a JSON plan would require incremental JSON parsing
   //   3. The plan needs to be displayed all-at-once for user review
+  const systemText = `${systemPrompt}\n\n${PLANNER_INSTRUCTIONS}`;
+  const userText = userMessage;
+
   const result = await generateText({
     model,
-    system: `${systemPrompt}\n\n${PLANNER_INSTRUCTIONS}`,
+    system: systemText,
     messages: [
       {
         role: "user",
-        content: userMessage,
+        content: userText,
       },
     ],
   });
 
   // Parse the model's response as a JSON array of PlanStep objects.
   const responseText = result.text.trim();
+
+  // Log verbatim prompts and response
+  SessionLogger.logPlannerLLM(systemText, userText, responseText);
+
   const steps = parsePlanSteps(responseText);
 
   // Validate dependency ordering — catch any invalid dependsOn references
   // before the orchestrator tries to execute them.
   validateDependencies(steps);
 
+  SessionLogger.logPlannerEnd(steps);
   return steps;
 }
 

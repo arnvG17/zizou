@@ -62,6 +62,7 @@ import { plan } from "./planner.js";
 import { executeStep } from "./executor.js";
 import { capturePreSnapshot, verifyStep } from "./verifier.js";
 import { type AgentEvent } from "./run-turn.js";
+import { SessionLogger } from "./debug/index.js";
 
 // ─── Constants ───────────────────────────────────────────────────────────────
 
@@ -273,12 +274,14 @@ async function* runBuildMode(
   // a prompt asking the user to switch to plan mode.
   const escalation = shouldEscalate(stepResult, verification);
   if (escalation) {
+    SessionLogger.logEscalation(escalation.reason);
     yield { kind: "escalation-prompt", trigger: escalation };
     // The UI will handle the Y/n prompt and potentially re-invoke
     // the orchestrator in plan mode. We stop here.
     return;
   }
 
+  SessionLogger.logSessionComplete();
   yield { kind: "complete" };
 }
 
@@ -388,6 +391,7 @@ async function* runPlanMode(
     yield { kind: "step-verified", step, verification };
   }
 
+  SessionLogger.logSessionComplete();
   yield { kind: "complete" };
 }
 
@@ -415,6 +419,11 @@ export async function* runOrchestrator(
   clarificationAnswers?: Record<string, string>,
   approvedPlan?: PlanStep[],
 ): AsyncGenerator<OrchestratorEvent> {
+  // Only log session start on the very first entry of the conversation turn
+  if (!approvedPlan && (!clarificationAnswers || Object.keys(clarificationAnswers).length === 0)) {
+    SessionLogger.logSessionStart(userPrompt, modeContext.mode, context.projectRoot);
+  }
+
   if (modeContext.mode === "plan") {
     // Plan mode: full clarify → plan → execute → verify pipeline
     yield* runPlanMode(
