@@ -63,8 +63,9 @@ import { executeStep } from "./executor.js";
 import { capturePreSnapshot, verifyStep } from "./verifier.js";
 import { type AgentEvent } from "./run-turn.js";
 import { SessionLogger } from "./debug/index.js";
-import { createSessionCommit } from "../git/git.js";
-import { getActiveSessionId } from "../session/registry.js";
+import { createCheckpoint } from "../checkpoint/manager.js";
+import { captureFileState } from "../checkpoint/patcher.js";
+import { resolve } from "path";
 
 // ─── Constants ───────────────────────────────────────────────────────────────
 
@@ -242,6 +243,13 @@ async function* runBuildMode(
   // The verifier will still check claimedFiles from the StepResult.
   const preSnapshots = capturePreSnapshot(syntheticStep, context.projectRoot);
 
+  // Capture old file states for checkpoint creation
+  // We need to capture content before execution to create proper patches
+  const oldFileStates = new Map<string, string | null>();
+  for (const file of syntheticStep.targetFiles) {
+    oldFileStates.set(file, captureFileState(file));
+  }
+
   // Execute the step via the executor, forwarding agent events to the UI
   const stepResult = await executeStep(
     syntheticStep,
@@ -269,19 +277,32 @@ async function* runBuildMode(
   // Report verification result
   yield { kind: "step-verified", step: syntheticStep, verification };
 
-  // ── Git commit on successful verification ───────────────────────────
+  // ── Checkpoint creation on successful verification ─────────────────
   //
-  // If verification succeeded, create a git commit for this step.
-  // This is only done if there's an active session.
+  // If verification succeeded, create a checkpoint for this step.
+  // This tracks the changes independently of Git.
   if (verification.verified) {
-    const activeSessionId = getActiveSessionId();
-    if (activeSessionId) {
-      try {
-        createSessionCommit(activeSessionId, syntheticStep.index, syntheticStep.description);
-      } catch (error) {
-        // Log but don't fail the step if commit fails
-        console.warn("Failed to create git commit for step:", error);
+    try {
+      // Capture old file states from pre-snapshots
+      // In build mode, targetFiles is empty, so we use claimedFiles
+      const oldFileStates = new Map<string, string | null>();
+      for (const file of stepResult.claimedFiles) {
+        const absPath = resolve(context.projectRoot, file);
+        const preSnapshot = preSnapshots.get(absPath);
+        if (preSnapshot) {
+          // If file existed before, capture its content
+          // If file didn't exist (mtimeMs is null), oldContent is null
+          if (preSnapshot.mtimeMs !== null) {
+            oldFileStates.set(file, captureFileState(file));
+          } else {
+            oldFileStates.set(file, null);
+          }
+        }
       }
+      createCheckpoint(syntheticStep.description, stepResult.claimedFiles, oldFileStates);
+    } catch (error) {
+      // Log but don't fail the step if checkpoint creation fails
+      console.warn("Failed to create checkpoint for step:", error);
     }
   }
 
@@ -387,6 +408,12 @@ async function* runPlanMode(
     // Capture pre-execution filesystem state for this step's target files
     const preSnapshots = capturePreSnapshot(step, context.projectRoot);
 
+    // Capture old file states for checkpoint creation
+    const oldFileStates = new Map<string, string | null>();
+    for (const file of step.targetFiles) {
+      oldFileStates.set(file, captureFileState(file));
+    }
+
     // Execute the step
     const stepResult = await executeStep(
       step,
@@ -408,19 +435,32 @@ async function* runPlanMode(
     // still report the result so they can see what went wrong.
     yield { kind: "step-verified", step, verification };
 
-    // ── Git commit on successful verification ───────────────────────────
+    // ── Checkpoint creation on successful verification ─────────────────
     //
-    // If verification succeeded, create a git commit for this step.
-    // This is only done if there's an active session.
+    // If verification succeeded, create a checkpoint for this step.
+    // This tracks the changes independently of Git.
     if (verification.verified) {
-      const activeSessionId = getActiveSessionId();
-      if (activeSessionId) {
-        try {
-          createSessionCommit(activeSessionId, step.index, step.description);
-        } catch (error) {
-          // Log but don't fail the step if commit fails
-          console.warn("Failed to create git commit for step:", error);
+      try {
+        // Update oldFileStates with files that were actually changed
+        const updatedOldFileStates = new Map<string, string | null>();
+        for (const file of stepResult.claimedFiles) {
+          const absPath = resolve(context.projectRoot, file);
+          const preSnapshot = preSnapshots.get(absPath);
+          if (preSnapshot) {
+            if (preSnapshot.mtimeMs !== null) {
+              updatedOldFileStates.set(file, captureFileState(file));
+            } else {
+              updatedOldFileStates.set(file, null);
+            }
+          } else if (oldFileStates.has(file)) {
+            // Use the pre-captured state if available
+            updatedOldFileStates.set(file, oldFileStates.get(file)!);
+          }
         }
+        createCheckpoint(step.description, stepResult.claimedFiles, updatedOldFileStates);
+      } catch (error) {
+        // Log but don't fail the step if checkpoint creation fails
+        console.warn("Failed to create checkpoint for step:", error);
       }
     }
   }

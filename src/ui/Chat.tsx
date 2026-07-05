@@ -41,7 +41,8 @@ import { useTerminalSize, SidebarWordmark, SidebarMountains } from "./Figurine.j
 import { handleSlashCommand, SLASH_COMMANDS, WELCOME_MESSAGE, getSkills } from "../commands/index.js";
 import { readdirSync, statSync } from "fs";
 import { join, relative } from "path";
-import { loadActiveSessionState, saveActiveSessionState } from "../session/registry.js";
+import { loadActiveSessionState, saveActiveSessionState, listSessions, getActiveSession, getActiveSessionId, createSession } from "../session/registry.js";
+import { listCheckpoints, listBranches } from "../checkpoint/manager.js";
 
 // ─── Orchestrator imports ────────────────────────────────────────────────────
 // These enable the full clarify → plan → execute → verify pipeline.
@@ -251,6 +252,8 @@ export function Chat({ onChangeKeys, mode: initialMode = "build", initialPrompt 
   const { cols } = useTerminalSize();
   const showSidebar = cols >= 90 && log.length > 0;
 
+  const [sessionName, setSessionName] = useState<string>("Untitled");
+
   const sessionId = useMemo(() => {
     const d = new Date();
     return d.toISOString().replace(/\.\d+Z$/, "Z");
@@ -298,6 +301,21 @@ export function Chat({ onChangeKeys, mode: initialMode = "build", initialPrompt 
   useEffect(() => {
     // Load session state on mount
     const sessionState = loadActiveSessionState();
+    const activeSession = getActiveSession();
+    
+    // Set session name from active session
+    if (activeSession) {
+      setSessionName(activeSession.name);
+    } else {
+      // Auto-create a new session if none exists
+      try {
+        createSession("Untitled");
+        setSessionName("Untitled");
+      } catch (error) {
+        console.warn("Failed to create auto session:", error);
+      }
+    }
+    
     if (sessionState) {
       history.current = sessionState.conversation;
       setTokenStats(sessionState.tokenStats);
@@ -369,6 +387,36 @@ export function Chat({ onChangeKeys, mode: initialMode = "build", initialPrompt 
       }
       return "model-providers";
     }
+    if (input.startsWith("/session ")) {
+      const parts = input.trim().split(/\s+/);
+      if (parts.length === 1) {
+        return "session-subcommands";
+      }
+      if (parts.length === 2 && (parts[1] === "switch" || parts[1] === "delete")) {
+        return "session-names";
+      }
+      return null;
+    }
+    if (input.startsWith("/context ")) {
+      const parts = input.trim().split(/\s+/);
+      if (parts.length === 1) {
+        return "context-modes";
+      }
+      return null;
+    }
+    if (input.startsWith("/checkpoint ")) {
+      const parts = input.trim().split(/\s+/);
+      if (parts.length === 1) {
+        return "checkpoint-subcommands";
+      }
+      if (parts.length === 2 && (parts[1] === "restore" || parts[1] === "diff" || parts[1] === "delete")) {
+        return "checkpoint-targets";
+      }
+      if (parts.length === 2 && parts[1] === "switch") {
+        return "checkpoint-branches";
+      }
+      return null;
+    }
     if (input.includes(" ")) return null; // normal typing, no autocomplete
     return "commands";
   }, [input, showSuggestions]);
@@ -404,6 +452,67 @@ export function Chat({ onChangeKeys, mode: initialMode = "build", initialPrompt 
       .filter((skill) => skill.toLowerCase().includes(skillSearchQuery.toLowerCase()))
       .slice(0, 30);
   }, [suggestionMode, skillSearchQuery, availableSkills]);
+
+  const sessionSubcommands = useMemo(() => {
+    if (suggestionMode !== "session-subcommands") return [];
+    return [
+      { value: "new", label: "new <name> - Create a new session" },
+      { value: "list", label: "list - List all sessions" },
+      { value: "switch", label: "switch <name> - Switch to a session" },
+      { value: "delete", label: "delete <name> - Delete a session" },
+    ];
+  }, [suggestionMode]);
+
+  const sessionNames = useMemo(() => {
+    if (suggestionMode !== "session-names") return [];
+    const sessions = listSessions();
+    const activeSession = getActiveSession();
+    return sessions.map((s) => ({
+      value: s.name,
+      label: `${s.name}${s.id === activeSession?.id ? " [ACTIVE]" : ""}`,
+    }));
+  }, [suggestionMode]);
+
+  const contextModes = useMemo(() => {
+    if (suggestionMode !== "context-modes") return [];
+    return [
+      { value: "light", label: "light - Minimal context" },
+      { value: "default", label: "default - Balanced context" },
+      { value: "max", label: "max - Maximum context" },
+    ];
+  }, [suggestionMode]);
+
+  const checkpointSubcommands = useMemo(() => {
+    if (suggestionMode !== "checkpoint-subcommands") return [];
+    return [
+      { value: "list", label: "list - List all checkpoints" },
+      { value: "diff", label: "diff - Show changes in last checkpoint" },
+      { value: "diff", label: "diff <id> - Show changes in checkpoint" },
+      { value: "diff", label: "diff <from> <to> - Compare two checkpoints" },
+      { value: "restore", label: "restore <id> - Restore to checkpoint" },
+      { value: "branch", label: "branch <name> - Create new branch" },
+      { value: "switch", label: "switch <branch> - Switch to branch" },
+      { value: "delete", label: "delete <id> - Delete checkpoint" },
+    ];
+  }, [suggestionMode]);
+
+  const checkpointTargets = useMemo(() => {
+    if (suggestionMode !== "checkpoint-targets") return [];
+    const checkpoints = listCheckpoints();
+    return checkpoints.map((c) => ({
+      value: c.id.slice(0, 8),
+      label: `Step ${c.stepIndex}: ${c.description}`,
+    }));
+  }, [suggestionMode]);
+
+  const checkpointBranches = useMemo(() => {
+    if (suggestionMode !== "checkpoint-branches") return [];
+    const branches = listBranches();
+    return branches.map((b) => ({
+      value: b.name,
+      label: b.name,
+    }));
+  }, [suggestionMode]);
 
   const providerSearchQuery = useMemo(() => {
     if (!input.startsWith("/model ")) return "";
@@ -447,8 +556,26 @@ export function Chat({ onChangeKeys, mode: initialMode = "build", initialPrompt 
     if (suggestionMode === "model-names") {
       return filteredModelNames.map((m) => ({ value: m, description: "model" }));
     }
+    if (suggestionMode === "session-subcommands") {
+      return sessionSubcommands.map((s) => ({ value: s.value, description: s.label }));
+    }
+    if (suggestionMode === "session-names") {
+      return sessionNames.map((s) => ({ value: s.value, description: s.label }));
+    }
+    if (suggestionMode === "context-modes") {
+      return contextModes.map((m) => ({ value: m.value, description: m.label }));
+    }
+    if (suggestionMode === "checkpoint-subcommands") {
+      return checkpointSubcommands.map((s) => ({ value: s.value, description: s.label }));
+    }
+    if (suggestionMode === "checkpoint-targets") {
+      return checkpointTargets.map((t) => ({ value: t.value, description: t.label }));
+    }
+    if (suggestionMode === "checkpoint-branches") {
+      return checkpointBranches.map((b) => ({ value: b.value, description: b.label }));
+    }
     return [];
-  }, [suggestionMode, filteredCommands, filteredFiles, filteredSkills, filteredProviders, filteredModelNames]);
+  }, [suggestionMode, filteredCommands, filteredFiles, filteredSkills, filteredProviders, filteredModelNames, sessionSubcommands, sessionNames, contextModes, checkpointSubcommands, checkpointTargets, checkpointBranches]);
 
   const completedValue = useMemo(() => {
     if (activeSuggestions.length === 0 || selectedIndex >= activeSuggestions.length) return "";
@@ -469,6 +596,30 @@ export function Chat({ onChangeKeys, mode: initialMode = "build", initialPrompt 
     if (suggestionMode === "model-names") {
       const provider = modelSearchQuery.provider;
       return `/model ${provider} ${selected} `;
+    }
+    if (suggestionMode === "session-subcommands") {
+      return "/session " + selected + " ";
+    }
+    if (suggestionMode === "session-names") {
+      const parts = input.split(/\s+/);
+      const subcommand = parts[1] || "";
+      return `/session ${subcommand} ${selected} `;
+    }
+    if (suggestionMode === "context-modes") {
+      return "/context " + selected + " ";
+    }
+    if (suggestionMode === "checkpoint-subcommands") {
+      return "/checkpoint " + selected + " ";
+    }
+    if (suggestionMode === "checkpoint-targets") {
+      const parts = input.split(/\s+/);
+      const subcommand = parts[1] || "";
+      return `/checkpoint ${subcommand} ${selected} `;
+    }
+    if (suggestionMode === "checkpoint-branches") {
+      const parts = input.split(/\s+/);
+      const subcommand = parts[1] || "";
+      return `/checkpoint ${subcommand} ${selected} `;
     }
     return "";
   }, [input, suggestionMode, activeSuggestions, selectedIndex, modelSearchQuery]);
@@ -615,7 +766,7 @@ export function Chat({ onChangeKeys, mode: initialMode = "build", initialPrompt 
         if (executableCommands.includes(selected)) {
           shouldExecute = true;
         }
-      } else if (suggestionMode === "files" || suggestionMode === "skills") {
+      } else if (suggestionMode === "files" || suggestionMode === "skills" || suggestionMode === "session-subcommands" || suggestionMode === "session-names" || suggestionMode === "context-modes" || suggestionMode === "checkpoint-subcommands" || suggestionMode === "checkpoint-targets" || suggestionMode === "checkpoint-branches") {
         shouldExecute = true;
       }
 
@@ -694,6 +845,7 @@ export function Chat({ onChangeKeys, mode: initialMode = "build", initialPrompt 
       setLog,
       setTokenStats,
       calculateTokenStats,
+      onSessionChange: (sessionName: string) => setSessionName(sessionName),
     });
     if (isCommand) return;
 
@@ -1216,7 +1368,7 @@ export function Chat({ onChangeKeys, mode: initialMode = "build", initialPrompt 
         >
           {/* Section 1: Session header */}
           <Box flexDirection="column" marginBottom={1}>
-            <Text color="#E6E6E6" bold>New session</Text>
+            <Text color="#E6E6E6" bold>{sessionName}</Text>
             <Text color="gray">{sessionId}</Text>
             <Box flexDirection="row" gap={1} marginTop={0}>
               <Text color={currentMode === "plan" ? "#D08A4E" : "#3B5FE0"} bold>{currentMode === "plan" ? "◆ Plan" : "● Build"}</Text>

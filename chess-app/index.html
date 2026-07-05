@@ -1,0 +1,36 @@
+<!DOCTYPE html>
+<html>
+<head>
+    <title>Chess Board</title>
+    <style>
+        body {
+            font-family: Arial, sans-serif;
+        }
+        .chess-board {
+            border: 1px solid black;
+            width: 400px;
+            height: 400px;
+            display: grid;
+            grid-template-columns: repeat(8, 1fr);
+            grid-template-rows: repeat(8, 1fr);
+        }
+        .chess-board .square {
+            width: 50px;
+            height: 50px;
+            border: 1px solid black;
+        }
+        .chess-board .square.light {
+            background-color: #F0F0F0;
+        }
+        .chess-board .square.dark {
+            background-color: #666;
+        }
+    </style>
+</head>
+<body>
+    <div class="chess-board">
+        <!-- 64 squares will be generated here -->
+    </div>
+    <script src="script.js"></script>
+</body>
+</html>

@@ -22,7 +22,16 @@ import {
   getActiveSession,
   getActiveSessionId,
 } from "../session/registry.js";
-import { revertSession, listSessionCommits, gitGetDiff } from "../git/git.js";
+import {
+  listCheckpoints,
+  restoreCheckpoint,
+  createBranch,
+  switchBranch,
+  listBranches,
+  getActiveBranch,
+  diffCheckpoints,
+  deleteCheckpoint,
+} from "../checkpoint/manager.js";
 import type { ConfirmFn } from "../tools/index.js";
 
 export interface SlashCommandInfo {
@@ -44,7 +53,7 @@ export const SLASH_COMMANDS: SlashCommandInfo[] = [
   { command: "/skills", description: "List available custom agent skills" },
   { command: "/clear", description: "Reset conversation history & start new session" },
   { command: "/session", description: "Session management (new, list, switch, delete)" },
-  { command: "/revert", description: "Revert session to a previous step" },
+  { command: "/checkpoint", description: "Checkpoint management (list, diff, restore, branch, switch, delete)" },
   { command: "/help", description: "Show available commands & active provider" },
   { command: "/exit", description: "Close Zizou" },
 ];
@@ -116,6 +125,8 @@ export interface CommandContext {
   onModeChange?: (mode: "build" | "plan") => void;
   /** Returns the current mode so /help can display it. */
   getCurrentMode?: () => "build" | "plan";
+  /** Callback to update session name in UI when session changes. */
+  onSessionChange?: (sessionName: string) => void;
   setLog: (updater: (prev: LogEntry[]) => LogEntry[]) => void;
   setTokenStats: (stats: any) => void;
   calculateTokenStats: (
@@ -220,6 +231,16 @@ export async function handleSlashCommand(ctx: CommandContext): Promise<boolean> 
     const provider = getDefaultProvider() || "groq";
     ctx.setLog((_l: LogEntry[]) => []);
     ctx.setTokenStats(ctx.calculateTokenStats([], ctx.systemPrompt, undefined, provider));
+    
+    // Create a new session for the fresh start
+    try {
+      const session = createSession("Untitled");
+      ctx.onSessionChange?.(session.name);
+    } catch (error) {
+      // If session creation fails, continue anyway (session system might not be available)
+      console.warn("Failed to create new session on clear:", error);
+    }
+    
     return true;
   }
 
@@ -478,6 +499,7 @@ export async function handleSlashCommand(ctx: CommandContext): Promise<boolean> 
 
       try {
         const session = createSession(sessionArg);
+        ctx.onSessionChange?.(session.name);
         ctx.setLog((l: LogEntry[]) => [
           ...l,
           { kind: "user", text },
@@ -527,11 +549,12 @@ export async function handleSlashCommand(ctx: CommandContext): Promise<boolean> 
       }
 
       try {
-        switchSession(sessionArg);
+        const session = switchSession(sessionArg);
+        ctx.onSessionChange?.(session.name);
         ctx.setLog((l: LogEntry[]) => [
           ...l,
           { kind: "user", text },
-          { kind: "assistant", text: `Switched to session "${sessionArg}".` },
+          { kind: "assistant", text: `Switched to session "${session.name}".` },
         ]);
       } catch (err: any) {
         ctx.setLog((l: LogEntry[]) => [
@@ -578,35 +601,32 @@ export async function handleSlashCommand(ctx: CommandContext): Promise<boolean> 
     return true;
   }
 
-  // ── /revert — revert session to previous step ─────────────────────────────
-  if (command === "revert") {
-    const activeSessionId = getActiveSessionId();
-    if (!activeSessionId) {
-      ctx.setLog((l: LogEntry[]) => [
-        ...l,
-        { kind: "user", text },
-        { kind: "error", text: "No active session. Use /session new <name> to create one." },
-      ]);
-      return true;
-    }
-
+  // ── /checkpoint — checkpoint management ─────────────────────────────────────
+  if (command === "checkpoint") {
     const subCommand = args[0]?.toLowerCase();
     const target = args[1];
+    const target2 = args[2];
 
     if (subCommand === "list") {
-      const commits = listSessionCommits(activeSessionId);
-      if (commits.length === 0) {
+      const checkpoints = listCheckpoints();
+      const branches = listBranches();
+      const activeBranch = getActiveBranch();
+
+      if (checkpoints.length === 0) {
         ctx.setLog((l: LogEntry[]) => [
           ...l,
           { kind: "user", text },
-          { kind: "assistant", text: "No commits found for this session." },
+          { kind: "assistant", text: "No checkpoints found." },
         ]);
         return true;
       }
 
-      let output = "Session commits:\n\n";
-      for (const commit of commits) {
-        output += `  Step ${commit.stepIndex}: ${commit.description}\n    SHA: ${commit.sha}\n    Time: ${new Date(commit.timestamp).toLocaleString()}\n`;
+      let output = "Checkpoints:\n\n";
+      for (const checkpoint of checkpoints) {
+        const branch = branches.find(b => b.id === checkpoint.branchId);
+        const branchName = branch?.name || "unknown";
+        const isActive = activeBranch?.id === checkpoint.branchId ? " [ACTIVE]" : "";
+        output += `  Step ${checkpoint.stepIndex}: ${checkpoint.description}\n    ID: ${checkpoint.id.slice(0, 8)}\n    Branch: ${branchName}${isActive}\n    Time: ${new Date(checkpoint.timestamp).toLocaleString()}\n`;
       }
       
       ctx.setLog((l: LogEntry[]) => [
@@ -618,53 +638,65 @@ export async function handleSlashCommand(ctx: CommandContext): Promise<boolean> 
     }
 
     if (subCommand === "diff") {
-      const commits = listSessionCommits(activeSessionId);
-      if (commits.length === 0) {
+      const checkpoints = listCheckpoints();
+      if (checkpoints.length === 0) {
         ctx.setLog((l: LogEntry[]) => [
           ...l,
           { kind: "user", text },
-          { kind: "error", text: "No commits found for this session." },
+          { kind: "error", text: "No checkpoints found." },
         ]);
         return true;
       }
 
-      let diffTarget: string | undefined;
-      
-      if (target !== undefined) {
-        const numTarget = parseInt(target, 10);
-        if (!isNaN(numTarget)) {
-          // Find commit by step index
-          const commit = commits.find(c => c.stepIndex === numTarget);
-          if (!commit) {
-            ctx.setLog((l: LogEntry[]) => [
-              ...l,
-              { kind: "user", text },
-              { kind: "error", text: `Step ${numTarget} not found in session history.` },
-            ]);
-            return true;
-          }
-          diffTarget = commit.sha;
-        } else {
-          // Use as SHA directly
-          const commit = commits.find(c => c.sha.startsWith(target));
-          if (!commit) {
-            ctx.setLog((l: LogEntry[]) => [
-              ...l,
-              { kind: "user", text },
-              { kind: "error", text: `Commit ${target} not found in session history.` },
-            ]);
-            return true;
-          }
-          diffTarget = commit.sha;
+      if (!target) {
+        // Show diff for the last checkpoint
+        const lastCheckpoint = checkpoints[checkpoints.length - 1];
+        let output = `Changes in checkpoint ${lastCheckpoint.id.slice(0, 8)}:\n\n`;
+        for (const patch of lastCheckpoint.patches) {
+          output += `  ${patch.operation}: ${patch.filePath}\n`;
         }
-      }
-
-      try {
-        const diff = gitGetDiff(diffTarget);
+        
         ctx.setLog((l: LogEntry[]) => [
           ...l,
           { kind: "user", text },
-          { kind: "assistant", text: `Changes${diffTarget ? ` for commit ${diffTarget.slice(0, 8)}` : " in last commit"}:\n\n${diff}` },
+          { kind: "assistant", text: output },
+        ]);
+        return true;
+      }
+
+      // Find checkpoint by ID or step index
+      let fromCheckpoint = checkpoints[checkpoints.length - 1];
+      let toCheckpoint: typeof checkpoints[0] | undefined;
+
+      if (target2) {
+        // Two targets provided: diff between them
+        fromCheckpoint = checkpoints.find(c => c.id.startsWith(target) || c.stepIndex.toString() === target) || fromCheckpoint;
+        toCheckpoint = checkpoints.find(c => c.id.startsWith(target2) || c.stepIndex.toString() === target2);
+      } else {
+        // One target: diff from previous to this target
+        toCheckpoint = checkpoints.find(c => c.id.startsWith(target) || c.stepIndex.toString() === target);
+      }
+
+      if (!toCheckpoint) {
+        ctx.setLog((l: LogEntry[]) => [
+          ...l,
+          { kind: "user", text },
+          { kind: "error", text: `Checkpoint ${target} not found.` },
+        ]);
+        return true;
+      }
+
+      try {
+        const patches = diffCheckpoints(fromCheckpoint.id, toCheckpoint.id);
+        let output = `Changes from ${fromCheckpoint.id.slice(0, 8)} to ${toCheckpoint.id.slice(0, 8)}:\n\n`;
+        for (const patch of patches) {
+          output += `  ${patch.operation}: ${patch.filePath}\n`;
+        }
+        
+        ctx.setLog((l: LogEntry[]) => [
+          ...l,
+          { kind: "user", text },
+          { kind: "assistant", text: output },
         ]);
       } catch (err: any) {
         ctx.setLog((l: LogEntry[]) => [
@@ -676,36 +708,153 @@ export async function handleSlashCommand(ctx: CommandContext): Promise<boolean> 
       return true;
     }
 
-    if (subCommand === "to" || subCommand === undefined) {
-      const revertTarget = subCommand === "to" ? target : undefined;
-      
-      // Parse target: could be a number (stepIndex) or string (SHA)
-      let parsedTarget: number | string | undefined;
-      if (revertTarget !== undefined) {
-        const numTarget = parseInt(revertTarget, 10);
-        if (!isNaN(numTarget)) {
-          parsedTarget = numTarget;
-        } else {
-          parsedTarget = revertTarget;
-        }
-      }
-
-      try {
-        // Use the confirmFn from context if available
-        const confirmFn: ConfirmFn = (description) => {
-          return new Promise((resolve) => {
-            // We can't directly set pendingConfirm here since we're in a command handler
-            // For now, we'll skip confirmation in CLI mode
-            resolve(true);
-          });
-        };
-
-        await revertSession(activeSessionId, parsedTarget, confirmFn);
-        
+    if (subCommand === "restore") {
+      if (!target) {
         ctx.setLog((l: LogEntry[]) => [
           ...l,
           { kind: "user", text },
-          { kind: "assistant", text: `Reverted to ${parsedTarget !== undefined ? `step ${parsedTarget}` : "previous step"}.` },
+          { kind: "error", text: "Usage: /checkpoint restore <checkpoint-id>" },
+        ]);
+        return true;
+      }
+
+      const checkpoints = listCheckpoints();
+      const checkpoint = checkpoints.find(c => c.id.startsWith(target) || c.stepIndex.toString() === target);
+
+      if (!checkpoint) {
+        ctx.setLog((l: LogEntry[]) => [
+          ...l,
+          { kind: "user", text },
+          { kind: "error", text: `Checkpoint ${target} not found.` },
+        ]);
+        return true;
+      }
+
+      try {
+        restoreCheckpoint(checkpoint.id);
+        ctx.setLog((l: LogEntry[]) => [
+          ...l,
+          { kind: "user", text },
+          { kind: "assistant", text: `Restored to checkpoint: ${checkpoint.description}` },
+        ]);
+      } catch (err: any) {
+        ctx.setLog((l: LogEntry[]) => [
+          ...l,
+          { kind: "user", text },
+          { kind: "error", text: err.message },
+        ]);
+      }
+      return true;
+    }
+
+    if (subCommand === "branch") {
+      if (!target) {
+        ctx.setLog((l: LogEntry[]) => [
+          ...l,
+          { kind: "user", text },
+          { kind: "error", text: "Usage: /checkpoint branch <name> [from-checkpoint-id]" },
+        ]);
+        return true;
+      }
+
+      const checkpoints = listCheckpoints();
+      const fromCheckpointId = target2 
+        ? checkpoints.find(c => c.id.startsWith(target2) || c.stepIndex.toString() === target2)?.id
+        : (getActiveBranch()?.headCheckpointId || checkpoints[checkpoints.length - 1]?.id);
+
+      if (!fromCheckpointId) {
+        ctx.setLog((l: LogEntry[]) => [
+          ...l,
+          { kind: "user", text },
+          { kind: "error", text: "No checkpoint to branch from." },
+        ]);
+        return true;
+      }
+
+      try {
+        const branch = createBranch(target, fromCheckpointId);
+        ctx.setLog((l: LogEntry[]) => [
+          ...l,
+          { kind: "user", text },
+          { kind: "assistant", text: `Created branch "${branch.name}" from checkpoint ${fromCheckpointId.slice(0, 8)}` },
+        ]);
+      } catch (err: any) {
+        ctx.setLog((l: LogEntry[]) => [
+          ...l,
+          { kind: "user", text },
+          { kind: "error", text: err.message },
+        ]);
+      }
+      return true;
+    }
+
+    if (subCommand === "switch") {
+      if (!target) {
+        ctx.setLog((l: LogEntry[]) => [
+          ...l,
+          { kind: "user", text },
+          { kind: "error", text: "Usage: /checkpoint switch <branch-name>" },
+        ]);
+        return true;
+      }
+
+      const branches = listBranches();
+      const branch = branches.find(b => b.name === target || b.id.startsWith(target));
+
+      if (!branch) {
+        ctx.setLog((l: LogEntry[]) => [
+          ...l,
+          { kind: "user", text },
+          { kind: "error", text: `Branch ${target} not found.` },
+        ]);
+        return true;
+      }
+
+      try {
+        switchBranch(branch.id);
+        ctx.setLog((l: LogEntry[]) => [
+          ...l,
+          { kind: "user", text },
+          { kind: "assistant", text: `Switched to branch "${branch.name}"` },
+        ]);
+      } catch (err: any) {
+        ctx.setLog((l: LogEntry[]) => [
+          ...l,
+          { kind: "user", text },
+          { kind: "error", text: err.message },
+        ]);
+      }
+      return true;
+    }
+
+    if (subCommand === "delete") {
+      if (!target) {
+        ctx.setLog((l: LogEntry[]) => [
+          ...l,
+          { kind: "user", text },
+          { kind: "error", text: "Usage: /checkpoint delete <checkpoint-id>" },
+        ]);
+        return true;
+      }
+
+      const checkpoints = listCheckpoints();
+      const checkpoint = checkpoints.find(c => c.id.startsWith(target) || c.stepIndex.toString() === target);
+
+      if (!checkpoint) {
+        ctx.setLog((l: LogEntry[]) => [
+          ...l,
+          { kind: "user", text },
+          { kind: "error", text: `Checkpoint ${target} not found.` },
+        ]);
+        return true;
+      }
+
+      try {
+        deleteCheckpoint(checkpoint.id);
+        ctx.setLog((l: LogEntry[]) => [
+          ...l,
+          { kind: "user", text },
+          { kind: "assistant", text: `Deleted checkpoint: ${checkpoint.description}` },
         ]);
       } catch (err: any) {
         ctx.setLog((l: LogEntry[]) => [
@@ -721,7 +870,7 @@ export async function handleSlashCommand(ctx: CommandContext): Promise<boolean> 
     ctx.setLog((l: LogEntry[]) => [
       ...l,
       { kind: "user", text },
-      { kind: "assistant", text: "Usage:\n  /revert              Revert to previous step\n  /revert to <n>       Revert to step number n\n  /revert to <sha>     Revert to commit SHA\n  /revert list         Show all commits\n  /revert diff          Show changes in last commit\n  /revert diff <n>     Show changes in step n\n  /revert diff <sha>   Show changes in commit" },
+      { kind: "assistant", text: "Usage:\n  /checkpoint list              List all checkpoints\n  /checkpoint diff               Show changes in last checkpoint\n  /checkpoint diff <id>         Show changes in checkpoint\n  /checkpoint diff <from> <to>  Compare two checkpoints\n  /checkpoint restore <id>      Restore to checkpoint\n  /checkpoint branch <name>     Create new branch\n  /checkpoint switch <branch>   Switch to branch\n  /checkpoint delete <id>       Delete checkpoint" },
     ]);
     return true;
   }

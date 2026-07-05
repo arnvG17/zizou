@@ -84,8 +84,9 @@ export function listSessions(): SessionMeta[] {
 /**
  * Switches to the session with the given name.
  * Throws if working tree is dirty or session not found.
+ * Returns the switched session.
  */
-export function switchSession(name: string): void {
+export function switchSession(name: string): SessionMeta {
   const registry = loadRegistry();
   
   // Check if working tree is clean
@@ -106,6 +107,8 @@ export function switchSession(name: string): void {
   registry.activeSessionId = session.id;
   session.lastActiveAt = new Date().toISOString();
   saveRegistry(registry);
+  
+  return session;
 }
 
 /**
