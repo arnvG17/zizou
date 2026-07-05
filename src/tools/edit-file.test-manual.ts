@@ -1,7 +1,11 @@
 import { writeFileSync, unlinkSync } from "node:fs";
-import { editFile } from "./edit-file.js";
+import { createEditFileTool } from "./edit-file.js";
 
 const TEST_FILE = "edit-test.txt";
+
+// Auto-approve confirm for manual testing
+const autoConfirm = async (_desc: string) => true;
+const editFile = createEditFileTool(autoConfirm);
 
 async function runTests() {
   console.log("=== Manual Test for editFile ===");

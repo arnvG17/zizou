@@ -41,8 +41,8 @@ import type { PlanStep, StepResult, ToolCall, ProjectContext } from "./types.js"
 import { SessionLogger } from "./debug/index.js";
 import {
   readFile,
-  writeFile,
-  editFile,
+  createWriteFileTool,
+  createEditFileTool,
   glob,
   grep,
   listDir,
@@ -52,7 +52,7 @@ import {
   createRunBackgroundTool,
   manageTasks,
   managePorts,
-  fileOperations,
+  createFileOperationsTool,
 } from "../tools/index.js";
 
 // ─── Step Prompt Builder ─────────────────────────────────────────────────────
@@ -334,8 +334,8 @@ export async function executeStep(
       // Build a local tool map for lookup (mirrors the one in runTurn)
       const fallbackTools: Record<string, any> = {
         readFile,
-        writeFile,
-        editFile,
+        writeFile: createWriteFileTool(onConfirm),
+        editFile: createEditFileTool(onConfirm),
         glob,
         grep,
         listDir,
@@ -345,7 +345,7 @@ export async function executeStep(
         runBackground: createRunBackgroundTool(onConfirm),
         manageTasks,
         managePorts,
-        fileOperations,
+        fileOperations: createFileOperationsTool(onConfirm),
       };
 
       const tool = fallbackTools[fallback.name];

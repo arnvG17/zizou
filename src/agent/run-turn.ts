@@ -21,8 +21,8 @@
 import { streamText, stepCountIs, type ModelMessage, type LanguageModel } from "ai";
 import {
   readFile,
-  writeFile,
-  editFile,
+  createWriteFileTool,
+  createEditFileTool,
   glob,
   grep,
   listDir,
@@ -32,7 +32,7 @@ import {
   createRunBackgroundTool,
   manageTasks,
   managePorts,
-  fileOperations,
+  createFileOperationsTool,
   type ConfirmFn,
 } from "../tools/index.js";
 import { TurnLogger } from "./debug/index.js";
@@ -219,8 +219,8 @@ export async function* runTurn(
 
   const tools = {
     readFile,
-    writeFile,
-    editFile,
+    writeFile: createWriteFileTool(onConfirm),
+    editFile: createEditFileTool(onConfirm),
     glob,
     grep,
     listDir,
@@ -230,7 +230,7 @@ export async function* runTurn(
     runBackground: createRunBackgroundTool(onConfirm),
     manageTasks,
     managePorts,
-    fileOperations,
+    fileOperations: createFileOperationsTool(onConfirm),
   };
 
   // ── Call the LLM ───────────────────────────────────────────────────────

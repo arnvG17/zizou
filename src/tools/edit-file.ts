@@ -10,74 +10,95 @@
  * that may have already changed. We do NOT use full-file-rewrite because it is
  * wasteful for large files and risks silently dropping content if the model
  * gets lazy or truncates its output.
+ *
+ * SAFETY: Requires user confirmation via the ConfirmFn injected at creation
+ * time. Shows a warning dialog before editing a file so the user can approve
+ * or deny the operation.
  */
 
 import { readFileSync, writeFileSync } from "node:fs";
 import { resolve } from "node:path";
 import { z } from "zod";
 import { tool } from "ai";
+import type { ConfirmFn } from "./types.js";
 
-export const editFile = tool({
-  description:
-    "Edit the contents of a file by replacing an exact string. " +
-    "You must provide the exact string you want to replace, including all whitespace. " +
-    "If the string is not found, or if it is found multiple times, the tool will fail " +
-    "and return an error instructing you to provide more context. " +
-    "This is safer than line numbers (which drift) and full rewrites (which risk truncation).",
-  inputSchema: z.object({
-    path: z.string().describe("Absolute or relative path to the file to edit"),
-    old_string: z.string().describe("The exact string to be replaced"),
-    new_string: z.string().describe("The new string to insert in its place"),
-  }),
-  execute: async ({ path, old_string, new_string }) => {
-    try {
-      const absPath = resolve(process.cwd(), path);
-      let contents = readFileSync(absPath, "utf-8");
+export const createEditFileTool = (confirm: ConfirmFn) => {
+  return tool({
+    description:
+      "Edit the contents of a file by replacing an exact string. " +
+      "You must provide the exact string you want to replace, including all whitespace. " +
+      "If the string is not found, or if it is found multiple times, the tool will fail " +
+      "and return an error instructing you to provide more context. " +
+      "This is safer than line numbers (which drift) and full rewrites (which risk truncation). " +
+      "This requires user confirmation before proceeding.",
+    inputSchema: z.object({
+      path: z.string().describe("Absolute or relative path to the file to edit"),
+      old_string: z.string().describe("The exact string to be replaced"),
+      new_string: z.string().describe("The new string to insert in its place"),
+    }),
+    execute: async ({ path, old_string, new_string }) => {
+      try {
+        const absPath = resolve(process.cwd(), path);
 
-      // Normalize line endings to \n to avoid silent mismatch issues on Windows
-      contents = contents.replace(/\r\n/g, "\n");
-      old_string = old_string.replace(/\r\n/g, "\n");
+        // Ask the user for permission before editing
+        const isApproved = await confirm(
+          `Edit file: ${absPath} (replace text)`
+        );
 
-      // Count occurrences of old_string
-      let count = 0;
-      let pos = contents.indexOf(old_string);
-      while (pos !== -1) {
-        count++;
-        pos = contents.indexOf(old_string, pos + old_string.length);
-      }
+        if (!isApproved) {
+          return {
+            success: false as const,
+            error: "User denied permission to edit this file.",
+          };
+        }
 
-      if (count === 0) {
+        let contents = readFileSync(absPath, "utf-8");
+
+        // Normalize line endings to \n to avoid silent mismatch issues on Windows
+        contents = contents.replace(/\r\n/g, "\n");
+        old_string = old_string.replace(/\r\n/g, "\n");
+
+        // Count occurrences of old_string
+        let count = 0;
+        let pos = contents.indexOf(old_string);
+        while (pos !== -1) {
+          count++;
+          pos = contents.indexOf(old_string, pos + old_string.length);
+        }
+
+        if (count === 0) {
+          return {
+            success: false as const,
+            error:
+              "The exact string was not found in the file. The file may have changed " +
+              "since you last read it, or you may have missed some whitespace. " +
+              "Please read the file again or adjust your exact string.",
+          };
+        }
+
+        if (count > 1) {
+          return {
+            success: false as const,
+            error:
+              `The exact string appeared ${count} times in the file. ` +
+              "You must provide a unique string to replace. Please include more " +
+              "surrounding context (lines above or below) in your old_string to make it unique.",
+          };
+        }
+
+        // Exactly 1 occurrence: perform the replacement
+        const updatedContents = contents.replace(old_string, new_string);
+        writeFileSync(absPath, updatedContents, "utf-8");
+
         return {
-          success: false as const,
-          error:
-            "The exact string was not found in the file. The file may have changed " +
-            "since you last read it, or you may have missed some whitespace. " +
-            "Please read the file again or adjust your exact string.",
+          success: true as const,
+          message: `Successfully replaced 1 occurrence in ${absPath}`,
         };
+      } catch (err) {
+        const message =
+          err instanceof Error ? err.message : "Unknown error editing file";
+        return { success: false as const, error: message };
       }
-
-      if (count > 1) {
-        return {
-          success: false as const,
-          error:
-            `The exact string appeared ${count} times in the file. ` +
-            "You must provide a unique string to replace. Please include more " +
-            "surrounding context (lines above or below) in your old_string to make it unique.",
-        };
-      }
-
-      // Exactly 1 occurrence: perform the replacement
-      const updatedContents = contents.replace(old_string, new_string);
-      writeFileSync(absPath, updatedContents, "utf-8");
-
-      return {
-        success: true as const,
-        message: `Successfully replaced 1 occurrence in ${absPath}`,
-      };
-    } catch (err) {
-      const message =
-        err instanceof Error ? err.message : "Unknown error editing file";
-      return { success: false as const, error: message };
-    }
-  },
-});
+    },
+  });
+};

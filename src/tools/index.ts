@@ -12,8 +12,8 @@
  */
 
 export { readFile } from "./read-file.js";
-export { writeFile } from "./write-file.js";
-export { editFile } from "./edit-file.js";
+export { createWriteFileTool } from "./write-file.js";
+export { createEditFileTool } from "./edit-file.js";
 export { glob } from "./glob.js";
 export { grep } from "./grep.js";
 export { listDir } from "./list-dir.js";
@@ -23,5 +23,5 @@ export { createRunBashTool } from "./run-bash.js";
 export { createRunBackgroundTool } from "./run-background.js";
 export { manageTasks } from "./manage-tasks.js";
 export { managePorts } from "./manage-ports.js";
-export { fileOperations } from "./file-operations.js";
+export { createFileOperationsTool } from "./file-operations.js";
 export type { ConfirmFn } from "./types.js";
