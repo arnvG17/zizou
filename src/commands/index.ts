@@ -14,6 +14,16 @@ import { addPinnedFile, clearPinnedFiles } from "../context/build-system-prompt.
 import { getActiveModelId } from "../sdk/resolve-model.js";
 import { existsSync, readdirSync } from "fs";
 import { join } from "path";
+import {
+  createSession,
+  listSessions,
+  switchSession,
+  deleteSession,
+  getActiveSession,
+  getActiveSessionId,
+} from "../session/registry.js";
+import { revertSession, listSessionCommits, gitGetDiff } from "../git/git.js";
+import type { ConfirmFn } from "../tools/index.js";
 
 export interface SlashCommandInfo {
   command: string;
@@ -33,6 +43,8 @@ export const SLASH_COMMANDS: SlashCommandInfo[] = [
   { command: "/prompt", description: "Dump the full system prompt sent to LLM" },
   { command: "/skills", description: "List available custom agent skills" },
   { command: "/clear", description: "Reset conversation history & start new session" },
+  { command: "/session", description: "Session management (new, list, switch, delete)" },
+  { command: "/revert", description: "Revert session to a previous step" },
   { command: "/help", description: "Show available commands & active provider" },
   { command: "/exit", description: "Close Zizou" },
 ];
@@ -118,7 +130,7 @@ export interface CommandContext {
  * Intercepts user input and executes a slash command if one is detected.
  * Returns true if a command was handled, false otherwise.
  */
-export function handleSlashCommand(ctx: CommandContext): boolean {
+export async function handleSlashCommand(ctx: CommandContext): Promise<boolean> {
   const text = ctx.userText.trim();
   if (!text.startsWith("/")) return false;
 
@@ -415,6 +427,302 @@ export function handleSlashCommand(ctx: CommandContext): boolean {
         { kind: "error", text: err.message },
       ]);
     }
+    return true;
+  }
+
+  // ── /session — session management ───────────────────────────────────────
+  if (command === "session") {
+    const subCommand = args[0]?.toLowerCase();
+    const sessionArg = args[1];
+
+    if (!subCommand) {
+      const active = getActiveSession();
+      const sessions = listSessions();
+      
+      let output = "Session Management\n\n";
+      if (active) {
+        output += `Active: ${active.name} (last active: ${new Date(active.lastActiveAt).toLocaleString()})\n\n`;
+      } else {
+        output += "Active: none\n\n";
+      }
+      
+      if (sessions.length === 0) {
+        output += "No sessions exist. Use /session new <name> to create one.";
+      } else {
+        output += "All sessions:\n";
+        for (const session of sessions) {
+          const isActive = active?.id === session.id ? " [ACTIVE]" : "";
+          output += `  • ${session.name}${isActive} (created: ${new Date(session.createdAt).toLocaleDateString()})\n`;
+        }
+      }
+      
+      output += "\nUsage:\n  /session new <name>     Create a new session\n  /session list           List all sessions\n  /session switch <name>   Switch to a session\n  /session delete <name>   Delete a session";
+      
+      ctx.setLog((l: LogEntry[]) => [
+        ...l,
+        { kind: "user", text },
+        { kind: "assistant", text: output },
+      ]);
+      return true;
+    }
+
+    if (subCommand === "new") {
+      if (!sessionArg) {
+        ctx.setLog((l: LogEntry[]) => [
+          ...l,
+          { kind: "user", text },
+          { kind: "assistant", text: "Usage: /session new <name>" },
+        ]);
+        return true;
+      }
+
+      try {
+        const session = createSession(sessionArg);
+        ctx.setLog((l: LogEntry[]) => [
+          ...l,
+          { kind: "user", text },
+          { kind: "assistant", text: `Created session "${session.name}" and set as active.` },
+        ]);
+      } catch (err: any) {
+        ctx.setLog((l: LogEntry[]) => [
+          ...l,
+          { kind: "user", text },
+          { kind: "error", text: err.message },
+        ]);
+      }
+      return true;
+    }
+
+    if (subCommand === "list") {
+      const active = getActiveSession();
+      const sessions = listSessions();
+      
+      let output = "Sessions:\n\n";
+      if (sessions.length === 0) {
+        output += "No sessions exist. Use /session new <name> to create one.";
+      } else {
+        for (const session of sessions) {
+          const isActive = active?.id === session.id ? " [ACTIVE]" : "";
+          const lastActive = new Date(session.lastActiveAt).toLocaleString();
+          output += `  • ${session.name}${isActive}\n    Last active: ${lastActive}\n`;
+        }
+      }
+      
+      ctx.setLog((l: LogEntry[]) => [
+        ...l,
+        { kind: "user", text },
+        { kind: "assistant", text: output },
+      ]);
+      return true;
+    }
+
+    if (subCommand === "switch") {
+      if (!sessionArg) {
+        ctx.setLog((l: LogEntry[]) => [
+          ...l,
+          { kind: "user", text },
+          { kind: "assistant", text: "Usage: /session switch <name>" },
+        ]);
+        return true;
+      }
+
+      try {
+        switchSession(sessionArg);
+        ctx.setLog((l: LogEntry[]) => [
+          ...l,
+          { kind: "user", text },
+          { kind: "assistant", text: `Switched to session "${sessionArg}".` },
+        ]);
+      } catch (err: any) {
+        ctx.setLog((l: LogEntry[]) => [
+          ...l,
+          { kind: "user", text },
+          { kind: "error", text: err.message },
+        ]);
+      }
+      return true;
+    }
+
+    if (subCommand === "delete") {
+      if (!sessionArg) {
+        ctx.setLog((l: LogEntry[]) => [
+          ...l,
+          { kind: "user", text },
+          { kind: "assistant", text: "Usage: /session delete <name>" },
+        ]);
+        return true;
+      }
+
+      try {
+        deleteSession(sessionArg);
+        ctx.setLog((l: LogEntry[]) => [
+          ...l,
+          { kind: "user", text },
+          { kind: "assistant", text: `Deleted session "${sessionArg}". State archived to .deleted/` },
+        ]);
+      } catch (err: any) {
+        ctx.setLog((l: LogEntry[]) => [
+          ...l,
+          { kind: "user", text },
+          { kind: "error", text: err.message },
+        ]);
+      }
+      return true;
+    }
+
+    ctx.setLog((l: LogEntry[]) => [
+      ...l,
+      { kind: "user", text },
+      { kind: "error", text: `Unknown session subcommand: ${subCommand}. Use /session for help.` },
+    ]);
+    return true;
+  }
+
+  // ── /revert — revert session to previous step ─────────────────────────────
+  if (command === "revert") {
+    const activeSessionId = getActiveSessionId();
+    if (!activeSessionId) {
+      ctx.setLog((l: LogEntry[]) => [
+        ...l,
+        { kind: "user", text },
+        { kind: "error", text: "No active session. Use /session new <name> to create one." },
+      ]);
+      return true;
+    }
+
+    const subCommand = args[0]?.toLowerCase();
+    const target = args[1];
+
+    if (subCommand === "list") {
+      const commits = listSessionCommits(activeSessionId);
+      if (commits.length === 0) {
+        ctx.setLog((l: LogEntry[]) => [
+          ...l,
+          { kind: "user", text },
+          { kind: "assistant", text: "No commits found for this session." },
+        ]);
+        return true;
+      }
+
+      let output = "Session commits:\n\n";
+      for (const commit of commits) {
+        output += `  Step ${commit.stepIndex}: ${commit.description}\n    SHA: ${commit.sha}\n    Time: ${new Date(commit.timestamp).toLocaleString()}\n`;
+      }
+      
+      ctx.setLog((l: LogEntry[]) => [
+        ...l,
+        { kind: "user", text },
+        { kind: "assistant", text: output },
+      ]);
+      return true;
+    }
+
+    if (subCommand === "diff") {
+      const commits = listSessionCommits(activeSessionId);
+      if (commits.length === 0) {
+        ctx.setLog((l: LogEntry[]) => [
+          ...l,
+          { kind: "user", text },
+          { kind: "error", text: "No commits found for this session." },
+        ]);
+        return true;
+      }
+
+      let diffTarget: string | undefined;
+      
+      if (target !== undefined) {
+        const numTarget = parseInt(target, 10);
+        if (!isNaN(numTarget)) {
+          // Find commit by step index
+          const commit = commits.find(c => c.stepIndex === numTarget);
+          if (!commit) {
+            ctx.setLog((l: LogEntry[]) => [
+              ...l,
+              { kind: "user", text },
+              { kind: "error", text: `Step ${numTarget} not found in session history.` },
+            ]);
+            return true;
+          }
+          diffTarget = commit.sha;
+        } else {
+          // Use as SHA directly
+          const commit = commits.find(c => c.sha.startsWith(target));
+          if (!commit) {
+            ctx.setLog((l: LogEntry[]) => [
+              ...l,
+              { kind: "user", text },
+              { kind: "error", text: `Commit ${target} not found in session history.` },
+            ]);
+            return true;
+          }
+          diffTarget = commit.sha;
+        }
+      }
+
+      try {
+        const diff = gitGetDiff(diffTarget);
+        ctx.setLog((l: LogEntry[]) => [
+          ...l,
+          { kind: "user", text },
+          { kind: "assistant", text: `Changes${diffTarget ? ` for commit ${diffTarget.slice(0, 8)}` : " in last commit"}:\n\n${diff}` },
+        ]);
+      } catch (err: any) {
+        ctx.setLog((l: LogEntry[]) => [
+          ...l,
+          { kind: "user", text },
+          { kind: "error", text: err.message },
+        ]);
+      }
+      return true;
+    }
+
+    if (subCommand === "to" || subCommand === undefined) {
+      const revertTarget = subCommand === "to" ? target : undefined;
+      
+      // Parse target: could be a number (stepIndex) or string (SHA)
+      let parsedTarget: number | string | undefined;
+      if (revertTarget !== undefined) {
+        const numTarget = parseInt(revertTarget, 10);
+        if (!isNaN(numTarget)) {
+          parsedTarget = numTarget;
+        } else {
+          parsedTarget = revertTarget;
+        }
+      }
+
+      try {
+        // Use the confirmFn from context if available
+        const confirmFn: ConfirmFn = (description) => {
+          return new Promise((resolve) => {
+            // We can't directly set pendingConfirm here since we're in a command handler
+            // For now, we'll skip confirmation in CLI mode
+            resolve(true);
+          });
+        };
+
+        await revertSession(activeSessionId, parsedTarget, confirmFn);
+        
+        ctx.setLog((l: LogEntry[]) => [
+          ...l,
+          { kind: "user", text },
+          { kind: "assistant", text: `Reverted to ${parsedTarget !== undefined ? `step ${parsedTarget}` : "previous step"}.` },
+        ]);
+      } catch (err: any) {
+        ctx.setLog((l: LogEntry[]) => [
+          ...l,
+          { kind: "user", text },
+          { kind: "error", text: err.message },
+        ]);
+      }
+      return true;
+    }
+
+    // Show usage if no subcommand
+    ctx.setLog((l: LogEntry[]) => [
+      ...l,
+      { kind: "user", text },
+      { kind: "assistant", text: "Usage:\n  /revert              Revert to previous step\n  /revert to <n>       Revert to step number n\n  /revert to <sha>     Revert to commit SHA\n  /revert list         Show all commits\n  /revert diff          Show changes in last commit\n  /revert diff <n>     Show changes in step n\n  /revert diff <sha>   Show changes in commit" },
+    ]);
     return true;
   }
 

@@ -35,12 +35,13 @@ import {
 } from "../config/api-keys.js";
 import type { ConfirmFn } from "../tools/index.js";
 import { runTurn } from "../agent/run-turn.js";
-import { buildSystemPrompt } from "../context/build-system-prompt.js";
+import { buildSystemPrompt, addPinnedFile, pinnedContextFiles } from "../context/build-system-prompt.js";
 import { buildRepoMap } from "../context/repo-map.js";
 import { useTerminalSize, SidebarWordmark, SidebarMountains } from "./Figurine.js";
 import { handleSlashCommand, SLASH_COMMANDS, WELCOME_MESSAGE, getSkills } from "../commands/index.js";
 import { readdirSync, statSync } from "fs";
 import { join, relative } from "path";
+import { loadActiveSessionState, saveActiveSessionState } from "../session/registry.js";
 
 // ─── Orchestrator imports ────────────────────────────────────────────────────
 // These enable the full clarify → plan → execute → verify pipeline.
@@ -295,6 +296,19 @@ export function Chat({ onChangeKeys, mode: initialMode = "build", initialPrompt 
   });
 
   useEffect(() => {
+    // Load session state on mount
+    const sessionState = loadActiveSessionState();
+    if (sessionState) {
+      history.current = sessionState.conversation;
+      setTokenStats(sessionState.tokenStats);
+      // Restore pinned files
+      for (const file of sessionState.pinnedFiles) {
+        try {
+          addPinnedFile(process.cwd(), file);
+        } catch {}
+      }
+    }
+
     buildSystemPrompt(process.cwd()).then((prompt) => {
       systemPromptRef.current = prompt;
       setSystemPromptText(prompt);
@@ -607,7 +621,7 @@ export function Chat({ onChangeKeys, mode: initialMode = "build", initialPrompt 
 
       if (shouldExecute) {
         setInput("");
-        const isCommand = handleSlashCommand({
+        const isCommand = await handleSlashCommand({
           userText: cmdToRun,
           history,
           systemPrompt: systemPromptRef.current,
@@ -650,7 +664,7 @@ export function Chat({ onChangeKeys, mode: initialMode = "build", initialPrompt 
 
     // --- Slash Commands Interceptor ---
     // Slash commands bypass the busy guard so they work even while the agent is thinking
-    const isCommand = handleSlashCommand({
+    const isCommand = await handleSlashCommand({
       userText,
       history,
       systemPrompt: systemPromptRef.current,
@@ -1018,6 +1032,11 @@ export function Chat({ onChangeKeys, mode: initialMode = "build", initialPrompt 
       setLog((l) => [...l, { kind: "error", text: err.message ?? String(err) }]);
     } finally {
       setBusy(false);
+      // Auto-save session state after each turn
+      try {
+        const pinnedFilesArray = Array.from(pinnedContextFiles);
+        saveActiveSessionState(history.current, tokenStats, pinnedFilesArray);
+      } catch {}
     }
   }
 

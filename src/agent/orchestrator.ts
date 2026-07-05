@@ -63,6 +63,8 @@ import { executeStep } from "./executor.js";
 import { capturePreSnapshot, verifyStep } from "./verifier.js";
 import { type AgentEvent } from "./run-turn.js";
 import { SessionLogger } from "./debug/index.js";
+import { createSessionCommit } from "../git/git.js";
+import { getActiveSessionId } from "../session/registry.js";
 
 // ─── Constants ───────────────────────────────────────────────────────────────
 
@@ -267,6 +269,22 @@ async function* runBuildMode(
   // Report verification result
   yield { kind: "step-verified", step: syntheticStep, verification };
 
+  // ── Git commit on successful verification ───────────────────────────
+  //
+  // If verification succeeded, create a git commit for this step.
+  // This is only done if there's an active session.
+  if (verification.verified) {
+    const activeSessionId = getActiveSessionId();
+    if (activeSessionId) {
+      try {
+        createSessionCommit(activeSessionId, syntheticStep.index, syntheticStep.description);
+      } catch (error) {
+        // Log but don't fail the step if commit fails
+        console.warn("Failed to create git commit for step:", error);
+      }
+    }
+  }
+
   // ── Escalation check ─────────────────────────────────────────────────
   //
   // The key build-mode safety net: if the step touched too many files
@@ -389,6 +407,22 @@ async function* runPlanMode(
     // verification fails (the user already approved the plan), but we
     // still report the result so they can see what went wrong.
     yield { kind: "step-verified", step, verification };
+
+    // ── Git commit on successful verification ───────────────────────────
+    //
+    // If verification succeeded, create a git commit for this step.
+    // This is only done if there's an active session.
+    if (verification.verified) {
+      const activeSessionId = getActiveSessionId();
+      if (activeSessionId) {
+        try {
+          createSessionCommit(activeSessionId, step.index, step.description);
+        } catch (error) {
+          // Log but don't fail the step if commit fails
+          console.warn("Failed to create git commit for step:", error);
+        }
+      }
+    }
   }
 
   SessionLogger.logSessionComplete();
