@@ -11,7 +11,7 @@
 import { createOpenAI } from "@ai-sdk/openai";
 import { createGoogleGenerativeAI } from "@ai-sdk/google";
 import { createGroq } from "@ai-sdk/groq";
-import { getApiKey, ProviderName } from "../config/index.js";
+import { getApiKey, ProviderChoice } from "../config/api-keys.js";
 
 /**
  * Creates and configures the OpenRouter provider instance using the
@@ -45,7 +45,7 @@ const groq = createGroq({
  * getModel — Returns a language model instance for Zizou.
  * Can be dynamically configured via parameter.
  */
-export function getModel(provider: ProviderName = "openrouter") {
+export function getModel(provider: ProviderChoice = "openrouter") {
   switch (provider) {
     case "google":
       // Using Gemini 2.5 Flash
@@ -56,6 +56,6 @@ export function getModel(provider: ProviderName = "openrouter") {
     case "openrouter":
     default:
       // Using a popular free model on OpenRouter
-      return openrouter("google/gemma-4-26b-a4b-it:free");
+      return openrouter("meta-llama/llama-3.3-70b-instruct:free");
   }
 }

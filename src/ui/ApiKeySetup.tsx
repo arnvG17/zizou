@@ -117,8 +117,16 @@ export function ApiKeySetup({ onComplete }: ApiKeySetupProps) {
     try {
       setApiKey(provider, value.trim());
 
+      // For OpenRouter and Ollama, skip validation to avoid model availability issues
+      // The key will be validated on first actual use
+      if (provider === "openrouter" || provider === "ollama") {
+        setDefaultProvider(provider);
+        onComplete();
+        return;
+      }
+
       const model = resolveModel(provider);
-      await generateText({ model, prompt: "Verify API key and connection", maxTokens: 1 });
+      await generateText({ model, prompt: "Verify API key and connection", maxRetries: 0 });
 
       setDefaultProvider(provider);
       onComplete();
@@ -134,6 +142,8 @@ export function ApiKeySetup({ onComplete }: ApiKeySetupProps) {
         errMsg.toLowerCase().includes("invalid api key")
       ) {
         errMsg = "Unauthorized. Please check that your API key is correct.";
+      } else if (errMsg.includes("AI_APICallError")) {
+        errMsg = "API call failed. This might be due to model availability. Try again or use a different provider.";
       }
       setValidationError(errMsg);
     } finally {

@@ -94,6 +94,9 @@ export interface StepResult {
 
   /** Full log of every tool call made during this step's execution. */
   toolCallsMade: ToolCall[];
+
+  /** All agent events emitted during execution (including finish with usage). */
+  agentEvents: import("./run-turn.js").AgentEvent[];
 }
 
 // ─── Verification Result ─────────────────────────────────────────────────────

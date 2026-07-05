@@ -140,6 +140,7 @@ export async function executeStep(
   // Tracking collections for building the StepResult
   const claimedFiles = new Set<string>();
   const toolCallsMade: ToolCall[] = [];
+  const agentEvents: AgentEvent[] = [];
   let fullResponseText = "";
 
   // ── Conversation history tracking for subsequent rounds ─────────────────────
@@ -299,6 +300,9 @@ export async function executeStep(
       }
     }
 
+    // ── Capture all agent events for usage tracking ───────────────────
+    agentEvents.push(event);
+
     result = await turn.next();
   }
 
@@ -306,6 +310,7 @@ export async function executeStep(
     stepIndex: step.index,
     claimedFiles: Array.from(claimedFiles),
     toolCallsMade,
+    agentEvents,
   };
 
   SessionLogger.logExecutorStepEnd({

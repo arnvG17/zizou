@@ -7,8 +7,6 @@
 import { randomUUID } from "crypto";
 import type { SessionMeta, SessionState, TokenStats } from "./types.js";
 import { loadRegistry, saveRegistry, loadSessionState, saveSessionState, archiveSessionState } from "./state-io.js";
-import { getCurrentGitCommit, isGitWorkingTreeClean } from "./storage.js";
-import { createSessionBranch } from "../git/git.js";
 import type { ModelMessage } from "ai";
 
 /**
@@ -24,26 +22,12 @@ export function createSession(name: string): SessionMeta {
   
   const sessionId = randomUUID();
   const now = new Date().toISOString();
-  const baseBranch = getCurrentGitCommit();
-  
-  // Create git branch for this session
-  let branchName: string | undefined;
-  try {
-    const branchInfo = createSessionBranch(name);
-    branchName = branchInfo.branch;
-  } catch (error) {
-    // If git branch creation fails, continue without it
-    // (e.g., not in a git repo)
-    console.warn("Failed to create git branch for session:", error);
-  }
   
   const sessionMeta: SessionMeta = {
     id: sessionId,
     name,
     createdAt: now,
     lastActiveAt: now,
-    baseBranch,
-    branchName,
   };
   
   // Create empty session state
@@ -85,19 +69,10 @@ export function listSessions(): SessionMeta[] {
 
 /**
  * Switches to the session with the given name.
- * Throws if working tree is dirty or session not found.
  * Returns the switched session.
  */
 export function switchSession(name: string): SessionMeta {
   const registry = loadRegistry();
-  
-  // Check if working tree is clean
-  if (!isGitWorkingTreeClean()) {
-    throw new Error(
-      "Cannot switch sessions: working tree has uncommitted changes.\n" +
-      "Please commit or discard changes before switching sessions."
-    );
-  }
   
   // Find session by name
   const session = registry.sessions.find(s => s.name === name);

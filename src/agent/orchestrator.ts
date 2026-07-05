@@ -250,21 +250,18 @@ async function* runBuildMode(
     oldFileStates.set(file, captureFileState(file));
   }
 
-  // Execute the step via the executor, forwarding agent events to the UI
+  // Execute the step via the executor
   const stepResult = await executeStep(
     syntheticStep,
     context,
     model,
     onConfirm,
-    (event: AgentEvent) => {
-      // We can't yield from inside a callback, so we'll collect events
-      // and yield them. But since this is an async generator limitation,
-      // we handle it by NOT using the callback for streaming — instead,
-      // the Chat.tsx integration handles agent events directly.
-      // The onEvent callback is used by the orchestrator for non-streaming
-      // event capture (e.g., in plan mode).
-    },
   );
+
+  // Forward all agent events (including finish with usage) to the UI
+  for (const event of stepResult.agentEvents) {
+    yield { kind: "agent-event", event };
+  }
 
   // Verify the execution result against filesystem state
   const verification = await verifyStep(
@@ -345,6 +342,9 @@ async function* runBuildMode(
  *                       and go straight to execution. Used when the user
  *                       has already approved a plan (e.g., after answering
  *                       clarifications and reviewing the plan).
+ * @param completedStepIndices - Indices of steps that have already been
+ *                               completed and verified. These steps will be
+ *                               skipped during execution.
  */
 async function* runPlanMode(
   userPrompt: string,
@@ -353,6 +353,7 @@ async function* runPlanMode(
   onConfirm: ConfirmFn,
   clarificationAnswers: Record<string, string> = {},
   approvedPlan?: PlanStep[],
+  completedStepIndices: number[] = [],
 ): AsyncGenerator<OrchestratorEvent> {
   // Emit mode info
   yield { kind: "mode-info", mode: "plan", reason: "Full planning pipeline" };
@@ -402,6 +403,17 @@ async function* runPlanMode(
   const totalSteps = sortedSteps.length;
 
   for (const step of sortedSteps) {
+    // Skip steps that have already been completed and verified
+    if (completedStepIndices.includes(step.index)) {
+      yield { kind: "step-start", step, totalSteps };
+      yield { 
+        kind: "step-verified", 
+        step, 
+        verification: { verified: true, mismatches: [] } 
+      };
+      continue;
+    }
+
     // Signal step start
     yield { kind: "step-start", step, totalSteps };
 
@@ -421,6 +433,11 @@ async function* runPlanMode(
       model,
       onConfirm,
     );
+
+    // Forward all agent events (including finish with usage) to the UI
+    for (const event of stepResult.agentEvents) {
+      yield { kind: "agent-event", event };
+    }
 
     // Verify the step's execution
     const verification = await verifyStep(
@@ -483,6 +500,7 @@ async function* runPlanMode(
  * @param onConfirm - Callback for user confirmation of shell commands.
  * @param clarificationAnswers - Pre-collected clarification answers (plan mode).
  * @param approvedPlan - Pre-approved plan to execute (plan mode, after Y/n).
+ * @param completedStepIndices - Indices of steps already completed (plan mode).
  */
 export async function* runOrchestrator(
   userPrompt: string,
@@ -492,6 +510,7 @@ export async function* runOrchestrator(
   onConfirm: ConfirmFn,
   clarificationAnswers?: Record<string, string>,
   approvedPlan?: PlanStep[],
+  completedStepIndices?: number[],
 ): AsyncGenerator<OrchestratorEvent> {
   // Only log session start on the very first entry of the conversation turn
   if (!approvedPlan && (!clarificationAnswers || Object.keys(clarificationAnswers).length === 0)) {
@@ -507,6 +526,7 @@ export async function* runOrchestrator(
       onConfirm,
       clarificationAnswers || {},
       approvedPlan,
+      completedStepIndices || [],
     );
   } else {
     // Build mode: single step → execute → verify → escalation check

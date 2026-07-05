@@ -64,7 +64,7 @@ const SHORT_LABELS: Record<ProviderChoice, string> = {
 const COMMON_MODELS: Record<ProviderChoice, string[]> = {
   groq: ["llama-3.3-70b-versatile", "mixtral-8x7b-32768", "llama-3.1-8b-instant", "gemma2-9b-it"],
   google: ["gemini-2.0-flash", "gemini-1.5-pro", "gemini-1.5-flash"],
-  openrouter: ["google/gemma-3-27b-it:free", "meta-llama/llama-3.3-70b-instruct:free", "deepseek/deepseek-chat"],
+  openrouter: ["meta-llama/llama-3.3-70b-instruct:free", "deepseek/deepseek-chat", "google/gemma-3-27b-it"],
   anthropic: ["claude-3-5-sonnet-latest", "claude-3-5-haiku-latest", "claude-3-opus-20240229"],
   openai: ["gpt-4o", "gpt-4o-mini", "o1-mini"],
   ollama: ["llama3", "mistral", "phi3"],
@@ -86,8 +86,8 @@ const MODEL_OPTIONS: ModelOption[] = [
   { label: "Claude 3.5 Haiku (Anthropic)", provider: "anthropic", modelId: "claude-3-5-haiku-latest" },
   { label: "GPT-4o (OpenAI)", provider: "openai", modelId: "gpt-4o" },
   { label: "GPT-4o Mini (OpenAI)", provider: "openai", modelId: "gpt-4o-mini" },
-  { label: "Gemma 3 27B (OpenRouter - Free)", provider: "openrouter", modelId: "google/gemma-3-27b-it:free" },
   { label: "LLaMA 3.3 70B (OpenRouter - Free)", provider: "openrouter", modelId: "meta-llama/llama-3.3-70b-instruct:free" },
+  { label: "DeepSeek Chat (OpenRouter)", provider: "openrouter", modelId: "deepseek/deepseek-chat" },
   { label: "LLaMA 3 (Ollama - Local)", provider: "ollama", modelId: "llama3" },
   { label: "Mistral (Ollama - Local)", provider: "ollama", modelId: "mistral" },
 ];
@@ -288,6 +288,7 @@ export function Chat({ onChangeKeys, mode: initialMode = "build", initialPrompt 
   const [originalPrompt, setOriginalPrompt] = useState<string>("");
   const [isInClarificationFlow, setIsInClarificationFlow] = useState(false);
   const [isAwaitingPlanApproval, setIsAwaitingPlanApproval] = useState(false);
+  const [completedStepIndices, setCompletedStepIndices] = useState<number[]>([]);
 
   const [tokenStats, setTokenStats] = useState({
     inputTokens: 0,
@@ -346,13 +347,32 @@ export function Chat({ onChangeKeys, mode: initialMode = "build", initialPrompt 
       // Restore orchestrator state
       if (sessionState.orchestratorState) {
         const orchState = sessionState.orchestratorState;
-        if (orchState.pendingPlan) setPendingPlan(orchState.pendingPlan);
+        if (orchState.pendingPlan) {
+          setPendingPlan(orchState.pendingPlan);
+          // If there's a pending plan, auto-approve it and execute
+          // Don't ask for approval again on session restore
+          if (orchState.originalPrompt) {
+            setOriginalPrompt(orchState.originalPrompt);
+            // Restore completed step indices
+            if (orchState.completedStepIndices) {
+              setCompletedStepIndices(orchState.completedStepIndices);
+            }
+            // Auto-execute the plan after a short delay to allow UI to render
+            setTimeout(() => {
+              runOrchestratorFlow(
+                orchState.originalPrompt!,
+                orchState.clarificationAnswers || {},
+                orchState.pendingPlan
+              );
+            }, 100);
+          }
+        }
         if (orchState.pendingClarifications) setPendingClarifications(orchState.pendingClarifications);
         if (orchState.clarificationAnswers) setClarificationAnswers(orchState.clarificationAnswers);
         if (orchState.currentClarificationIndex !== undefined) setCurrentClarificationIndex(orchState.currentClarificationIndex);
         if (orchState.isInClarificationFlow !== undefined) setIsInClarificationFlow(orchState.isInClarificationFlow);
-        if (orchState.isAwaitingPlanApproval !== undefined) setIsAwaitingPlanApproval(orchState.isAwaitingPlanApproval);
-        if (orchState.originalPrompt) setOriginalPrompt(orchState.originalPrompt);
+        // Don't restore isAwaitingPlanApproval - auto-execute instead
+        if (orchState.originalPrompt && !orchState.pendingPlan) setOriginalPrompt(orchState.originalPrompt);
       }
       
       // Restore pinned files
@@ -891,6 +911,25 @@ export function Chat({ onChangeKeys, mode: initialMode = "build", initialPrompt 
     // When the orchestrator has yielded clarification questions, we
     // intercept user input as answers instead of new prompts.
     if (isInClarificationFlow && pendingClarifications.length > 0) {
+      const trimmedInput = userText.trim().toLowerCase();
+      
+      // Check if user wants to skip remaining questions
+      if (trimmedInput === "skip") {
+        setLog((l) => [
+          ...l,
+          { kind: "user", text: userText },
+          { kind: "assistant", text: "Skipping remaining questions..." },
+        ]);
+        
+        setIsInClarificationFlow(false);
+        setPendingClarifications([]);
+        setCurrentClarificationIndex(0);
+        
+        // Re-run orchestrator in plan mode with answers collected so far
+        runOrchestratorFlow(originalPrompt, clarificationAnswers);
+        return;
+      }
+      
       const currentQ = pendingClarifications[currentClarificationIndex];
       const newAnswers = { ...clarificationAnswers, [currentQ.question]: userText };
       setClarificationAnswers(newAnswers);
@@ -925,7 +964,7 @@ export function Chat({ onChangeKeys, mode: initialMode = "build", initialPrompt 
       const answer = userText.trim().toLowerCase();
       setLog((l) => [...l, { kind: "user", text: userText }]);
 
-      if (answer === "y" || answer === "yes") {
+      if (answer === "y" || answer === "yes" || answer === "continue") {
         setIsAwaitingPlanApproval(false);
         const approvedSteps = pendingPlan;
         setPendingPlan(null);
@@ -1004,6 +1043,7 @@ export function Chat({ onChangeKeys, mode: initialMode = "build", initialPrompt 
         confirmFn,
         answers,
         approvedSteps,
+        completedStepIndices,
       );
 
       let result = await orchestrator.next();
@@ -1078,6 +1118,10 @@ export function Chat({ onChangeKeys, mode: initialMode = "build", initialPrompt 
                 mismatches: event.verification.mismatches,
               },
             ]);
+            // Mark step as completed if verification succeeded
+            if (event.verification.verified) {
+              setCompletedStepIndices((prev) => [...prev, event.step.index]);
+            }
             break;
 
           case "escalation-prompt":
@@ -1237,6 +1281,7 @@ export function Chat({ onChangeKeys, mode: initialMode = "build", initialPrompt 
             isInClarificationFlow,
             isAwaitingPlanApproval,
             originalPrompt,
+            completedStepIndices,
           }
         );
       } catch {}

@@ -7,29 +7,18 @@
 import { homedir } from "os";
 import { join, resolve } from "path";
 import { existsSync, mkdirSync, readFileSync } from "fs";
-import { execSync } from "child_process";
 
 const ZIZOU_DIR = join(homedir(), ".zizou");
 const SESSIONS_DIR = join(ZIZOU_DIR, "sessions");
 
 /**
  * Gets the project hash for the current working directory.
- * Uses git commit hash if available, otherwise hashes the directory path.
+ * Uses a hash of the directory path for local persistence.
  */
 export function getProjectHash(): string {
   const cwd = process.cwd();
   
-  try {
-    // Try to get git commit hash
-    const gitHead = execSync("git rev-parse HEAD", { cwd, encoding: "utf-8" }).trim();
-    if (gitHead) {
-      return gitHead;
-    }
-  } catch {
-    // Not a git repo or git not available, fall back to path hash
-  }
-  
-  // Simple hash of the directory path as fallback
+  // Simple hash of the directory path
   let hash = 0;
   const str = cwd.toLowerCase();
   for (let i = 0; i < str.length; i++) {
@@ -88,28 +77,4 @@ export function getDeletedDir(): string {
     mkdirSync(deletedDir, { recursive: true });
   }
   return deletedDir;
-}
-
-/**
- * Gets the current git HEAD commit.
- */
-export function getCurrentGitCommit(): string {
-  try {
-    return execSync("git rev-parse HEAD", { cwd: process.cwd(), encoding: "utf-8" }).trim();
-  } catch {
-    return "unknown";
-  }
-}
-
-/**
- * Checks if the git working tree is clean (no uncommitted changes).
- */
-export function isGitWorkingTreeClean(): boolean {
-  try {
-    const output = execSync("git status --porcelain", { cwd: process.cwd(), encoding: "utf-8" });
-    return output.trim().length === 0;
-  } catch {
-    // If git command fails, assume clean (not a git repo)
-    return true;
-  }
 }

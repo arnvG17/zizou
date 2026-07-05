@@ -11,8 +11,6 @@ export interface SessionMeta {
   name: string;         // user-facing, e.g. "login-feature"
   createdAt: string;
   lastActiveAt: string;
-  baseBranch: string;   // branch/commit it forked from
-  branchName?: string;  // git branch name (e.g. "zizou/login-feature")
 }
 
 export interface Registry {
@@ -42,6 +40,7 @@ export interface SessionState {
     isInClarificationFlow?: boolean;
     isAwaitingPlanApproval?: boolean;
     originalPrompt?: string;
+    completedStepIndices?: number[];  // Indices of steps that have been executed
   };
   pinnedFiles: string[];
   createdAt: string;

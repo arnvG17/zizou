@@ -1,5 +1,5 @@
 # Zizou - AI Coding Agent CLI (Phase 1)
-
+https://terminal-claude-1.preview.emergentagent.com/docs
 Zizou is an open-source AI coding agent CLI tool built with TypeScript, React (Ink), and the Vercel AI SDK. It allows you to chat with Claude 3.5 Sonnet or GPT-4o directly in your terminal, and grants the AI the ability to read files, edit files (safely), and run sandboxed terminal commands with your explicit approval.
 
 ## Getting Started
