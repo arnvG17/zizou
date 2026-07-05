@@ -69,4 +69,4 @@ Before reading `state.json`, resolve `activeSessionId` from `registry.json` and 
 1. `zizou session new login-feature` → `zizou session new auth-feature` → `zizou session list` shows both, correct active pointer.
 2. Make an uncommitted change → `zizou session switch auth-feature` → command refuses with a clear message.
 3. Commit or discard → switch succeeds → confirm `state.json` read/written is the `auth-feature` one, not `login-feature`'s.
-4. `zizou session delete login-feature` while it's not active → confirm files move to archive, not deleted; registry no longer lists it as active-selectable.
+4. `zizou session delete login-feature` while it's not active → confirm files move to archive, not deleted; registry no longer lists it as active-selectable.hi

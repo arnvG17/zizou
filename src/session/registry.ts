@@ -57,6 +57,8 @@ export function createSession(name: string): SessionMeta {
       cost: 0,
       contextLimit: 128000,
     },
+    log: "[]",
+    currentMode: "build",
     pinnedFiles: [],
     createdAt: now,
     lastActiveAt: now,
@@ -180,7 +182,10 @@ export function loadActiveSessionState(): SessionState | null {
 export function saveActiveSessionState(
   conversation: ModelMessage[],
   tokenStats: TokenStats,
-  pinnedFiles: string[]
+  pinnedFiles: string[],
+  log?: any[],
+  currentMode?: "build" | "plan",
+  orchestratorState?: any
 ): void {
   const activeId = getActiveSessionId();
   if (!activeId) {
@@ -197,6 +202,8 @@ export function saveActiveSessionState(
       cost: 0,
       contextLimit: 128000,
     },
+    log: "[]",
+    currentMode: "build",
     pinnedFiles: [],
     createdAt: new Date().toISOString(),
     lastActiveAt: new Date().toISOString(),
@@ -206,6 +213,9 @@ export function saveActiveSessionState(
     ...existingState,
     conversation,
     tokenStats,
+    log: log ? JSON.stringify(log) : existingState.log,
+    currentMode: currentMode || existingState.currentMode,
+    orchestratorState: orchestratorState || existingState.orchestratorState,
     pinnedFiles,
     lastActiveAt: new Date().toISOString(),
   };

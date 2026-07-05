@@ -32,6 +32,17 @@ export interface TokenStats {
 export interface SessionState {
   conversation: ModelMessage[];
   tokenStats: TokenStats;
+  log: string;  // Full UI log serialized as JSON string to avoid circular dependency
+  currentMode: "build" | "plan";  // Current operating mode
+  orchestratorState?: {
+    pendingPlan?: any[];  // Plan steps
+    pendingClarifications?: any[];  // Clarification questions
+    clarificationAnswers?: Record<string, string>;
+    currentClarificationIndex?: number;
+    isInClarificationFlow?: boolean;
+    isAwaitingPlanApproval?: boolean;
+    originalPrompt?: string;
+  };
   pinnedFiles: string[];
   createdAt: string;
   lastActiveAt: string;

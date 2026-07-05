@@ -319,6 +319,42 @@ export function Chat({ onChangeKeys, mode: initialMode = "build", initialPrompt 
     if (sessionState) {
       history.current = sessionState.conversation;
       setTokenStats(sessionState.tokenStats);
+      
+      // Restore full log from serialized JSON
+      try {
+        const restoredLog = JSON.parse(sessionState.log);
+        setLog(restoredLog);
+      } catch (error) {
+        console.warn("Failed to restore log:", error);
+        // Fallback: reconstruct from conversation
+        const reconstructedLog: LogEntry[] = [];
+        for (const msg of sessionState.conversation) {
+          if (msg.role === "user") {
+            reconstructedLog.push({ kind: "user", text: String(msg.content) });
+          } else if (msg.role === "assistant") {
+            reconstructedLog.push({ kind: "assistant", text: String(msg.content) });
+          }
+        }
+        setLog(reconstructedLog);
+      }
+      
+      // Restore current mode
+      if (sessionState.currentMode) {
+        setCurrentMode(sessionState.currentMode);
+      }
+      
+      // Restore orchestrator state
+      if (sessionState.orchestratorState) {
+        const orchState = sessionState.orchestratorState;
+        if (orchState.pendingPlan) setPendingPlan(orchState.pendingPlan);
+        if (orchState.pendingClarifications) setPendingClarifications(orchState.pendingClarifications);
+        if (orchState.clarificationAnswers) setClarificationAnswers(orchState.clarificationAnswers);
+        if (orchState.currentClarificationIndex !== undefined) setCurrentClarificationIndex(orchState.currentClarificationIndex);
+        if (orchState.isInClarificationFlow !== undefined) setIsInClarificationFlow(orchState.isInClarificationFlow);
+        if (orchState.isAwaitingPlanApproval !== undefined) setIsAwaitingPlanApproval(orchState.isAwaitingPlanApproval);
+        if (orchState.originalPrompt) setOriginalPrompt(orchState.originalPrompt);
+      }
+      
       // Restore pinned files
       for (const file of sessionState.pinnedFiles) {
         try {
@@ -1187,7 +1223,22 @@ export function Chat({ onChangeKeys, mode: initialMode = "build", initialPrompt 
       // Auto-save session state after each turn
       try {
         const pinnedFilesArray = Array.from(pinnedContextFiles);
-        saveActiveSessionState(history.current, tokenStats, pinnedFilesArray);
+        saveActiveSessionState(
+          history.current,
+          tokenStats,
+          pinnedFilesArray,
+          log,
+          currentMode,
+          {
+            pendingPlan,
+            pendingClarifications,
+            clarificationAnswers,
+            currentClarificationIndex,
+            isInClarificationFlow,
+            isAwaitingPlanApproval,
+            originalPrompt,
+          }
+        );
       } catch {}
     }
   }
@@ -1205,6 +1256,19 @@ export function Chat({ onChangeKeys, mode: initialMode = "build", initialPrompt 
     <Box flexDirection="row" width="100%">
       {/* Left conversation pane */}
       <Box flexDirection="column" flexGrow={1} flexShrink={1} paddingRight={showSidebar ? 1 : 0}>
+        {/* Chat Header */}
+        <Box flexDirection="row" justifyContent="space-between" paddingX={1} paddingY={1} borderStyle="single" borderColor="gray" backgroundColor="#0A0C0E">
+          <Box flexDirection="row" gap={2}>
+            <Text color="#E6E6E6" bold>{sessionName}</Text>
+            <Text color="gray">•</Text>
+            <Text color="gray">{sessionId}</Text>
+          </Box>
+          <Box flexDirection="row" gap={2}>
+            <Text color={currentMode === "plan" ? "#D08A4E" : "#3B5FE0"} bold>{currentMode === "plan" ? "◆ Plan" : "● Build"}</Text>
+            <Text color="gray">{formattedTokensStr} tokens</Text>
+          </Box>
+        </Box>
+        
         {/* Chat History Pane */}
         <Box flexDirection="column" flexGrow={1} minHeight={10} padding={1}>
           {log.map((entry, i) => <LogLine key={i} entry={entry} />)}
