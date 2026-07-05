@@ -344,4 +344,37 @@ export class SessionLogger {
       `  Completed at: ${new Date().toISOString()}\n\n`
     );
   }
+
+  /**
+   * Log a fallback pseudo-call interception. This is visually distinct from
+   * native tool calls so you can grep for "FALLBACK" or "PSEUDO-CALL" to
+   * measure how often the parser fires vs native tool-calling.
+   */
+  static logFallbackToolCall(
+    name: string,
+    args: unknown,
+    result: unknown,
+    rawText: string,
+    success: boolean,
+  ): void {
+    const argsStr = JSON.stringify(args, null, 2);
+    const resultStr = JSON.stringify(result, null, 2);
+    const resultPreview = resultStr.length > 2000 ? resultStr.slice(0, 2000) + "\n      ... (truncated)" : resultStr;
+    const rawPreview = rawText.length > 500 ? rawText.slice(0, 500) + "... (truncated)" : rawText;
+
+    this.append(
+      `\n` +
+      `══════════════════════════════════════════════════════════════════════════════════\n` +
+      `  ⚠️  FALLBACK: USED PSEUDO-CALL PARSER (not a native tool call)\n` +
+      `══════════════════════════════════════════════════════════════════════════════════\n` +
+      `  Parsed Tool  : ${name}\n` +
+      `  Raw Text     : ${rawPreview}\n` +
+      `  Parsed Args  :\n` +
+      argsStr.split("\n").map(l => `    ${l}`).join("\n") + "\n" +
+      `  Execution OK : ${success}\n` +
+      `  Result       :\n` +
+      resultPreview.split("\n").map(l => `    ${l}`).join("\n") + "\n" +
+      `──────────────────────────────────────────────────────────────────────────────────\n`
+    );
+  }
 }

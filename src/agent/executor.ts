@@ -35,10 +35,25 @@
 
 import { type LanguageModel, type ModelMessage } from "ai";
 import { buildSystemPrompt, type AgentRole } from "../context/build-system-prompt.js";
-import { runTurn, type AgentEvent } from "./run-turn.js";
+import { runTurn, extractRawToolCall, type AgentEvent } from "./run-turn.js";
 import type { ConfirmFn } from "../tools/types.js";
 import type { PlanStep, StepResult, ToolCall, ProjectContext } from "./types.js";
 import { SessionLogger } from "./debug/index.js";
+import {
+  readFile,
+  writeFile,
+  editFile,
+  glob,
+  grep,
+  listDir,
+  openFile,
+  addFileToContext,
+  createRunBashTool,
+  createRunBackgroundTool,
+  manageTasks,
+  managePorts,
+  fileOperations,
+} from "../tools/index.js";
 
 // ─── Step Prompt Builder ─────────────────────────────────────────────────────
 //
@@ -304,6 +319,104 @@ export async function executeStep(
     agentEvents.push(event);
 
     result = await turn.next();
+  }
+
+  // ── Fallback: pseudo-call parser for malformed tool calls ──────────────
+  //
+  // If runTurn() yielded zero native tool calls but the model emitted text
+  // containing a <function/...> pseudo-tag or raw JSON tool-call block,
+  // we parse it, execute the tool, and record it. This only fires when
+  // there were ZERO native calls — never alongside or after a successful one.
+
+  if (toolCallsMade.length === 0 && fullResponseText.trim().length > 0) {
+    const fallback = extractRawToolCall(fullResponseText);
+    if (fallback) {
+      // Build a local tool map for lookup (mirrors the one in runTurn)
+      const fallbackTools: Record<string, any> = {
+        readFile,
+        writeFile,
+        editFile,
+        glob,
+        grep,
+        listDir,
+        openFile,
+        addFileToContext,
+        runBash: createRunBashTool(onConfirm),
+        runBackground: createRunBackgroundTool(onConfirm),
+        manageTasks,
+        managePorts,
+        fileOperations,
+      };
+
+      const tool = fallbackTools[fallback.name];
+      if (tool) {
+        const toolCallId = `fallback_${Math.random().toString(36).slice(2, 9)}`;
+
+        // Emit tool-call event to the UI
+        if (onEvent) {
+          onEvent({ kind: "tool-call", toolCallId, toolName: fallback.name, input: fallback.arguments });
+        }
+
+        // Log initiation with FALLBACK marker
+        const argsStr = JSON.stringify(fallback.arguments, null, 2);
+        SessionLogger.logExecutorStreamEvent(
+          `\n  [FALLBACK PSEUDO-CALL PARSED — not a native tool call]\n` +
+          `    Tool Name: ${fallback.name}\n` +
+          `    ID       : ${toolCallId}\n` +
+          `    How Sent : Parsed from raw text via fallback pseudo-call parser\n` +
+          `    Arguments:\n` +
+          argsStr.split("\n").map(l => `      ${l}`).join("\n") + "\n"
+        );
+
+        let output: any;
+        let success = true;
+        try {
+          output = await tool.execute(fallback.arguments, { toolCallId, messages: history });
+
+          // Emit tool-result event
+          if (onEvent) {
+            onEvent({ kind: "tool-result", toolCallId, toolName: fallback.name, output });
+          }
+        } catch (e) {
+          success = false;
+          output = { error: String(e) };
+
+          // Emit tool-error event
+          if (onEvent) {
+            onEvent({ kind: "tool-error", toolCallId, toolName: fallback.name, error: e });
+          }
+        }
+
+        // Log the full fallback interception via SessionLogger
+        SessionLogger.logFallbackToolCall(
+          fallback.name,
+          fallback.arguments,
+          output,
+          fullResponseText.slice(0, 500),
+          success,
+        );
+
+        // Record into claimedFiles and toolCallsMade exactly like native path
+        const filePath = extractFileFromToolCall(fallback.name, fallback.arguments);
+        if (filePath) {
+          claimedFiles.add(filePath);
+        }
+
+        toolCallsMade.push({
+          toolName: fallback.name,
+          toolCallId,
+          input: fallback.arguments,
+          output,
+        });
+
+        agentEvents.push(
+          { kind: "tool-call", toolCallId, toolName: fallback.name, input: fallback.arguments },
+          success
+            ? { kind: "tool-result", toolCallId, toolName: fallback.name, output }
+            : { kind: "tool-error", toolCallId, toolName: fallback.name, error: output },
+        );
+      }
+    }
   }
 
   const finalResult = {

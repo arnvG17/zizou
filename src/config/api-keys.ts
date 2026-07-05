@@ -45,30 +45,34 @@ const config = new Conf<ConfigSchema>({
  */
 export function getApiKey(provider: ProviderChoice): string | undefined {
   if (provider === "anthropic") {
-    if (process.env.ANTHROPIC_API_KEY) return process.env.ANTHROPIC_API_KEY;
-    return config.get("apiKeys.anthropic");
+    const saved = config.get("apiKeys.anthropic");
+    if (saved) return saved;
+    return process.env.ANTHROPIC_API_KEY;
   }
   if (provider === "openai") {
-    if (process.env.OPENAI_API_KEY) return process.env.OPENAI_API_KEY;
-    return config.get("apiKeys.openai");
+    const saved = config.get("apiKeys.openai");
+    if (saved) return saved;
+    return process.env.OPENAI_API_KEY;
   }
   if (provider === "openrouter") {
-    if (process.env.OPENROUTER_API_KEY) return process.env.OPENROUTER_API_KEY;
-    return config.get("apiKeys.openrouter");
+    const saved = config.get("apiKeys.openrouter");
+    if (saved) return saved;
+    return process.env.OPENROUTER_API_KEY;
   }
   if (provider === "google") {
-    if (process.env.GEMINI_API_KEY) return process.env.GEMINI_API_KEY;
-    return config.get("apiKeys.google");
+    const saved = config.get("apiKeys.google");
+    if (saved) return saved;
+    return process.env.GEMINI_API_KEY;
   }
   if (provider === "groq") {
-    if (process.env.GROQ_API_KEY) return process.env.GROQ_API_KEY;
-    return config.get("apiKeys.groq");
+    const saved = config.get("apiKeys.groq");
+    if (saved) return saved;
+    return process.env.GROQ_API_KEY;
   }
   if (provider === "ollama") {
-    // Ollama doesn't need a real API key — but we support one if the user
-    // runs a secured/proxied instance. Default to the placeholder "ollama".
-    if (process.env.OLLAMA_API_KEY) return process.env.OLLAMA_API_KEY;
-    return config.get("apiKeys.ollama") ?? "ollama";
+    const saved = config.get("apiKeys.ollama");
+    if (saved) return saved;
+    return process.env.OLLAMA_API_KEY ?? "ollama";
   }
   return undefined;
 }

@@ -64,7 +64,7 @@ const SHORT_LABELS: Record<ProviderChoice, string> = {
 const COMMON_MODELS: Record<ProviderChoice, string[]> = {
   groq: ["llama-3.3-70b-versatile", "mixtral-8x7b-32768", "llama-3.1-8b-instant", "gemma2-9b-it"],
   google: ["gemini-2.0-flash", "gemini-1.5-pro", "gemini-1.5-flash"],
-  openrouter: ["meta-llama/llama-3.3-70b-instruct:free", "deepseek/deepseek-chat", "google/gemma-3-27b-it"],
+  openrouter: ["google/gemma-4-31b-it:free", "meta-llama/llama-3.3-70b-instruct:free", "deepseek/deepseek-chat"],
   anthropic: ["claude-3-5-sonnet-latest", "claude-3-5-haiku-latest", "claude-3-opus-20240229"],
   openai: ["gpt-4o", "gpt-4o-mini", "o1-mini"],
   ollama: ["llama3", "mistral", "phi3"],
@@ -86,6 +86,7 @@ const MODEL_OPTIONS: ModelOption[] = [
   { label: "Claude 3.5 Haiku (Anthropic)", provider: "anthropic", modelId: "claude-3-5-haiku-latest" },
   { label: "GPT-4o (OpenAI)", provider: "openai", modelId: "gpt-4o" },
   { label: "GPT-4o Mini (OpenAI)", provider: "openai", modelId: "gpt-4o-mini" },
+  { label: "Gemma 4 31B (OpenRouter - Free)", provider: "openrouter", modelId: "google/gemma-4-31b-it:free" },
   { label: "LLaMA 3.3 70B (OpenRouter - Free)", provider: "openrouter", modelId: "meta-llama/llama-3.3-70b-instruct:free" },
   { label: "DeepSeek Chat (OpenRouter)", provider: "openrouter", modelId: "deepseek/deepseek-chat" },
   { label: "LLaMA 3 (Ollama - Local)", provider: "ollama", modelId: "llama3" },

@@ -56,6 +56,6 @@ export function getModel(provider: ProviderChoice = "openrouter") {
     case "openrouter":
     default:
       // Using a popular free model on OpenRouter
-      return openrouter("meta-llama/llama-3.3-70b-instruct:free");
+      return openrouter("google/gemma-4-31b-it:free");
   }
 }
