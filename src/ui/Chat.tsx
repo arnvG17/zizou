@@ -543,13 +543,16 @@ export function Chat({ onChangeKeys, mode: initialMode = "build", initialPrompt 
     if (suggestionMode !== "checkpoint-subcommands") return [];
     return [
       { value: "list", label: "list - List all checkpoints" },
-      { value: "diff", label: "diff - Show changes in last checkpoint" },
+      { value: "diff", label: "diff - Show local uncommitted changes" },
+      { value: "diff session", label: "diff session - Show all changes in the full session" },
       { value: "diff", label: "diff <id> - Show changes in checkpoint" },
       { value: "diff", label: "diff <from> <to> - Compare two checkpoints" },
       { value: "restore", label: "restore <id> - Restore to checkpoint" },
       { value: "branch", label: "branch <name> - Create new branch" },
       { value: "switch", label: "switch <branch> - Switch to branch" },
       { value: "delete", label: "delete <id> - Delete checkpoint" },
+      { value: "revert", label: "revert - Revert all uncommitted changes" },
+      { value: "revert session", label: "revert session - Revert all changes in the full session" },
     ];
   }, [suggestionMode]);
 

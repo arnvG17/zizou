@@ -97,6 +97,9 @@ export interface StepResult {
 
   /** All agent events emitted during execution (including finish with usage). */
   agentEvents: import("./run-turn.js").AgentEvent[];
+
+  /** Map of file paths to their contents before they were modified in this step. */
+  oldFileStates?: Map<string, string | null>;
 }
 
 // ─── Verification Result ─────────────────────────────────────────────────────

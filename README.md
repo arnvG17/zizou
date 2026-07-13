@@ -83,8 +83,12 @@ The codebase strictly adheres to a layered architecture. Higher layers may impor
 To avoid writing your key to disk entirely, you can provide it via environment variables instead, which will always take precedence:
 ```bash
 export ANTHROPIC_API_KEY="sk-ant-..."
-# or
 export OPENAI_API_KEY="sk-proj-..."
+export OPENROUTER_API_KEY="sk-or-..."
+export GEMINI_API_KEY="AIza..."
+export GROQ_API_KEY="gsk_..."
+# Ollama needs no key — optionally set a custom base URL:
+export OLLAMA_BASE_URL="http://localhost:11434"
 ```
 
 ## Known Limitations (Future Work)

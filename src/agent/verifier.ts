@@ -26,8 +26,9 @@
 // DEPENDENCY DIRECTION: imports from agent/types.ts only.
 // Must NOT import from ui/, config/, or provider/.
 
-import { statSync } from "fs";
-import { resolve } from "path";
+import { statSync, readFileSync } from "fs";
+import { resolve, extname } from "path";
+import { spawn } from "child_process";
 import type { PlanStep, StepResult, VerificationResult } from "./types.js";
 import { SessionLogger } from "./debug/index.js";
 
@@ -93,6 +94,99 @@ export function capturePreSnapshot(
   return snapshots;
 }
 
+// ─── Executability Verification ───────────────────────────────────────────────
+//
+// Checks if created files are syntactically valid and can actually run.
+// This catches basic syntax errors that would prevent execution.
+
+/**
+ * Validates a file's syntax based on its extension.
+ * Returns an error message if invalid, null if valid.
+ */
+export function validateFileSyntax(filePath: string): string | null {
+  try {
+    const ext = extname(filePath).toLowerCase();
+    const content = readFileSync(filePath, "utf-8");
+
+    switch (ext) {
+      case ".html":
+        // Basic HTML structure check
+        if (!content.includes("<html") && !content.includes("<!DOCTYPE")) {
+          return `HTML file missing basic structure tags`;
+        }
+        
+        // Check for matching basic tags
+        const openHtml = (content.match(/<html/gi) || []).length;
+        const closeHtml = (content.match(/<\/html>/gi) || []).length;
+        const openBody = (content.match(/<body/gi) || []).length;
+        const closeBody = (content.match(/<\/body>/gi) || []).length;
+        const openHead = (content.match(/<head/gi) || []).length;
+        const closeHead = (content.match(/<\/head>/gi) || []).length;
+        
+        if (openHtml !== closeHtml) {
+          return `HTML file has unbalanced <html> tags`;
+        }
+        if (openBody !== closeBody) {
+          return `HTML file has unbalanced <body> tags`;
+        }
+        if (openHead !== closeHead) {
+          return `HTML file has unbalanced <head> tags`;
+        }
+        break;
+
+      case ".js":
+      case ".jsx":
+      case ".ts":
+      case ".tsx":
+        // Basic syntax check - look for obvious syntax errors
+        // This is a lightweight check, not a full parser
+        const openBraces = (content.match(/\{/g) || []).length;
+        const closeBraces = (content.match(/\}/g) || []).length;
+        const openParens = (content.match(/\(/g) || []).length;
+        const closeParens = (content.match(/\)/g) || []).length;
+        const openBrackets = (content.match(/\[/g) || []).length;
+        const closeBrackets = (content.match(/\]/g) || []).length;
+
+        if (openBraces !== closeBraces) {
+          return `Unbalanced braces in ${ext} file`;
+        }
+        if (openParens !== closeParens) {
+          return `Unbalanced parentheses in ${ext} file`;
+        }
+        if (openBrackets !== closeBrackets) {
+          return `Unbalanced brackets in ${ext} file`;
+        }
+        break;
+
+      case ".css":
+        // Basic CSS syntax check
+        const cssOpenBraces = (content.match(/\{/g) || []).length;
+        const cssCloseBraces = (content.match(/\}/g) || []).length;
+        if (cssOpenBraces !== cssCloseBraces) {
+          return `Unbalanced braces in CSS file`;
+        }
+        break;
+
+      case ".json":
+        // Try to parse JSON
+        try {
+          JSON.parse(content);
+        } catch (e) {
+          return `Invalid JSON: ${e instanceof Error ? e.message : "parse error"}`;
+        }
+        break;
+
+      default:
+        // Unknown file type - skip validation
+        break;
+    }
+
+    return null; // File is valid
+  } catch (err) {
+    return `Failed to read file for validation: ${err instanceof Error ? err.message : "unknown error"}`;
+  }
+}
+
 // ─── Post-Step Verification ──────────────────────────────────────────────────
 //
 // The core verification logic. Compares pre-execution snapshots against
@@ -128,6 +222,18 @@ export async function verifyStep(
   const mismatches: string[] = [];
 
   SessionLogger.logVerifierStart(step, result.claimedFiles);
+
+  // ── Check 0: Are created files syntactically valid? ───────────────────
+  //
+  // Before checking if files changed, verify that the files the executor
+  // claimed to create are actually valid and can run.
+  for (const claimedFile of result.claimedFiles) {
+    const abs = resolve(cwd, claimedFile);
+    const syntaxError = validateFileSyntax(abs);
+    if (syntaxError) {
+      mismatches.push(`syntax-error: ${claimedFile} - ${syntaxError}`);
+    }
+  }
 
   // ── Check 1: Did every claimed file actually change? ───────────────────
   //

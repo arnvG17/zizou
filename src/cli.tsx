@@ -81,10 +81,35 @@ const initialPrompt = initialPromptParts.join(" ").trim() || undefined;
 
 // ─── Render ──────────────────────────────────────────────────────────────────
 
-render(
+import { getDefaultProvider, getOllamaBaseUrl } from "./config/api-keys.js";
+import { getActiveModelId } from "./sdk/resolve-model.js";
+
+const instance = render(
   <App
     forceSetup={forceSetup}
     mode={modeContext.mode}
     initialPrompt={initialPrompt}
   />
 );
+
+instance.waitUntilExit().then(async () => {
+  // Auto-unload the Ollama model from memory when Zizou exits
+  try {
+    const provider = getDefaultProvider();
+    if (provider === "ollama") {
+      const model = getActiveModelId("ollama");
+      const baseUrl = getOllamaBaseUrl();
+      
+      // Sending keep_alive: 0 instantly unloads the model from VRAM/RAM
+      // and terminates any ongoing generation on the Ollama server side.
+      await fetch(`${baseUrl}/api/generate`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ model, keep_alive: 0 }),
+      });
+    }
+  } catch (err) {
+    // Silently ignore fetch errors on exit
+  }
+  process.exit(0);
+});

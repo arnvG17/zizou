@@ -31,8 +31,15 @@ import {
   getActiveBranch,
   diffCheckpoints,
   deleteCheckpoint,
+  getLocalChanges,
+  revertLocalChanges,
+  computeLineDiff,
+  getSessionChanges,
+  revertSessionChanges,
+  formatColoredDiff,
 } from "../checkpoint/manager.js";
 import type { ConfirmFn } from "../tools/index.js";
+import type { FilePatch } from "../checkpoint/types.js";
 
 export interface SlashCommandInfo {
   command: string;
@@ -53,7 +60,7 @@ export const SLASH_COMMANDS: SlashCommandInfo[] = [
   { command: "/skills", description: "List available custom agent skills" },
   { command: "/clear", description: "Reset conversation history & start new session" },
   { command: "/session", description: "Session management (new, list, switch, delete)" },
-  { command: "/checkpoint", description: "Checkpoint management (list, diff, restore, branch, switch, delete)" },
+  { command: "/checkpoint", description: "Checkpoint management (list, diff, restore, branch, switch, delete, revert)" },
   { command: "/help", description: "Show available commands & active provider" },
   { command: "/exit", description: "Close Zizou" },
 ];
@@ -639,6 +646,51 @@ export async function handleSlashCommand(ctx: CommandContext): Promise<boolean> 
 
     if (subCommand === "diff") {
       const checkpoints = listCheckpoints();
+
+      // Check if --full or -f is specified anywhere in the checkpoint args
+      const showFull = args.some(arg => arg.toLowerCase() === "--full" || arg.toLowerCase() === "-f");
+      const cleanArgs = args.filter(arg => arg.toLowerCase() !== "--full" && arg.toLowerCase() !== "-f");
+      const target = cleanArgs[1];
+      const target2 = cleanArgs[2];
+
+      if (!target || target === "session") {
+        // Show local changes
+        const isFullSession = target === "session";
+        const changes = isFullSession ? getSessionChanges() : getLocalChanges();
+        const activeBranch = getActiveBranch();
+        const headId = activeBranch?.headCheckpointId ? activeBranch.headCheckpointId.slice(0, 8) : "none";
+        const branchName = activeBranch ? activeBranch.name : "unknown";
+        
+        if (changes.length === 0) {
+          ctx.setLog((l: LogEntry[]) => [
+            ...l,
+            { kind: "user", text },
+            { kind: "assistant", text: isFullSession
+                ? `No changes found in the entire session for branch "${branchName}".`
+                : `No uncommitted local changes since checkpoint ${headId}.`
+            },
+          ]);
+          return true;
+        }
+
+        let output = isFullSession
+          ? `Complete changes for the full session on branch "${branchName}":\n\n`
+          : `Uncommitted local changes since checkpoint ${headId}:\n\n`;
+          
+        for (const change of changes) {
+          output += `=== ${change.operation.toUpperCase()}: ${change.filePath} ===\n`;
+          const diff = formatColoredDiff(change.filePath, change.operation, change.oldContent, change.newContent, showFull);
+          output += diff + "\n\n";
+        }
+
+        ctx.setLog((l: LogEntry[]) => [
+          ...l,
+          { kind: "user", text },
+          { kind: "assistant", text: output.trim() },
+        ]);
+        return true;
+      }
+
       if (checkpoints.length === 0) {
         ctx.setLog((l: LogEntry[]) => [
           ...l,
@@ -648,33 +700,21 @@ export async function handleSlashCommand(ctx: CommandContext): Promise<boolean> 
         return true;
       }
 
-      if (!target) {
-        // Show diff for the last checkpoint
-        const lastCheckpoint = checkpoints[checkpoints.length - 1];
-        let output = `Changes in checkpoint ${lastCheckpoint.id.slice(0, 8)}:\n\n`;
-        for (const patch of lastCheckpoint.patches) {
-          output += `  ${patch.operation}: ${patch.filePath}\n`;
-        }
-        
-        ctx.setLog((l: LogEntry[]) => [
-          ...l,
-          { kind: "user", text },
-          { kind: "assistant", text: output },
-        ]);
-        return true;
-      }
-
       // Find checkpoint by ID or step index
-      let fromCheckpoint = checkpoints[checkpoints.length - 1];
+      let fromCheckpoint: typeof checkpoints[0] | undefined;
       let toCheckpoint: typeof checkpoints[0] | undefined;
 
       if (target2) {
         // Two targets provided: diff between them
-        fromCheckpoint = checkpoints.find(c => c.id.startsWith(target) || c.stepIndex.toString() === target) || fromCheckpoint;
+        fromCheckpoint = checkpoints.find(c => c.id.startsWith(target) || c.stepIndex.toString() === target);
         toCheckpoint = checkpoints.find(c => c.id.startsWith(target2) || c.stepIndex.toString() === target2);
       } else {
-        // One target: diff from previous to this target
+        // One target: diff from its parent to this target
         toCheckpoint = checkpoints.find(c => c.id.startsWith(target) || c.stepIndex.toString() === target);
+        if (toCheckpoint) {
+          const targetCheckpoint = toCheckpoint;
+          fromCheckpoint = checkpoints.find(c => c.id === targetCheckpoint.parentId);
+        }
       }
 
       if (!toCheckpoint) {
@@ -687,22 +727,76 @@ export async function handleSlashCommand(ctx: CommandContext): Promise<boolean> 
       }
 
       try {
-        const patches = diffCheckpoints(fromCheckpoint.id, toCheckpoint.id);
-        let output = `Changes from ${fromCheckpoint.id.slice(0, 8)} to ${toCheckpoint.id.slice(0, 8)}:\n\n`;
-        for (const patch of patches) {
-          output += `  ${patch.operation}: ${patch.filePath}\n`;
+        let patches: FilePatch[] = [];
+        let fromDesc = "root";
+        if (fromCheckpoint) {
+          patches = diffCheckpoints(fromCheckpoint.id, toCheckpoint.id);
+          fromDesc = fromCheckpoint.id.slice(0, 8);
+        } else {
+          patches = toCheckpoint.patches;
+        }
+
+        let output = `Changes from ${fromDesc} to ${toCheckpoint.id.slice(0, 8)} (${toCheckpoint.description}):\n\n`;
+        if (patches.length === 0) {
+          output += "  No changes found.\n";
+        } else {
+          for (const patch of patches) {
+            output += `=== ${patch.operation.toUpperCase()}: ${patch.filePath} ===\n`;
+            const diff = formatColoredDiff(patch.filePath, patch.operation, patch.oldContent, patch.newContent, showFull);
+            output += diff + "\n\n";
+          }
         }
         
         ctx.setLog((l: LogEntry[]) => [
           ...l,
           { kind: "user", text },
-          { kind: "assistant", text: output },
+          { kind: "assistant", text: output.trim() },
         ]);
       } catch (err: any) {
         ctx.setLog((l: LogEntry[]) => [
           ...l,
           { kind: "user", text },
           { kind: "error", text: err.message },
+        ]);
+      }
+      return true;
+    }
+
+    if (subCommand === "revert") {
+      const isFullSession = target?.toLowerCase() === "session";
+      const changes = isFullSession ? getSessionChanges() : getLocalChanges();
+      
+      if (changes.length === 0) {
+        ctx.setLog((l: LogEntry[]) => [
+          ...l,
+          { kind: "user", text },
+          { kind: "assistant", text: isFullSession
+              ? "No changes in the session to revert."
+              : "No uncommitted local changes to revert."
+          },
+        ]);
+        return true;
+      }
+
+      try {
+        if (isFullSession) {
+          revertSessionChanges();
+        } else {
+          revertLocalChanges();
+        }
+        ctx.setLog((l: LogEntry[]) => [
+          ...l,
+          { kind: "user", text },
+          { kind: "assistant", text: isFullSession
+              ? `Successfully reverted all ${changes.length} change(s) from the full session back to its start.`
+              : `Successfully reverted ${changes.length} file change(s) in the workspace back to the head checkpoint.`
+          },
+        ]);
+      } catch (err: any) {
+        ctx.setLog((l: LogEntry[]) => [
+          ...l,
+          { kind: "user", text },
+          { kind: "error", text: `Failed to revert changes: ${err.message}` },
         ]);
       }
       return true;
@@ -870,7 +964,7 @@ export async function handleSlashCommand(ctx: CommandContext): Promise<boolean> 
     ctx.setLog((l: LogEntry[]) => [
       ...l,
       { kind: "user", text },
-      { kind: "assistant", text: "Usage:\n  /checkpoint list              List all checkpoints\n  /checkpoint diff               Show changes in last checkpoint\n  /checkpoint diff <id>         Show changes in checkpoint\n  /checkpoint diff <from> <to>  Compare two checkpoints\n  /checkpoint restore <id>      Restore to checkpoint\n  /checkpoint branch <name>     Create new branch\n  /checkpoint switch <branch>   Switch to branch\n  /checkpoint delete <id>       Delete checkpoint" },
+      { kind: "assistant", text: "Usage:\n  /checkpoint list              List all checkpoints\n  /checkpoint diff               Show local uncommitted changes\n  /checkpoint diff <id>         Show changes in checkpoint\n  /checkpoint diff <from> <to>  Compare two checkpoints\n  /checkpoint restore <id>      Restore to checkpoint\n  /checkpoint branch <name>     Create new branch\n  /checkpoint switch <branch>   Switch to branch\n  /checkpoint delete <id>       Delete checkpoint\n  /checkpoint revert            Revert all uncommitted changes" },
     ]);
     return true;
   }

@@ -39,6 +39,7 @@ import { runTurn, extractRawToolCall, type AgentEvent } from "./run-turn.js";
 import type { ConfirmFn } from "../tools/types.js";
 import type { PlanStep, StepResult, ToolCall, ProjectContext } from "./types.js";
 import { SessionLogger } from "./debug/index.js";
+import { captureFileState } from "../checkpoint/patcher.js";
 import {
   readFile,
   createWriteFileTool,
@@ -156,6 +157,7 @@ export async function executeStep(
   const claimedFiles = new Set<string>();
   const toolCallsMade: ToolCall[] = [];
   const agentEvents: AgentEvent[] = [];
+  const oldFileStates = new Map<string, string | null>();
   let fullResponseText = "";
 
   // ── Conversation history tracking for subsequent rounds ─────────────────────
@@ -284,6 +286,9 @@ export async function executeStep(
       const filePath = extractFileFromToolCall(event.toolName, event.input);
       if (filePath) {
         claimedFiles.add(filePath);
+        if (!oldFileStates.has(filePath)) {
+          oldFileStates.set(filePath, captureFileState(filePath));
+        }
       }
     }
 
@@ -368,6 +373,15 @@ export async function executeStep(
           argsStr.split("\n").map(l => `      ${l}`).join("\n") + "\n"
         );
 
+        // Record into claimedFiles and capture pre-execution state before executing
+        const filePath = extractFileFromToolCall(fallback.name, fallback.arguments);
+        if (filePath) {
+          claimedFiles.add(filePath);
+          if (!oldFileStates.has(filePath)) {
+            oldFileStates.set(filePath, captureFileState(filePath));
+          }
+        }
+
         let output: any;
         let success = true;
         try {
@@ -396,12 +410,6 @@ export async function executeStep(
           success,
         );
 
-        // Record into claimedFiles and toolCallsMade exactly like native path
-        const filePath = extractFileFromToolCall(fallback.name, fallback.arguments);
-        if (filePath) {
-          claimedFiles.add(filePath);
-        }
-
         toolCallsMade.push({
           toolName: fallback.name,
           toolCallId,
@@ -424,6 +432,7 @@ export async function executeStep(
     claimedFiles: Array.from(claimedFiles),
     toolCallsMade,
     agentEvents,
+    oldFileStates,
   };
 
   SessionLogger.logExecutorStepEnd({

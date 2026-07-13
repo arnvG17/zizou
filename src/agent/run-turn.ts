@@ -262,7 +262,8 @@ export async function* runTurn(
   let rateLimitCaught = false;
 
   try {
-    for await (const part of result.fullStream) {
+    for await (const rawPart of result.fullStream) {
+      const part = rawPart as any;
       switch (part.type) {
         case "step-start":
           stepIndex++;
@@ -397,7 +398,7 @@ export async function* runTurn(
         role: "assistant",
         content: [
           { type: "text", text: textContent },
-          { type: "tool-call", toolCallId, toolName: rawToolCall.name, args: rawToolCall.arguments },
+          { type: "tool-call", toolCallId, toolName: rawToolCall.name, input: rawToolCall.arguments } as any,
         ],
       };
 
@@ -405,7 +406,7 @@ export async function* runTurn(
       responseMessages.push({
         role: "tool",
         content: [
-          { type: "tool-result", toolCallId, toolName: rawToolCall.name, result: output, isError },
+          { type: "tool-result", toolCallId, toolName: rawToolCall.name, output, isError } as any,
         ],
       });
 

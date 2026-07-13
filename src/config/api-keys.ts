@@ -45,32 +45,32 @@ const config = new Conf<ConfigSchema>({
  */
 export function getApiKey(provider: ProviderChoice): string | undefined {
   if (provider === "anthropic") {
-    const saved = config.get("apiKeys.anthropic");
+    const saved = config.get("apiKeys.anthropic") as string | undefined;
     if (saved) return saved;
     return process.env.ANTHROPIC_API_KEY;
   }
   if (provider === "openai") {
-    const saved = config.get("apiKeys.openai");
+    const saved = config.get("apiKeys.openai") as string | undefined;
     if (saved) return saved;
     return process.env.OPENAI_API_KEY;
   }
   if (provider === "openrouter") {
-    const saved = config.get("apiKeys.openrouter");
+    const saved = config.get("apiKeys.openrouter") as string | undefined;
     if (saved) return saved;
     return process.env.OPENROUTER_API_KEY;
   }
   if (provider === "google") {
-    const saved = config.get("apiKeys.google");
+    const saved = config.get("apiKeys.google") as string | undefined;
     if (saved) return saved;
     return process.env.GEMINI_API_KEY;
   }
   if (provider === "groq") {
-    const saved = config.get("apiKeys.groq");
+    const saved = config.get("apiKeys.groq") as string | undefined;
     if (saved) return saved;
     return process.env.GROQ_API_KEY;
   }
   if (provider === "ollama") {
-    const saved = config.get("apiKeys.ollama");
+    const saved = config.get("apiKeys.ollama") as string | undefined;
     if (saved) return saved;
     return process.env.OLLAMA_API_KEY ?? "ollama";
   }
@@ -82,6 +82,15 @@ export function getApiKey(provider: ProviderChoice): string | undefined {
  */
 export function setApiKey(provider: ProviderChoice, key: string): void {
   config.set(`apiKeys.${provider}`, key);
+}
+
+/**
+ * Removes the API key for a single provider (without affecting other keys).
+ */
+export function removeApiKey(provider: ProviderChoice): void {
+  const keys = config.get("apiKeys") ?? {};
+  delete keys[provider];
+  config.set("apiKeys", keys);
 }
 
 /**
