@@ -1,0 +1,32 @@
+# ZIZOU DOCUMENTATION
+
+Everything you need to run, extend, and understand Zizou — the AI coding agent that lives in your terminal.
+
+<div id="getting-started" className="pt-8" />
+
+## Getting Started
+
+Zizou is an open-source AI coding agent CLI tool built with TypeScript, React (Ink), and the Vercel AI SDK. It lets you chat with Claude 3.5 Sonnet, GPT-4o, and other models directly in your terminal, and grants the AI the ability to read files, edit files (safely), and run sandboxed terminal commands with your **explicit approval**.
+
+On first run, the CLI presents a setup screen asking you to select a provider and input an API key.
+
+<div id="installation" className="pt-16" />
+
+## Installation
+
+### OPTION 1 — NPM (RECOMMENDED)
+
+Requires Node.js.
+
+```bash
+npm install -g zizou-ai
+zizou
+```
+
+### OPTION 2 — DOCKER
+
+Run Zizou inside an isolated Docker container:
+
+```bash
+docker run -it arnv17/zizou:latest
+```

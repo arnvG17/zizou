@@ -59,3 +59,52 @@ Since Zizou is powered by an LLM, the exact same prompt can behave slightly diff
 ## When to run it
 
 Run the full suite before making a change, and again after. The comparison between the two is the actual answer to "did this fix work" — not rereading a debug log and deciding it looks better.
+
+## How to run it
+
+The eval harness can be executed using the following commands:
+
+```bash
+# Run the entire suite of golden tasks
+bun run eval
+
+# Run a specific task by its ID
+bun run eval -- --task build-single-file-fix
+
+# Run the suite overriding the active LLM provider (e.g. using 'google')
+bun run eval -- --provider google
+
+# Run a specific task with a specific provider
+bun run eval -- --task build-single-file-fix --provider groq
+```
+
+*Note: Make sure your `.env` file has the appropriate API keys configured for the provider you select.*
+
+## How to add new tests
+
+Adding a new test is straightforward:
+
+1. **Create the task file**: Create a new TypeScript file under `evals/golden-tasks/` (e.g. `evals/golden-tasks/my-custom-task.ts`).
+2. **Implement the `GoldenTask` interface**: Define and export the task object:
+   ```typescript
+   import type { GoldenTask } from "../types.js";
+   import { fileExists } from "../checks/file-exists.js";
+   import { grepContains } from "../checks/grep-contains.js";
+
+   export const myCustomTask: GoldenTask = {
+     id: "my-custom-task",
+     prompt: "Create a README.md explaining the project name 'Zizou'",
+     mode: "build",
+     async expectedCheck(workspaceDir) {
+       const exists = await fileExists(workspaceDir, "README.md");
+       if (!exists) return { passed: false, detail: "README.md not created" };
+
+       const matches = await grepContains(workspaceDir, "README.md", /zizou/i);
+       if (!matches) return { passed: false, detail: "README.md does not mention Zizou" };
+
+       return { passed: true, detail: "README.md created with correct details" };
+     }
+   };
+   ```
+3. **Register the task**: Open [evals/golden-tasks/index.ts](file:///c:/Users/Arnv/ZIZOUv1/evals/golden-tasks/index.ts), import your task, and append it to the `ALL_TASKS` array.
+

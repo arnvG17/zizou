@@ -274,18 +274,44 @@ async function runTask(
     console.log(`  ${runLabel}Workspace: ${workspaceDir}`);
 
     try {
-      // CRITICAL: Change cwd to the temp workspace before running the
-      // orchestrator. Every tool (writeFile, editFile, readFile, runBash,
-      // etc.) resolves relative paths via process.cwd(). Without this,
-      // files get written to the Zizou project root instead of the
-      // disposable workspace.
       const originalCwd = process.cwd();
       process.chdir(workspaceDir);
 
-      let events: OrchestratorEvent[];
+      let events: OrchestratorEvent[] = [];
       try {
-        // Run the orchestrator and capture all events
-        events = await drainOrchestrator(task, workspaceDir, provider);
+        let success = false;
+        const maxAttempts = 5;
+        for (let attempt = 1; attempt <= maxAttempts; attempt++) {
+          try {
+            // Run the orchestrator and capture all events
+            events = await drainOrchestrator(task, workspaceDir, provider);
+            success = true;
+            break;
+          } catch (err) {
+            const errMsg = err instanceof Error ? err.message : String(err);
+            const isRateLimit = 
+              errMsg.includes("rate_limit_exceeded") || 
+              errMsg.includes("Rate limit reached") || 
+              (err && typeof err === "object" && (err as any).statusCode === 429);
+
+            if (isRateLimit && attempt < maxAttempts) {
+              let waitMs = 5000;
+              const match = errMsg.match(/try again in ([\d\.]+)s/i);
+              if (match) {
+                waitMs = Math.ceil(parseFloat(match[1]) * 1000);
+              }
+              // Add a backoff multiplier to the wait time
+              waitMs = (waitMs * attempt) + 2000;
+              console.log(`  ⚠️ Rate limit hit. Retrying in ${(waitMs / 1000).toFixed(1)}s (Attempt ${attempt}/${maxAttempts})...`);
+              await new Promise((resolve) => setTimeout(resolve, waitMs));
+              continue;
+            }
+            throw err;
+          }
+        }
+        if (!success) {
+          throw new Error("Failed after maximum retries due to rate limits.");
+        }
       } finally {
         // Always restore cwd, even if the orchestrator throws
         process.chdir(originalCwd);
@@ -384,8 +410,12 @@ async function main() {
 
   // Run tasks
   const results: TaskResult[] = [];
-  for (const task of tasks) {
-    const result = await runTask(task, provider);
+  for (let i = 0; i < tasks.length; i++) {
+    if (i > 0) {
+      console.log(`\n  Sleeping 15s between tasks to prevent provider rate limits...`);
+      await new Promise((resolve) => setTimeout(resolve, 15000));
+    }
+    const result = await runTask(tasks[i], provider);
     results.push(result);
   }
 
