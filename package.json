@@ -11,6 +11,7 @@
     "dev-harness": "bun run src/dev-harness.ts",
     "typecheck": "tsc --noEmit -p tsconfig.json",
     "build": "bun run build.ts",
+    "eval": "bun run evals/run-evals.ts",
     "prepublishOnly": "npm run build"
   },
   "dependencies": {
