@@ -1,0 +1,365 @@
+@font-face {
+  font-family: 'Geist Sans';
+  src: url('https://unpkg.com/geist@1.7.2/dist/fonts/geist-sans/Geist-Variable.woff2') format('woff2');
+  font-weight: 100 900;
+  font-display: swap;
+}
+
+@font-face {
+  font-family: 'Geist Mono';
+  src: url('https://unpkg.com/geist@1.7.2/dist/fonts/geist-mono/GeistMono-Variable.woff2') format('woff2');
+  font-weight: 100 900;
+  font-display: swap;
+}
+
+@font-face {
+  font-family: 'Geist Pixel Square';
+  src: url('https://unpkg.com/geist@1.7.2/dist/fonts/geist-pixel/GeistPixel-Square.woff2') format('woff2');
+  font-weight: 500;
+  font-display: swap;
+}
+
+@font-face {
+  font-family: 'Geist Pixel Grid';
+  src: url('https://unpkg.com/geist@1.7.2/dist/fonts/geist-pixel/GeistPixel-Grid.woff2') format('woff2');
+  font-weight: 500;
+  font-display: swap;
+}
+
+@font-face {
+  font-family: 'Geist Pixel Circle';
+  src: url('https://unpkg.com/geist@1.7.2/dist/fonts/geist-pixel/GeistPixel-Circle.woff2') format('woff2');
+  font-weight: 500;
+  font-display: swap;
+}
+
+@font-face {
+  font-family: 'Geist Pixel Triangle';
+  src: url('https://unpkg.com/geist@1.7.2/dist/fonts/geist-pixel/GeistPixel-Triangle.woff2') format('woff2');
+  font-weight: 500;
+  font-display: swap;
+}
+
+@font-face {
+  font-family: 'Geist Pixel Line';
+  src: url('https://unpkg.com/geist@1.7.2/dist/fonts/geist-pixel/GeistPixel-Line.woff2') format('woff2');
+  font-weight: 500;
+  font-display: swap;
+}
+
+:root {
+  --background: #080808;
+  --foreground: #e4e4e7;
+  --card-bg: #121214;
+  --border-color: rgba(255, 255, 255, 0.08);
+  --accent: 8 85% 60%;
+  --accent-blue: 210 50% 55%;
+  --inline-code-bg: rgba(255, 255, 255, 0.06);
+  --inline-code-text: #f4f4f5;
+  --inline-code-border: rgba(255, 255, 255, 0.1);
+  --font-instrument: 'Instrument Serif', serif;
+  --font-pixel-square: 'Geist Pixel Square', monospace;
+  --font-pixel-grid: 'Geist Pixel Grid', monospace;
+  --font-pixel-circle: 'Geist Pixel Circle', monospace;
+  --font-pixel-triangle: 'Geist Pixel Triangle', monospace;
+  --font-pixel-line: 'Geist Pixel', sans-serif;
+}
+
+:root.light {
+  --background: #f5f4ef;
+  --foreground: #151515;
+  --card-bg: #fcfbfa;
+  --border-color: rgba(21, 21, 21, 0.12);
+  --accent: 8 85% 55%;
+  --accent-blue: 210 50% 45%;
+  --inline-code-bg: rgba(0, 0, 0, 0.05);
+  --inline-code-text: #151515;
+  --inline-code-border: rgba(0, 0, 0, 0.08);
+}
+
+body {
+  background-color: var(--background);
+  color: var(--foreground);
+  font-family: 'Geist Sans', system-ui, sans-serif;
+}
+
+.font-pixel-line,
+.geist-pixel-line {
+  font-family: var(--font-pixel-line) !important;
+  font-optical-sizing: auto !important;
+  font-weight: 400 !important;
+  font-style: normal !important;
+  font-variation-settings: "ELSH" 90.9 !important;
+}
+
+.prose h1 {
+  font-family: var(--font-pixel-line) !important;
+  font-optical-sizing: auto !important;
+  font-weight: 400 !important;
+  font-style: normal !important;
+  font-variation-settings: "ELSH" 90.9 !important;
+  font-size: 5rem;
+  letter-spacing: -0.05em;
+  line-height: 1.05;
+  margin-bottom: 1rem;
+  margin-top: 1rem;
+  color: var(--foreground);
+}
+
+@media (min-width: 768px) {
+  .prose h1 {
+    font-size: 7rem;
+  }
+}
+
+@media (min-width: 1024px) {
+  .prose h1 {
+    font-size: 8.75rem;
+  }
+}
+
+.prose h1 + p {
+  font-family: 'Geist Mono', monospace;
+  font-size: 0.875rem;
+  line-height: 1.625;
+  color: #737373;
+  margin-bottom: 2.5rem;
+  max-width: 42rem;
+  opacity: 0.8;
+}
+
+@media (min-width: 768px) {
+  .prose h1 + p {
+    font-size: 1rem;
+  }
+}
+
+.prose h2 {
+  font-family: var(--font-instrument), serif !important;
+  font-style: italic !important;
+  font-weight: 400 !important;
+  font-size: 1.75rem;
+  letter-spacing: -0.02em;
+  line-height: 1.2;
+  margin-top: 3rem;
+  margin-bottom: 1.25rem;
+  border-bottom: 1px solid var(--border-color);
+  padding-bottom: 0.75rem;
+  color: var(--foreground);
+  display: flex;
+  align-items: center;
+  gap: 0.5rem;
+}
+
+@media (min-width: 768px) {
+  .prose h2 {
+    font-size: 2.25rem;
+  }
+}
+
+@media (min-width: 1024px) {
+  .prose h2 {
+    font-size: 2.75rem;
+  }
+}
+
+.prose h2::before {
+  content: "§";
+  font-family: var(--font-pixel-line);
+  font-size: 1.25rem;
+  color: hsl(var(--accent));
+  font-weight: bold;
+  margin-right: 0.25rem;
+}
+
+@media (min-width: 768px) {
+  .prose h2::before {
+    font-size: 1.875rem;
+  }
+}
+
+.prose h3 {
+  font-family: var(--font-pixel-line) !important;
+  font-optical-sizing: auto !important;
+  font-weight: 400 !important;
+  font-style: normal !important;
+  font-variation-settings: "ELSH" 90.9 !important;
+  font-size: 1.1rem !important;
+  letter-spacing: -0.02em;
+  color: hsl(var(--accent));
+  margin-top: 2rem;
+  margin-bottom: 1rem;
+  display: flex;
+  align-items: center;
+  gap: 0.5rem;
+  text-transform: none !important;
+}
+
+@media (min-width: 768px) {
+  .prose h3 {
+    font-size: 1.25rem !important;
+  }
+}
+
+@media (min-width: 1024px) {
+  .prose h3 {
+    font-size: 1.35rem !important;
+  }
+}
+
+.prose h3::before {
+  content: "▸";
+  color: hsl(var(--accent));
+  font-family: var(--font-pixel-line) !important;
+  font-variation-settings: "ELSH" 90.9 !important;
+}
+
+/* Installation Grid Layout */
+.installation-grid {
+  display: grid;
+  grid-template-columns: 1fr;
+  gap: 1.5rem;
+  margin-top: 2.5rem;
+  margin-bottom: 2.5rem;
+}
+
+@media (min-width: 768px) {
+  .installation-grid {
+    grid-template-columns: 1fr 1fr;
+  }
+}
+
+/* Installation Cards */
+.installation-card {
+  border: 1px solid var(--border-color);
+  background: rgba(10, 10, 10, 0.4);
+  backdrop-filter: blur(8px);
+  padding: 1.75rem;
+  border-radius: 0.75rem;
+  transition: all 0.3s cubic-bezier(0.4, 0, 0.2, 1);
+  position: relative;
+  overflow: hidden;
+  display: flex;
+  flex-direction: column;
+}
+
+/* Recommended Option Card Styling */
+.installation-card.recommended {
+  border-color: rgba(251, 146, 60, 0.2); /* Accent border */
+  background: linear-gradient(180deg, rgba(251, 146, 60, 0.04) 0%, rgba(10, 10, 10, 0.4) 100%);
+}
+
+.installation-card:hover {
+  border-color: rgba(255, 255, 255, 0.15);
+  transform: translateY(-3px);
+  box-shadow: 0 15px 30px -10px rgba(0, 0, 0, 0.8), inset 0 1px 0 rgba(255, 255, 255, 0.05);
+}
+
+.installation-card.recommended:hover {
+  border-color: hsl(var(--accent));
+  box-shadow: 0 15px 30px -10px rgba(251, 146, 60, 0.15), inset 0 1px 0 rgba(251, 146, 60, 0.1);
+}
+
+/* Glow Effect inside cards */
+.installation-card::before {
+  content: "";
+  position: absolute;
+  top: 0;
+  right: 0;
+  width: 150px;
+  height: 150px;
+  background: radial-gradient(circle, rgba(255, 255, 255, 0.02) 0%, rgba(255, 255, 255, 0) 70%);
+  pointer-events: none;
+  transition: all 0.3s ease;
+}
+
+.installation-card.recommended::before {
+  background: radial-gradient(circle, rgba(251, 146, 60, 0.08) 0%, rgba(251, 146, 60, 0) 70%);
+}
+
+.installation-card.recommended:hover::before {
+  background: radial-gradient(circle, rgba(251, 146, 60, 0.18) 0%, rgba(251, 146, 60, 0) 70%);
+}
+
+/* Heading inside Card overrides */
+.installation-card h3 {
+  margin-top: 0 !important;
+  margin-bottom: 0.75rem !important;
+  font-size: 1.15rem !important;
+  font-family: var(--font-pixel-line) !important;
+  font-optical-sizing: auto !important;
+  font-weight: 400 !important;
+  font-style: normal !important;
+  font-variation-settings: "ELSH" 90.9 !important;
+  display: flex !important;
+  align-items: center !important;
+  gap: 0.5rem !important;
+  color: var(--foreground) !important;
+}
+
+.installation-card h3::before {
+  content: "▸" !important;
+  color: var(--foreground) !important;
+  font-family: var(--font-pixel-line) !important;
+  font-optical-sizing: auto !important;
+  font-weight: 400 !important;
+  font-style: normal !important;
+  font-variation-settings: "ELSH" 90.9 !important;
+}
+
+.installation-card.recommended h3 {
+  color: hsl(var(--accent)) !important;
+}
+
+.installation-card.recommended h3::before {
+  color: hsl(var(--accent)) !important;
+  content: "★" !important;
+}
+
+/* Card body paragraph */
+.installation-card p {
+  font-size: 0.8rem !important;
+  color: #a3a3a3 !important;
+  line-height: 1.5 !important;
+  margin-bottom: 1.5rem !important;
+}
+
+/* Code block container adjustments inside cards */
+.installation-card figure {
+  margin-bottom: 0 !important;
+  margin-top: auto !important; /* Push code blocks to the bottom of the card */
+  width: 100% !important;
+}
+
+/* Ensure all prose body elements (paragraphs, lists) are rendered in very small Geist Mono font */
+.prose p,
+.prose ul,
+.prose ol,
+.prose li {
+  font-family: 'Geist Mono', monospace !important;
+}
+
+.prose p:not(h1 + p),
+.prose ul,
+.prose ol,
+.prose li {
+  font-size: 0.75rem !important;
+}
+
+/* ─── Terminal Demo Animations ──────────────────────────────────────────────── */
+@keyframes fadeIn {
+  from { opacity: 0; transform: translateY(3px); }
+  to   { opacity: 1; transform: translateY(0); }
+}
+.animate-fadeIn {
+  animation: fadeIn 0.18s ease-out both;
+}
+
+@keyframes blink {
+  0%, 100% { opacity: 1; }
+  50%       { opacity: 0; }
+}
+.animate-blink {
+  animation: blink 1s step-start infinite;
+}
+

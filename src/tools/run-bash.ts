@@ -27,7 +27,7 @@ const execAsync = promisify(exec);
 /**
  * Returns the platform-appropriate shell configuration for exec().
  * On Windows, cmd.exe is the default but it's very limited — PowerShell
- * handles modern tooling (npm, npx, git) much better.
+ * handles modern tooling (npm, npx, etc.) much better.
  * We resolve the absolute path to powershell.exe to ensure compatibility.
  */
 function getShellConfig(): { shell: string } | {} {

@@ -427,7 +427,7 @@ async function* runPlanMode(
     // ── Checkpoint creation on successful verification ─────────────────
     //
     // If verification succeeded, create a checkpoint for this step.
-    // This tracks the changes independently of Git.
+    // This tracks the changes locally via the file-based checkpoint system.
     if (verification.verified) {
       try {
         createCheckpoint(step.description, stepResult.claimedFiles, stepResult.oldFileStates);

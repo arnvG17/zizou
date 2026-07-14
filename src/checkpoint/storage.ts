@@ -3,7 +3,7 @@
 // LAYER: checkpoint/
 //
 // Checkpoint persistence - loads and saves checkpoint history to disk.
-// Uses the same project hash logic as the session storage module.
+// All tracking is done via local file I/O only — no git commands used.
 
 import { readFileSync, writeFileSync, existsSync, mkdirSync } from "fs";
 import { join } from "path";
@@ -12,24 +12,18 @@ import type { CheckpointHistory, Checkpoint } from "./types.js";
 const CWD = process.cwd();
 
 /**
- * Gets the project hash for the current working directory.
- * Uses git commit hash if in a git repo, otherwise hashes the directory path.
+ * Gets a stable hash for the current working directory.
+ * Uses a djb2-style hash of the directory path — no git dependency.
  */
 function getProjectHash(): string {
-  try {
-    const { execSync } = require("child_process");
-    return execSync("git rev-parse HEAD", { cwd: CWD, encoding: "utf-8" }).trim();
-  } catch {
-    // Not a git repo, hash the directory path
-    let hash = 0;
-    const str = CWD.toLowerCase();
-    for (let i = 0; i < str.length; i++) {
-      const char = str.charCodeAt(i);
-      hash = ((hash << 5) - hash) + char;
-      hash = hash & hash;
-    }
-    return Math.abs(hash).toString(16);
+  let hash = 0;
+  const str = CWD.toLowerCase();
+  for (let i = 0; i < str.length; i++) {
+    const char = str.charCodeAt(i);
+    hash = ((hash << 5) - hash) + char;
+    hash = hash & hash; // Convert to 32-bit integer
   }
+  return Math.abs(hash).toString(16);
 }
 
 /**

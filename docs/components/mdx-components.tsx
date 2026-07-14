@@ -1,5 +1,6 @@
 import React from "react";
 import { CodeBlock } from "./code-block";
+import { InstallTabs } from "./install-tabs";
 
 function getRawText(node: any): string {
   if (!node) return "";
@@ -12,6 +13,7 @@ function getRawText(node: any): string {
 
 export const mdxComponents = {
   pre: (props: any) => <CodeBlock {...props} />,
+  InstallTabs: (props: any) => <InstallTabs {...props} />,
   blockquote: (props: any) => {
     const rawText = getRawText(props.children);
     let type: "note" | "important" | "warning" | "caution" | null = null;
@@ -84,7 +86,7 @@ export const mdxComponents = {
             return (
               <p
                 key={idx}
-                className={`m-0 text-xs text-neutral-300 leading-relaxed font-sans ${
+                className={`m-0 text-xs text-neutral-300 leading-relaxed font-pixel-line ${
                   isBullet ? "pl-4 relative before:content-['→'] before:absolute before:left-0 before:text-accent-blue before:font-pixel-square" : ""
                 }`}
               >

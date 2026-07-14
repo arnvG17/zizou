@@ -69,7 +69,7 @@ export function DocsLayout({
 
           {/* Styled dynamically using custom variables */}
           <main className="flex-1 overflow-y-auto px-6 py-10 md:py-14 flex justify-center bg-customBg text-customText">
-            <div className="w-full max-width-768 flex flex-col">
+            <div className="w-full max-width-768 flex flex-col font-pixel-line">
               {children}
             </div>
           </main>

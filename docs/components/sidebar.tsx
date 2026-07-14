@@ -52,11 +52,11 @@ export function Sidebar() {
   }, [pathname]);
 
   const renderNavList = () => (
-    <div className="space-y-6">
+    <div className="space-y-6 font-mono">
       <div>
         <div className="mb-4">
-          <h3 className="font-mono text-[10px] font-bold uppercase tracking-wider text-accent">
-            // DOCUMENTATION
+          <h3 className="mb-2 px-4 text-sm font-semibold tracking-wide text-neutral-400">
+            Getting started
           </h3>
         </div>
         <ul className="space-y-1">
@@ -71,10 +71,10 @@ export function Sidebar() {
                 <Link
                   href={href}
                   onClick={closeSidebar}
-                  className={`block rounded px-3 py-1.5 text-[11px] font-mono transition-all border-l-2 ${
+                  className={`block rounded-lg px-4 py-2 text-sm font-medium transition-colors ${
                     isActive
-                      ? "bg-accent/10 border-accent text-accent font-bold"
-                      : "border-transparent text-neutral-400 dark:text-neutral-400 hover:text-white dark:hover:text-white hover:bg-neutral-900/50"
+                      ? "bg-orange-600/20 text-orange-400"
+                      : "text-neutral-400 hover:bg-neutral-800 hover:text-white"
                   }`}
                 >
                   {item.sidebarLabel}
@@ -105,7 +105,7 @@ export function Sidebar() {
       </div>
 
       {/* Desktop Sidebar (Sticky side column) */}
-      <aside className="hidden w-56 shrink-0 border-r border-current border-opacity-15 px-4 py-8 md:block sticky top-0 h-screen overflow-y-auto bg-customBg text-customText">
+      <aside className="hidden w-72 shrink-0 border-r border-current border-opacity-15 px-4 py-8 md:block sticky top-0 h-screen overflow-y-auto bg-customBg text-customText">
         {renderNavList()}
       </aside>
 

@@ -1,7 +1,7 @@
 "use client";
 
 import React, { useState, useRef } from "react";
-import { Check, Copy } from "lucide-react";
+import { Check, Copy, Info, Star } from "lucide-react";
 
 function getRawText(node: any): string {
   if (!node) return "";
@@ -12,12 +12,25 @@ function getRawText(node: any): string {
   return "";
 }
 
-export function CodeBlock({ children }: { children: React.ReactNode }) {
+interface Tab {
+  id: string;
+  label: string;
+  content: React.ReactNode;
+}
+
+interface CodeBlockProps {
+  children: React.ReactNode;
+  tabs?: Tab[];
+  defaultTab?: string;
+}
+
+export function CodeBlock({ children, tabs, defaultTab }: CodeBlockProps) {
   const [copied, setCopied] = useState(false);
+  const [activeTab, setActiveTab] = useState(defaultTab || tabs?.[0]?.id);
   const containerRef = useRef<HTMLDivElement>(null);
 
   const handleCopy = async () => {
-    const rawText = getRawText(children);
+    const rawText = getRawText(activeTab && tabs ? tabs.find(t => t.id === activeTab)?.content : children);
     try {
       await navigator.clipboard.writeText(rawText);
       setCopied(true);
@@ -28,39 +41,55 @@ export function CodeBlock({ children }: { children: React.ReactNode }) {
   };
 
   return (
-    <div ref={containerRef} className="group relative my-6 overflow-hidden rounded-lg border border-neutral-900 bg-neutral-950 shadow-md">
-      {/* Code Header Bar mimicking console mockup */}
-      <div className="flex items-center justify-between border-b border-neutral-900 px-4 py-3 bg-neutral-950 font-mono text-[9px]">
-        {/* Grey window dot controls */}
-        <div className="flex items-center gap-1.5">
-          <span className="h-1.5 w-1.5 rounded-full bg-neutral-800" />
-          <span className="h-1.5 w-1.5 rounded-full bg-neutral-800" />
-          <span className="h-1.5 w-1.5 rounded-full bg-neutral-800" />
-          <span className="text-neutral-500 font-bold ml-2 tracking-widest uppercase">BASH</span>
+    <div ref={containerRef} className="group relative my-6 overflow-hidden rounded-lg border border-neutral-800 bg-neutral-950">
+      {/* Tab Navigation */}
+      {tabs && tabs.length > 0 && (
+        <div className="flex items-center gap-1 border-b border-neutral-800 px-2 pt-2">
+          {tabs.map((tab) => (
+            <button
+              key={tab.id}
+              onClick={() => setActiveTab(tab.id)}
+              className={`px-4 py-2 text-sm font-medium transition-colors border-b-2 -mb-px ${
+                activeTab === tab.id
+                  ? "border-accent text-accent"
+                  : "border-transparent text-neutral-400 hover:text-neutral-200"
+              }`}
+            >
+              {tab.label}
+            </button>
+          ))}
         </div>
-        
-        <button
-          onClick={handleCopy}
-          className="flex items-center gap-1.5 text-neutral-400 hover:text-white transition-colors font-mono text-[9px] uppercase tracking-wider bg-transparent border-none outline-none"
-          title="Copy Code"
-        >
-          {copied ? (
-            <>
-              <Check size={10} className="text-accent" />
-              <span className="text-accent font-bold">COPIED</span>
-            </>
-          ) : (
-            <>
-              <Copy size={10} />
-              <span>COPY</span>
-            </>
-          )}
-        </button>
-      </div>
-      
+      )}
+
       {/* Code Display Area */}
-      <div className="overflow-x-auto p-4 text-[11px] font-mono leading-relaxed text-neutral-200 bg-black">
-        {children}
+      <div className="overflow-x-auto p-4 text-[13px] font-mono leading-relaxed text-neutral-300">
+        {tabs && tabs.length > 0 ? tabs.find(t => t.id === activeTab)?.content : children}
+      </div>
+
+      {/* Minimalist Copy Bar */}
+      <div className="flex items-center justify-between px-4 py-2 bg-neutral-900/50 border-t border-neutral-800">
+        <span className="text-[11px] text-neutral-500 font-mono">bash</span>
+        <div className="flex items-center gap-1">
+          <button
+            className="p-1.5 rounded text-neutral-500 hover:text-neutral-300 hover:bg-neutral-800 transition-colors"
+            title="Info"
+          >
+            <Info size={14} />
+          </button>
+          <button
+            onClick={handleCopy}
+            className="p-1.5 rounded text-neutral-500 hover:text-neutral-300 hover:bg-neutral-800 transition-colors"
+            title="Copy"
+          >
+            {copied ? <Check size={14} className="text-green-400" /> : <Copy size={14} />}
+          </button>
+          <button
+            className="p-1.5 rounded text-neutral-500 hover:text-neutral-300 hover:bg-neutral-800 transition-colors"
+            title="Star"
+          >
+            <Star size={14} />
+          </button>
+        </div>
       </div>
     </div>
   );
