@@ -3,15 +3,20 @@
 import Link from "next/link";
 import { usePathname } from "next/navigation";
 import { useTheme } from "./theme-context";
-import { Sun, Moon } from "lucide-react";
+import { Sun, Moon, Menu } from "lucide-react";
 
-export function Header() {
+interface HeaderProps {
+  onMenuClick?: () => void;
+  showMenuButton?: boolean;
+}
+
+export function Header({ onMenuClick, showMenuButton = false }: HeaderProps) {
   const pathname = usePathname();
   const isDocs = pathname !== "/";
   const { isDarkMode, setIsDarkMode } = useTheme();
 
   return (
-    <header className="border-b border-current border-opacity-15 bg-customBg/85 backdrop-blur-md text-customText px-10 py-6 flex items-center justify-between sticky top-0 z-30 font-mono transition-colors">
+    <header className="border-b border-current border-opacity-15 bg-customBg/85 backdrop-blur-md text-customText px-6 md:px-10 py-4 md:py-6 flex items-center justify-between sticky top-0 z-30 font-mono transition-colors">
       <div className="flex items-center gap-3">
         <Link href="/" className="flex items-center gap-2">
           {/* Logo with section sign */}
@@ -20,7 +25,7 @@ export function Header() {
         </Link>
       </div>
 
-      <nav className="flex items-center gap-8 text-xs uppercase font-bold tracking-widest">
+      <nav className="hidden md:flex items-center gap-8 text-xs uppercase font-bold tracking-widest">
         <Link
           href="/"
           className={`hover:text-accent transition-colors ${
@@ -62,6 +67,28 @@ export function Header() {
           $ Install
         </Link>
       </nav>
+
+      {/* Mobile Controls */}
+      <div className="flex items-center gap-3 md:hidden">
+        {/* Sun/Moon Theme Toggle */}
+        <button
+          onClick={() => setIsDarkMode(!isDarkMode)}
+          title="Toggle Theme"
+          className="rounded border border-current border-opacity-15 p-1.5 text-neutral-400 dark:text-neutral-500 hover:text-customText transition-all"
+        >
+          {isDarkMode ? <Sun size={13} /> : <Moon size={13} />}
+        </button>
+
+        {showMenuButton && (
+          <button
+            onClick={onMenuClick}
+            aria-label="Toggle Sidebar"
+            className="rounded border border-current border-opacity-15 p-1.5 text-neutral-400 hover:text-customText transition-colors"
+          >
+            <Menu size={16} />
+          </button>
+        )}
+      </div>
     </header>
   );
 }

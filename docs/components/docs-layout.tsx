@@ -7,6 +7,8 @@ import { Moon, Sun, Tv } from "lucide-react";
 import { useTheme } from "./theme-context";
 import { motion } from "framer-motion";
 
+import { useState } from "react";
+
 export function DocsLayout({
   children,
   currentSlug,
@@ -15,6 +17,7 @@ export function DocsLayout({
   currentSlug: string;
 }) {
   const { isDarkMode, setIsDarkMode, hasScanlines, setHasScanlines } = useTheme();
+  const [isSidebarOpen, setIsSidebarOpen] = useState(false);
 
   return (
     <motion.div
@@ -32,12 +35,18 @@ export function DocsLayout({
       )}
 
       {/* Shared Header */}
-      <Header />
+      <Header
+        showMenuButton={true}
+        onMenuClick={() => setIsSidebarOpen(!isSidebarOpen)}
+      />
 
       {/* Main Container */}
       <div className="flex-1 flex flex-col md:flex-row min-w-0">
         {/* Sidebar */}
-        <Sidebar />
+        <Sidebar
+          isOpen={isSidebarOpen}
+          onClose={() => setIsSidebarOpen(false)}
+        />
 
         {/* Content Column */}
         <div className="flex-1 flex flex-col min-w-0 relative">

@@ -4,15 +4,16 @@ import { useState, useEffect } from "react";
 import Link from "next/link";
 import { usePathname } from "next/navigation";
 import { navItems } from "@/lib/nav-config";
-import { Menu, X } from "lucide-react";
+import { X } from "lucide-react";
 
-export function Sidebar() {
+interface SidebarProps {
+  isOpen: boolean;
+  onClose: () => void;
+}
+
+export function Sidebar({ isOpen, onClose }: SidebarProps) {
   const pathname = usePathname();
-  const [isOpen, setIsOpen] = useState(false);
   const [activeHash, setActiveHash] = useState("");
-
-  const toggleSidebar = () => setIsOpen(!isOpen);
-  const closeSidebar = () => setIsOpen(false);
 
   // Monitor scroll to update active hash for scrollspy
   useEffect(() => {
@@ -76,7 +77,7 @@ export function Sidebar() {
                     <li key={item.sidebarLabel}>
                       <Link
                         href={href}
-                        onClick={closeSidebar}
+                        onClick={onClose}
                         className={`block rounded-lg px-4 py-2 text-sm font-medium transition-colors ${
                           isActive
                             ? "bg-accent/15 text-accent"
@@ -98,21 +99,6 @@ export function Sidebar() {
 
   return (
     <>
-      {/* Mobile Toggle Bar */}
-      <div className="flex h-14 items-center justify-between border-b border-current border-opacity-15 px-4 md:hidden bg-customBg/80 backdrop-blur-md fixed top-0 left-0 right-0 z-30 text-customText">
-        <Link href="/" className="flex items-center gap-2">
-          <span className="text-accent text-sm font-bold animate-pulse font-pixel-line">§</span>
-          <span className="font-instrument text-2xl italic text-customText">zizou</span>
-        </Link>
-        <button
-          onClick={toggleSidebar}
-          aria-label="Toggle Sidebar"
-          className="rounded border border-current border-opacity-15 p-1.5 text-neutral-400 hover:text-white transition-colors"
-        >
-          {isOpen ? <X size={18} /> : <Menu size={18} />}
-        </button>
-      </div>
-
       {/* Desktop Sidebar (Sticky side column) */}
       <aside className="hidden w-72 shrink-0 border-r border-current border-opacity-15 px-4 py-8 md:block sticky top-0 h-screen overflow-y-auto bg-customBg text-customText">
         {renderNavList()}
@@ -122,7 +108,7 @@ export function Sidebar() {
       {isOpen && (
         <div
           className="fixed inset-0 z-40 bg-black/60 backdrop-blur-sm md:hidden"
-          onClick={closeSidebar}
+          onClick={onClose}
         />
       )}
 
@@ -138,7 +124,7 @@ export function Sidebar() {
             <span className="font-instrument text-2xl italic text-customText">zizou</span>
           </Link>
           <button
-            onClick={toggleSidebar}
+            onClick={onClose}
             aria-label="Close Sidebar"
             className="rounded border border-current border-opacity-15 p-1.5 text-neutral-400 hover:text-white"
           >
@@ -146,6 +132,25 @@ export function Sidebar() {
           </button>
         </div>
         {renderNavList()}
+
+        {/* Mobile-only additional navigation */}
+        <div className="mt-8 border-t border-current border-opacity-15 pt-6 space-y-4 font-mono">
+          <Link
+            href="/"
+            onClick={onClose}
+            className="block px-4 text-sm font-medium text-neutral-500 dark:text-neutral-400 hover:text-customText"
+          >
+            Home
+          </Link>
+          <a
+            href="https://github.com/arnvG17/zizou"
+            target="_blank"
+            rel="noopener noreferrer"
+            className="block px-4 text-sm font-medium text-neutral-500 dark:text-neutral-400 hover:text-customText"
+          >
+            Github
+          </a>
+        </div>
       </aside>
     </>
   );
