@@ -9,12 +9,12 @@ export function PaginationFooter({ currentSlug }: { currentSlug: string }) {
       {prev ? (
         <Link
           href={`/${prev.slug}`}
-          className="group flex flex-col items-start border border-current border-opacity-10 hover:border-accent p-4 rounded bg-neutral-900/10 hover:bg-neutral-900/20 transition-all flex-1"
+          className="group flex flex-col items-start border border-current border-opacity-10 hover:border-accent p-4 rounded bg-neutral-900/10 hover:bg-neutral-900/20 dark:bg-neutral-950/20 dark:hover:bg-neutral-950/40 transition-all flex-1"
         >
           <span className="text-[9px] text-neutral-500 uppercase tracking-widest flex items-center gap-1 group-hover:text-accent transition-colors">
             ← Previous Section
           </span>
-          <span className="text-xs font-bold text-neutral-300 group-hover:text-white mt-1">
+          <span className="text-xs font-bold text-neutral-700 dark:text-neutral-300 group-hover:text-black dark:group-hover:text-white mt-1">
             {prev.title}
           </span>
         </Link>
@@ -25,12 +25,12 @@ export function PaginationFooter({ currentSlug }: { currentSlug: string }) {
       {next ? (
         <Link
           href={`/${next.slug}`}
-          className="group flex flex-col items-end border border-current border-opacity-10 hover:border-accent p-4 rounded bg-neutral-900/10 hover:bg-neutral-900/20 transition-all flex-1 text-right"
+          className="group flex flex-col items-end border border-current border-opacity-10 hover:border-accent p-4 rounded bg-neutral-900/10 hover:bg-neutral-900/20 dark:bg-neutral-950/20 dark:hover:bg-neutral-950/40 transition-all flex-1 text-right"
         >
           <span className="text-[9px] text-neutral-500 uppercase tracking-widest flex items-center gap-1 group-hover:text-accent transition-colors">
             Next Section →
           </span>
-          <span className="text-xs font-bold text-neutral-300 group-hover:text-white mt-1">
+          <span className="text-xs font-bold text-neutral-700 dark:text-neutral-300 group-hover:text-black dark:group-hover:text-white mt-1">
             {next.title}
           </span>
         </Link>

@@ -1,7 +1,8 @@
 import React from "react";
 import { CodeBlock } from "./code-block";
 import { InstallTabs } from "./install-tabs";
-
+import { Snippet } from "./snippet";
+ 
 function getRawText(node: any): string {
   if (!node) return "";
   if (typeof node === "string") return node;
@@ -10,10 +11,11 @@ function getRawText(node: any): string {
   if (node.props && node.props.children) return getRawText(node.props.children);
   return "";
 }
-
+ 
 export const mdxComponents = {
   pre: (props: any) => <CodeBlock {...props} />,
   InstallTabs: (props: any) => <InstallTabs {...props} />,
+  Snippet: (props: any) => <Snippet {...props} />,
   blockquote: (props: any) => {
     const rawText = getRawText(props.children);
     let type: "note" | "important" | "warning" | "caution" | null = null;

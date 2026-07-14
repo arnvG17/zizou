@@ -8,19 +8,10 @@ Everything you need to run, extend, and understand Zizou — the AI coding agent
 
 The codebase strictly adheres to a layered architecture. Higher layers may import from lower layers — but never vice-versa.
 
-- **ui/** (`App.tsx`, `Chat.tsx`, `ApiKeySetup.tsx`) — The React/Ink terminal interface. Responsible only for rendering state and handling user input.
-- **agent/** (`run-turn.ts`) — The core AI loop. Uses `streamText` to communicate with the model, execute tools, and yield events back to the UI.
-- **provider/** (`resolve-model.ts`) — Instantiates the correct `LanguageModel` via `@ai-sdk/anthropic` or `@ai-sdk/openai`, dynamically injecting API keys.
-- **tools/** (`read-file.ts`, `edit-file.ts`, `run-bash.ts`) — Pure functions that define the agent's capabilities. Return deterministic JSON payloads and never throw. `runBash` relies on an injected `ConfirmFn` to ask the user for permission.
-- **config/** (`api-keys.ts`) — The base layer handling persistent local storage using `conf`.
+- **ui/** ( `App.tsx` , `Chat.tsx` , `ApiKeySetup.tsx` ) — The React/Ink terminal interface. Responsible only for rendering state and handling user input.
+- **agent/** ( `run-turn.ts` ) — The core AI loop. Uses `streamText` to communicate with the model, execute tools, and yield events back to the UI.
+- **provider/** ( `resolve-model.ts` ) — Instantiates the correct `LanguageModel` via `@ai-sdk/anthropic` or `@ai-sdk/openai` , dynamically injecting API keys.
+- **tools/** ( `read-file.ts` , `edit-file.ts` , `run-bash.ts` ) — Pure functions that define the agent's capabilities. Return deterministic JSON payloads and never throw. `runBash` relies on an injected `ConfirmFn` to ask the user for permission.
+- **config/** ( `api-keys.ts` ) — The base layer handling persistent local storage using `conf` .
 
-<div id="known-limitations" className="pt-16" />
 
-## Known Limitations (Future Work)
-
-> [!WARNING]
-> **ROADMAP**
-> 
-> - **No File Indexing:** Zizou can't yet index or search across the entire repository (no tree-sitter integration).
-> - **No Session Persistence:** Chat history is lost when you exit the CLI.
-> - **No Keychain Storage:** API keys are stored in unencrypted plain text.

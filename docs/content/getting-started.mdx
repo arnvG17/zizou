@@ -14,29 +14,37 @@ On first run, the CLI presents a setup screen asking you to select a provider an
 
 ## Installation
 
-<div className="installation-grid">
-<div className="installation-card recommended">
+<div className="installation-steps space-y-10 mt-8">
+
+<div className="installation-step">
 
 ### OPTION 1 — NPM (RECOMMENDED)
 
 Requires Node.js.
 
-```bash
-npm install -g zizou-ai
-zizou
-```
+<Snippet text={["npm install -g zizou-ai", "zizou"]} width="100%" />
 
 </div>
-<div className="installation-card">
+
+<div className="installation-step">
 
 ### OPTION 2 — DOCKER
 
-Run Zizou inside an isolated Docker container:
+Run inside an isolated container without installing any host deps.
 
-```bash
-docker run -it arnv17/zizou:latest
-```
+<Snippet text="docker run -it arnv17/zizou:latest" width="100%" />
 
 </div>
+
+<div className="installation-step">
+
+### OPTION 3 — FROM SOURCE
+
+Ensure you have <span className="text-accent border-b border-accent/30 pb-[1px] font-medium">Bun</span> installed.
+
+<Snippet text={["git clone https://github.com/arnvg17/zizou.git", "cd zizou", "bun install", "bun run src/cli.tsx"]} width="100%" />
+
+</div>
+
 </div>
 

@@ -1,9 +1,11 @@
 "use client";
 
-import React, { useState, useEffect } from "react";
+import React from "react";
 import { Sidebar } from "./sidebar";
 import { Header } from "./header";
 import { Moon, Sun, Tv } from "lucide-react";
+import { useTheme } from "./theme-context";
+import { motion } from "framer-motion";
 
 export function DocsLayout({
   children,
@@ -12,22 +14,15 @@ export function DocsLayout({
   children: React.ReactNode;
   currentSlug: string;
 }) {
-  const [isDarkMode, setIsDarkMode] = useState(true);
-  const [hasScanlines, setHasScanlines] = useState(false);
-
-  useEffect(() => {
-    const root = window.document.documentElement;
-    if (isDarkMode) {
-      root.classList.add("dark");
-      root.classList.remove("light");
-    } else {
-      root.classList.add("light");
-      root.classList.remove("dark");
-    }
-  }, [isDarkMode]);
+  const { isDarkMode, setIsDarkMode, hasScanlines, setHasScanlines } = useTheme();
 
   return (
-    <div className="min-h-screen flex flex-col bg-customBg text-customText transition-colors duration-300 relative paper-grain font-sans">
+    <motion.div
+      initial={{ opacity: 0 }}
+      animate={{ opacity: 1 }}
+      transition={{ duration: 0.35 }}
+      className="min-h-screen flex flex-col bg-customBg text-customText transition-colors duration-500 relative paper-grain font-sans"
+    >
       {/* Fractal Noise/Paper Grain Overlay */}
       <div className="pointer-events-none fixed inset-0 z-50 opacity-[0.05] dark:opacity-[0.03] mix-blend-overlay paper-grain-bg" />
 
@@ -58,13 +53,6 @@ export function DocsLayout({
             >
               <Tv size={12} />
             </button>
-            <button
-              onClick={() => setIsDarkMode(!isDarkMode)}
-              title="Toggle Theme"
-              className="rounded border border-current border-opacity-15 p-1.5 text-neutral-400 hover:text-white transition-all"
-            >
-              {isDarkMode ? <Sun size={12} /> : <Moon size={12} />}
-            </button>
           </div>
 
           {/* Styled dynamically using custom variables */}
@@ -75,6 +63,6 @@ export function DocsLayout({
           </main>
         </div>
       </div>
-    </div>
+    </motion.div>
   );
 }

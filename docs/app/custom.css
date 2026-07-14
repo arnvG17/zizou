@@ -98,8 +98,8 @@ body {
   font-weight: 400 !important;
   font-style: normal !important;
   font-variation-settings: "ELSH" 90.9 !important;
-  font-size: 5rem;
-  letter-spacing: -0.05em;
+  font-size: 3.25rem;
+  letter-spacing: -0.04em;
   line-height: 1.05;
   margin-bottom: 1rem;
   margin-top: 1rem;
@@ -108,13 +108,13 @@ body {
 
 @media (min-width: 768px) {
   .prose h1 {
-    font-size: 7rem;
+    font-size: 4.5rem;
   }
 }
 
 @media (min-width: 1024px) {
   .prose h1 {
-    font-size: 8.75rem;
+    font-size: 5.5rem;
   }
 }
 
@@ -331,19 +331,19 @@ body {
   width: 100% !important;
 }
 
-/* Ensure all prose body elements (paragraphs, lists) are rendered in very small Geist Mono font */
+/* Ensure all prose body elements (paragraphs, lists) are rendered in Geist Sans font */
 .prose p,
 .prose ul,
 .prose ol,
 .prose li {
-  font-family: 'Geist Mono', monospace !important;
+  font-family: 'Geist Sans', system-ui, sans-serif !important;
 }
 
 .prose p:not(h1 + p),
 .prose ul,
 .prose ol,
 .prose li {
-  font-size: 0.75rem !important;
+  font-size: 0.85rem !important;
 }
 
 /* ─── Terminal Demo Animations ──────────────────────────────────────────────── */
@@ -361,5 +361,79 @@ body {
 }
 .animate-blink {
   animation: blink 1s step-start infinite;
+}
+
+/* ─── Installation Step Vertical Options ─────────────────────────────────────── */
+.installation-step {
+  margin-bottom: 2.5rem;
+}
+
+.installation-step h3 {
+  font-family: var(--font-pixel-square) !important;
+  font-size: 0.95rem !important;
+  letter-spacing: 0.08em !important;
+  color: #ffffff !important;
+  text-transform: uppercase !important;
+  margin-top: 2rem !important;
+  margin-bottom: 0.5rem !important;
+  display: flex !important;
+  align-items: center !important;
+  gap: 0.5rem !important;
+}
+
+.installation-step h3::before {
+  content: "▶" !important;
+  color: hsl(var(--accent-blue)) !important;
+  font-family: system-ui, -apple-system, sans-serif !important;
+  font-size: 0.65rem !important;
+  margin-right: 0.15rem !important;
+}
+
+.prose .installation-step p {
+  font-family: 'Geist Sans', system-ui, -apple-system, sans-serif !important;
+  font-size: 0.85rem !important;
+  color: #a3a3a3 !important;
+  margin-top: 0.25rem !important;
+  margin-bottom: 1rem !important;
+}
+
+/* ─── Custom List Bullets ─────────────────────────────────────────────────── */
+.prose ul {
+  list-style-type: none !important;
+  padding-left: 0 !important;
+}
+
+.prose li {
+  position: relative !important;
+  padding-left: 1.25rem !important;
+  margin-bottom: 0.65rem !important;
+  line-height: 1.6 !important;
+}
+
+.prose li::before {
+  content: "▶" !important;
+  color: hsl(var(--accent-blue)) !important;
+  position: absolute !important;
+  left: 0 !important;
+  top: 0.3rem !important;
+  font-family: system-ui, -apple-system, sans-serif !important;
+  font-size: 0.6rem !important;
+}
+
+/* ─── Premium Inline Code Highlights ────────────────────────────────────────── */
+.prose code:not(pre code) {
+  background-color: rgba(251, 113, 133, 0.08) !important;
+  border: 1px solid rgba(251, 113, 133, 0.2) !important;
+  color: #fb7185 !important;
+  font-family: 'Geist Mono', monospace !important;
+  font-size: 0.75rem !important;
+  padding: 0.125rem 0.3rem !important;
+  border-radius: 0.25rem !important;
+  font-weight: 400 !important;
+}
+
+.prose code::before,
+.prose code::after {
+  content: "" !important;
 }
 

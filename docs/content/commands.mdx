@@ -8,35 +8,9 @@ Everything you need to run, extend, and understand Zizou — the AI coding agent
 
 Zizou comes with several built-in slash commands you can use in the chat bar to configure your agent on the fly:
 
-- **/keys** — Opens an interactive setup screen allowing you to switch AI providers and enter or update your API keys.
-- **/models** — Override the default model for a given provider (e.g. switching from `claude-3-5-sonnet-20240620` to another version).
-- **/context** — Displays a panel showing exactly what files the AI currently has in its context window, helping you manage context bloat.
-- **/session** — Manage parallel chat sessions:
-  - `/session list`: Lists all active sessions.
-  - `/session switch <name>`: Switch to a different session.
-  - `/session new`: Creates a new session.
-- **/checkpoint** — Switch, revert, restore, branch, and diff files (see subcommands reference below).
-- **/help** — Displays help screen showing provider and model.
-- **/exit** — Closes the Zizou CLI.
-
-### Checkpoint Subcommands Reference
-
-Zizou records your file state automatically after each successful verification step. This gives you a safe "undo/redo" system for AI modifications that works independently of your Git history.
-
-| Subcommand / Option | Description |
-| :--- | :--- |
-| **`/checkpoint list`** | Lists all checkpoints created in the active session, sorted by step index and timestamp. |
-| **`/checkpoint diff`** | Displays a detailed, line-by-line colored diff of local uncommitted changes in your workspace since the last checkpoint. Green highlights represent added lines (`+`), red represents deleted lines (`-`). New files are truncated to the first 10 lines by default. |
-| **`/checkpoint diff session`** | Shows all changes made during the entire session (from the initial workspace state to the current head). |
-| **`/checkpoint diff --full`** or **`-f`** | Can be appended to any diff command (e.g. `/checkpoint diff session --full`) to disable abbreviation and expand the full content of truncated files. |
-| **`/checkpoint diff <id>`** | Displays the line-by-line diff for a specific checkpoint compared to its direct parent. |
-| **`/checkpoint diff <from> <to>`** | Performs a content comparison between two arbitrary checkpoints and shows the difference. |
-| **`/checkpoint restore <id>`** | Reconstructs and restores the workspace to the exact file states captured at the specified checkpoint. |
-| **`/checkpoint revert`** | Reverts all local uncommitted changes in the workspace back to the head checkpoint. |
-| **`/checkpoint revert session`** | Reverts the entire workspace back to the initial state before the session began. |
-| **`/checkpoint branch <name> [from-id]`** | Creates a new branch from a checkpoint (defaults to current head if no starting ID is specified). |
-| **`/checkpoint switch <branch>`** | Switches the active branch, restoring the workspace to its head checkpoint. |
-| **`/checkpoint delete <id>`** | Deletes a specific checkpoint. Note: branch heads and roots are protected from deletion. |
+- `/keys` — Opens an interactive setup screen allowing you to switch AI providers and enter or update your API keys.
+- `/models` — Override the default model for a given provider (e.g. switching from `claude-3-5-sonnet-20240620` to another version).
+- `/context` — Displays a panel showing exactly what files the AI currently has in its context window, helping you manage context bloat.
 
 <div id="llm-compatibility" className="pt-16" />
 
@@ -48,16 +22,9 @@ Zizou (Phase 1) is built on top of the Vercel AI SDK, meaning it is provider-agn
 - **OpenAI** — GPT-4o capabilities. Requires an API key.
 - **Groq** — Extremely fast inference for Llama 3 models. Requires an API key.
 - **Google** — Gemini capabilities. Requires an API key.
-- **OpenRouter** — Access to a massive ecosystem of models through a single API key.
+- **OpenRouter** — Access a massive ecosystem of models through a single API key.
 - **Ollama** — 100% free, local execution. Ollama exposes an OpenAI-compatible API on `http://localhost:11434/v1`. Run `llama3` locally with no API key.
 
-### Configuration API Keys Matrix
+To connect to any of these, run `/keys` inside the CLI, or export an environment variable:
 
-| Provider | Environment Variable | Notes |
-| :--- | :--- | :--- |
-| **Anthropic** | `ANTHROPIC_API_KEY` | Recommended for high-quality reasoning (e.g. Claude 3.5 Sonnet). |
-| **OpenAI** | `OPENAI_API_KEY` | Used for GPT-4o models and general-purpose tool-calling. |
-| **Groq** | `GROQ_API_KEY` | Provides extremely fast inference speeds using Llama 3 models. |
-| **Google** | `GEMINI_API_KEY` | Connects to Google's Gemini models. |
-| **OpenRouter** | `OPENROUTER_API_KEY` | Grants access to OpenRouter's massive catalog of models. |
-| **Ollama** | `OLLAMA_BASE_URL` | For free, local model execution. (Defaults to `http://localhost:11434` if not specified). |
+<Snippet text={["export ANTHROPIC_API_KEY=\"sk-ant-...\"", "export OPENAI_API_KEY=\"sk-proj-...\""]} width="100%" />

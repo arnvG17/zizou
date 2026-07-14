@@ -12,9 +12,7 @@ export const navItems: NavItem[] = [
   { title: "Slash Commands", slug: "commands", category: "Reference", sidebarLabel: "Slash Commands" },
   { title: "LLM Compatibility", slug: "commands", hash: "llm-compatibility", category: "Reference", sidebarLabel: "LLM Compatibility" },
   { title: "Security", slug: "security", category: "Reference", sidebarLabel: "Security" },
-  { title: "Architecture", slug: "security", hash: "architecture", category: "Reference", sidebarLabel: "Architecture" },
   { title: "File Structure", slug: "file-structure", category: "Reference", sidebarLabel: "File Structure" },
-  { title: "Known Limitations", slug: "file-structure", hash: "known-limitations", category: "Reference", sidebarLabel: "Known Limitations" },
 ];
 
 export const docRoutes = ["getting-started", "commands", "security", "file-structure"];
@@ -24,8 +22,8 @@ export function getAdjacentRoutes(currentSlug: string) {
   const routeTitles: Record<string, string> = {
     "getting-started": "Getting Started",
     "commands": "Slash Commands",
-    "security": "Security & Keys",
-    "file-structure": "File Structure & Limitations",
+    "security": "Security",
+    "file-structure": "File Structure",
   };
   return {
     prev: index > 0 ? { slug: docRoutes[index - 1], title: routeTitles[docRoutes[index - 1]] } : null,

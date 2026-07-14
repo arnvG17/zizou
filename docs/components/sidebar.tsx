@@ -73,8 +73,8 @@ export function Sidebar() {
                   onClick={closeSidebar}
                   className={`block rounded-lg px-4 py-2 text-sm font-medium transition-colors ${
                     isActive
-                      ? "bg-orange-600/20 text-orange-400"
-                      : "text-neutral-400 hover:bg-neutral-800 hover:text-white"
+                      ? "bg-accent/15 text-accent"
+                      : "text-neutral-500 dark:text-neutral-400 hover:bg-neutral-200/60 dark:hover:bg-neutral-800/60 hover:text-black dark:hover:text-white"
                   }`}
                 >
                   {item.sidebarLabel}
@@ -92,8 +92,8 @@ export function Sidebar() {
       {/* Mobile Toggle Bar */}
       <div className="flex h-14 items-center justify-between border-b border-current border-opacity-15 px-4 md:hidden bg-customBg/80 backdrop-blur-md fixed top-0 left-0 right-0 z-30 text-customText">
         <Link href="/" className="flex items-center gap-2">
-          <span className="font-pixel-square text-xs font-bold text-accent">▲ zizou</span>
-          <span className="font-mono text-[9px] opacity-50">v0.1</span>
+          <span className="text-accent text-sm font-bold animate-pulse font-pixel-line">§</span>
+          <span className="font-instrument text-2xl italic text-customText">zizou</span>
         </Link>
         <button
           onClick={toggleSidebar}
@@ -125,8 +125,8 @@ export function Sidebar() {
       >
         <div className="flex items-center justify-between mb-8">
           <Link href="/" className="flex items-center gap-2">
-            <span className="font-pixel-square text-sm font-bold text-accent">▲ zizou</span>
-            <span className="font-mono text-[9px] opacity-50">v0.1</span>
+            <span className="text-accent text-sm font-bold animate-pulse font-pixel-line">§</span>
+            <span className="font-instrument text-2xl italic text-customText">zizou</span>
           </Link>
           <button
             onClick={toggleSidebar}
