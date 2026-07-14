@@ -12,7 +12,13 @@ export interface SnippetProps {
 export function Snippet({ text, width = "auto", dark = false }: SnippetProps) {
   const [copied, setCopied] = useState(false);
 
-  const displayLines = Array.isArray(text) ? text : [text];
+  let displayLines: string[] = [];
+  if (Array.isArray(text)) {
+    displayLines = text;
+  } else if (typeof text === "string") {
+    displayLines = text.split(/\r?\n|\\n/);
+  }
+
   const fullText = displayLines.join("\n");
 
   const handleCopy = async () => {
