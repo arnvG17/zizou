@@ -51,41 +51,50 @@ export function Sidebar() {
     return () => window.removeEventListener("scroll", handleScroll);
   }, [pathname]);
 
-  const renderNavList = () => (
-    <div className="space-y-6 font-mono">
-      <div>
-        <div className="mb-4">
-          <h3 className="mb-2 px-4 text-sm font-semibold tracking-wide text-neutral-400">
-            Getting started
-          </h3>
-        </div>
-        <ul className="space-y-1">
-          {navItems.map((item) => {
-            const href = item.hash ? `/${item.slug}#${item.hash}` : `/${item.slug}`;
-            const isPageActive = pathname === `/${item.slug}`;
-            const isHashActive = activeHash === (item.hash ? `#${item.hash}` : "");
-            const isActive = isPageActive && isHashActive;
+  const renderNavList = () => {
+    const categories: ("Guide" | "Reference")[] = ["Guide", "Reference"];
+    return (
+      <div className="space-y-6 font-mono">
+        {categories.map((cat) => {
+          const items = navItems.filter((item) => item.category === cat);
+          if (items.length === 0) return null;
+          return (
+            <div key={cat}>
+              <div className="mb-4">
+                <h3 className="mb-2 px-4 text-xs font-semibold tracking-wider text-neutral-400 uppercase">
+                  {cat}
+                </h3>
+              </div>
+              <ul className="space-y-1">
+                {items.map((item) => {
+                  const href = item.hash ? `/${item.slug}#${item.hash}` : `/${item.slug}`;
+                  const isPageActive = pathname === `/${item.slug}`;
+                  const isHashActive = activeHash === (item.hash ? `#${item.hash}` : "");
+                  const isActive = isPageActive && isHashActive;
 
-            return (
-              <li key={item.sidebarLabel}>
-                <Link
-                  href={href}
-                  onClick={closeSidebar}
-                  className={`block rounded-lg px-4 py-2 text-sm font-medium transition-colors ${
-                    isActive
-                      ? "bg-accent/15 text-accent"
-                      : "text-neutral-500 dark:text-neutral-400 hover:bg-neutral-200/60 dark:hover:bg-neutral-800/60 hover:text-black dark:hover:text-white"
-                  }`}
-                >
-                  {item.sidebarLabel}
-                </Link>
-              </li>
-            );
-          })}
-        </ul>
+                  return (
+                    <li key={item.sidebarLabel}>
+                      <Link
+                        href={href}
+                        onClick={closeSidebar}
+                        className={`block rounded-lg px-4 py-2 text-sm font-medium transition-colors ${
+                          isActive
+                            ? "bg-accent/15 text-accent"
+                            : "text-neutral-500 dark:text-neutral-400 hover:bg-neutral-200/60 dark:hover:bg-neutral-800/60 hover:text-black dark:hover:text-white"
+                        }`}
+                      >
+                        {item.sidebarLabel}
+                      </Link>
+                    </li>
+                  );
+                })}
+              </ul>
+            </div>
+          );
+        })}
       </div>
-    </div>
-  );
+    );
+  };
 
   return (
     <>

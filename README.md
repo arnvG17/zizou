@@ -100,7 +100,7 @@ export OLLAMA_BASE_URL="http://localhost:11434" # optional
 
 ## Security & API Key Storage
 
-**🚨 IMPORTANT:** API keys entered via the setup screen are stored in **plain text** within a JSON file in your OS's configuration directory (e.g., `~/.config/zizou/config.json`). They are **NOT encrypted**.
+**🚨 IMPORTANT:** API keys entered via the setup screen are stored in **plain text** within a JSON file in your OS's configuration directory (e.g., `~/.config/zizou-nodejs/config.json`). They are **NOT encrypted**.
 
 To avoid writing keys to disk, provide them via environment variables instead, which will always take precedence over configuration files.
 

@@ -635,7 +635,7 @@ Pinned files are injected as full file contents in the system prompt.
 
 **Location**: `src/config/api-keys.ts`
 
-Configuration storage uses the `conf` library, which persists data in the OS's default configuration directory (e.g., `~/.config/zizou/config.json` on Linux, `~/Library/Application Support/zizou/config.json` on macOS, `%APPDATA%\zizou\config.json` on Windows).
+Configuration storage uses the `conf` library, which persists data in the OS's default configuration directory (e.g., `~/.config/zizou-nodejs/config.json` on Linux, `~/Library/Preferences/zizou-nodejs/config.json` on macOS, `%APPDATA%\zizou-nodejs\Config\config.json` on Windows).
 
 ### Config Schema
 

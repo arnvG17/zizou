@@ -45,34 +45,28 @@ const config = new Conf<ConfigSchema>({
  */
 export function getApiKey(provider: ProviderChoice): string | undefined {
   if (provider === "anthropic") {
-    const saved = config.get("apiKeys.anthropic") as string | undefined;
-    if (saved) return saved;
-    return process.env.ANTHROPIC_API_KEY;
+    if (process.env.ANTHROPIC_API_KEY) return process.env.ANTHROPIC_API_KEY;
+    return config.get("apiKeys.anthropic") as string | undefined;
   }
   if (provider === "openai") {
-    const saved = config.get("apiKeys.openai") as string | undefined;
-    if (saved) return saved;
-    return process.env.OPENAI_API_KEY;
+    if (process.env.OPENAI_API_KEY) return process.env.OPENAI_API_KEY;
+    return config.get("apiKeys.openai") as string | undefined;
   }
   if (provider === "openrouter") {
-    const saved = config.get("apiKeys.openrouter") as string | undefined;
-    if (saved) return saved;
-    return process.env.OPENROUTER_API_KEY;
+    if (process.env.OPENROUTER_API_KEY) return process.env.OPENROUTER_API_KEY;
+    return config.get("apiKeys.openrouter") as string | undefined;
   }
   if (provider === "google") {
-    const saved = config.get("apiKeys.google") as string | undefined;
-    if (saved) return saved;
-    return process.env.GEMINI_API_KEY;
+    if (process.env.GEMINI_API_KEY) return process.env.GEMINI_API_KEY;
+    return config.get("apiKeys.google") as string | undefined;
   }
   if (provider === "groq") {
-    const saved = config.get("apiKeys.groq") as string | undefined;
-    if (saved) return saved;
-    return process.env.GROQ_API_KEY;
+    if (process.env.GROQ_API_KEY) return process.env.GROQ_API_KEY;
+    return config.get("apiKeys.groq") as string | undefined;
   }
   if (provider === "ollama") {
-    const saved = config.get("apiKeys.ollama") as string | undefined;
-    if (saved) return saved;
-    return process.env.OLLAMA_API_KEY ?? "ollama";
+    if (process.env.OLLAMA_API_KEY) return process.env.OLLAMA_API_KEY;
+    return (config.get("apiKeys.ollama") as string | undefined) ?? "ollama";
   }
   return undefined;
 }
