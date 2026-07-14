@@ -2,7 +2,7 @@ import React from "react";
 import { CodeBlock } from "./code-block";
 import { InstallTabs } from "./install-tabs";
 import { Snippet } from "./snippet";
- 
+
 function getRawText(node: any): string {
   if (!node) return "";
   if (typeof node === "string") return node;
@@ -11,8 +11,22 @@ function getRawText(node: any): string {
   if (node.props && node.props.children) return getRawText(node.props.children);
   return "";
 }
- 
+
 export const mdxComponents = {
+  h1: (props: any) => {
+    const rawText = getRawText(props.children);
+    if (rawText.toUpperCase().includes("ZIZOU DOCUMENTATION")) {
+      return (
+        <h1 {...props}>
+          ZIZOU{" "}
+          <span className="font-instrument italic text-[#002395] normal-case lowercase tracking-normal font-normal">
+            docs
+          </span>
+        </h1>
+      );
+    }
+    return <h1 {...props} />;
+  },
   pre: (props: any) => <CodeBlock {...props} />,
   InstallTabs: (props: any) => <InstallTabs {...props} />,
   Snippet: (props: any) => <Snippet {...props} />,
@@ -88,9 +102,8 @@ export const mdxComponents = {
             return (
               <p
                 key={idx}
-                className={`m-0 text-xs text-neutral-300 leading-relaxed font-pixel-line ${
-                  isBullet ? "pl-4 relative before:content-['→'] before:absolute before:left-0 before:text-accent-blue before:font-pixel-square" : ""
-                }`}
+                className={`m-0 text-xs text-neutral-300 leading-relaxed font-pixel-line ${isBullet ? "pl-4 relative before:content-['→'] before:absolute before:left-0 before:text-accent-blue before:font-pixel-square" : ""
+                  }`}
               >
                 {displayText}
               </p>

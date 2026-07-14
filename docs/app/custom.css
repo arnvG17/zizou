@@ -372,7 +372,7 @@ body {
   font-family: var(--font-pixel-square) !important;
   font-size: 0.95rem !important;
   letter-spacing: 0.08em !important;
-  color: #ffffff !important;
+  color: var(--foreground) !important;
   text-transform: uppercase !important;
   margin-top: 2rem !important;
   margin-bottom: 0.5rem !important;

@@ -25,9 +25,9 @@ export function Snippet({ text, width = "auto", dark = false }: SnippetProps) {
     }
   };
 
-  // Base background and text colors: always charcoal grey box.
-  const containerClasses = "bg-[#1c1c1e] border-neutral-700 text-neutral-200";
-  const buttonClasses = "text-neutral-400 hover:text-neutral-200 border-neutral-700 bg-[#2c2c2e] hover:bg-[#3a3a3c]";
+  // Base background and text colors: always dark grey box.
+  const containerClasses = "bg-[#2e2e2e] border-neutral-700 text-neutral-200";
+  const buttonClasses = "text-neutral-400 hover:text-neutral-200 border-neutral-700 bg-[#3e3e3e] hover:bg-[#4a4a4a]";
 
   return (
     <div
