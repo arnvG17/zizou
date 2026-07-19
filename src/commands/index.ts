@@ -12,6 +12,16 @@ import {
 } from "../config/api-keys.js";
 import { addPinnedFile, clearPinnedFiles } from "../context/build-system-prompt.js";
 import { getActiveModelId } from "../sdk/resolve-model.js";
+import {
+  getAIConfig,
+  setAIConfig,
+  applyPreset,
+  writeModelConfigMd,
+  PROVIDER_PRESETS,
+  PRESET_DEFAULTS,
+  type PresetName,
+  type ReasoningLevel,
+} from "../config/ai-config.js";
 import { existsSync, readdirSync } from "fs";
 import { join } from "path";
 import {
@@ -54,6 +64,8 @@ export const SLASH_COMMANDS: SlashCommandInfo[] = [
   { command: "/modelid", description: "Set custom model ID for the active provider" },
   { command: "/ollama", description: "Set the Ollama base URL" },
   { command: "/context", description: "Set context mode (light, default, max)" },
+  { command: "/expert", description: "Configure AI model presets and inference params" },
+  { command: "/reasoning", description: "Set reasoning level (low, medium, high) for any model" },
   { command: "/add", description: "Pin a file's contents permanently to context" },
   { command: "/file", description: "Pin a file's contents permanently to context (alias: /add)" },
   { command: "/prompt", description: "Dump the full system prompt sent to LLM" },
@@ -214,6 +226,14 @@ export async function handleSlashCommand(ctx: CommandContext): Promise<boolean> 
                             e.g. /model ollama mistral
   /modelid <name>           Set a custom model ID for the current provider
                             e.g. /modelid llama3:70b
+  /expert                   Show AI config (model, preset, temperature, max tokens)
+  /expert <preset>          Apply a preset: fast | balanced | high | testing
+  /expert provider <name>   Switch provider and apply balanced preset
+  /expert model <id>        Override model ID for current provider
+  /expert reasoning <lvl>   Set reasoning: low | medium | high
+  /expert temperature <n>   Set temperature (0.0–1.0)
+  /expert maxtokens <n>     Set max output tokens
+  /reasoning <lvl>          Shortcut: set reasoning level (low | medium | high)
   /ollama <url>             Set the Ollama base URL
                             e.g. /ollama http://localhost:11434
   /context <mode>           Set context mode (light, default, max)
@@ -226,7 +246,8 @@ export async function handleSlashCommand(ctx: CommandContext): Promise<boolean> 
 
   Mode:    ${currentMode === "plan" ? "◆ Plan" : "● Build"}
   Active:  ${SHORT_LABELS[provider]} › ${modelId}
-  Context: ${getContextMode()}`,
+  Context: ${getContextMode()}
+  Expert:  preset=${getAIConfig().preset}, temp=${getAIConfig().temperature}, maxTokens=${getAIConfig().maxOutputTokens}, reasoning=${getAIConfig().reasoning}`,
       },
     ]);
     return true;
@@ -965,6 +986,249 @@ export async function handleSlashCommand(ctx: CommandContext): Promise<boolean> 
       ...l,
       { kind: "user", text },
       { kind: "assistant", text: "Usage:\n  /checkpoint list              List all checkpoints\n  /checkpoint diff               Show local uncommitted changes\n  /checkpoint diff <id>         Show changes in checkpoint\n  /checkpoint diff <from> <to>  Compare two checkpoints\n  /checkpoint restore <id>      Restore to checkpoint\n  /checkpoint branch <name>     Create new branch\n  /checkpoint switch <branch>   Switch to branch\n  /checkpoint delete <id>       Delete checkpoint\n  /checkpoint revert            Revert all uncommitted changes" },
+    ]);
+    return true;
+  }
+
+  // ── /reasoning — standalone reasoning level command ───────────────────────
+  if (command === "reasoning") {
+    const level = args[0]?.toLowerCase() as ReasoningLevel | undefined;
+    const validLevels: ReasoningLevel[] = ["low", "medium", "high"];
+
+    if (!level || !validLevels.includes(level)) {
+      const current = getAIConfig();
+      ctx.setLog((l: LogEntry[]) => [
+        ...l,
+        { kind: "user", text },
+        {
+          kind: "assistant",
+          text: `Reasoning level: ${current.reasoning}\n\nUsage: /reasoning <level>\nLevels:\n  low    – Fast, less deliberate (good for simple tasks)\n  medium – Balanced (default)\n  high   – Slow, more thorough (best for complex problems)\n\nThis setting persists in model_config.md and applies to all providers.`,
+        },
+      ]);
+      return true;
+    }
+
+    const config = getAIConfig();
+    const updated = { ...config, reasoning: level };
+    setAIConfig(updated);
+
+    ctx.setLog((l: LogEntry[]) => [
+      ...l,
+      { kind: "user", text },
+      { kind: "assistant", text: `Reasoning set to: ${level}\nSaved to model_config.md` },
+    ]);
+    return true;
+  }
+
+  // ── /expert — advanced AI model configuration ─────────────────────────────
+  if (command === "expert") {
+    const sub = args[0]?.toLowerCase();
+    const validPresets: PresetName[] = ["fast", "balanced", "high", "testing"];
+    const validProviders: ProviderChoice[] = ["groq", "google", "openrouter", "anthropic", "openai", "ollama"];
+
+    // /expert — show current config
+    if (!sub) {
+      const cfg = getAIConfig();
+      const providerPresets = PROVIDER_PRESETS[cfg.provider] ?? PROVIDER_PRESETS["openai"];
+      const presetLines = Object.entries(providerPresets)
+        .map(([name, p]) => {
+          const def = PRESET_DEFAULTS[name as PresetName];
+          const marker = name === cfg.preset ? " ◄ active" : "";
+          return `  ${name.padEnd(8)} model: ${p.model}, reasoning: ${p.reasoning}, temp: ${def.temperature}, maxTokens: ${def.maxOutputTokens}${marker}`;
+        })
+        .join("\n");
+
+      ctx.setLog((l: LogEntry[]) => [
+        ...l,
+        { kind: "user", text },
+        {
+          kind: "assistant",
+          text:
+            `Expert AI Config\n` +
+            `${"-".repeat(40)}\n` +
+            `  Provider:    ${cfg.provider}\n` +
+            `  Model:       ${cfg.model}\n` +
+            `  Preset:      ${cfg.preset}\n` +
+            `  Reasoning:   ${cfg.reasoning}\n` +
+            `  Temperature: ${cfg.temperature}\n` +
+            `  Max Tokens:  ${cfg.maxOutputTokens}\n\n` +
+            `Presets for ${cfg.provider}:\n${presetLines}\n\n` +
+            `Commands:\n` +
+            `  /expert fast|balanced|high|testing\n` +
+            `  /expert provider <name>         (groq/google/anthropic/openai/openrouter/ollama)\n` +
+            `  /expert model <id>              (override model for current provider)\n` +
+            `  /expert reasoning low|medium|high\n` +
+            `  /expert temperature <0.0-1.0>\n` +
+            `  /expert maxtokens <number>\n\n` +
+            `Config persists in model_config.md (edit directly for instant effect).`,
+        },
+      ]);
+      return true;
+    }
+
+    // /expert fast|balanced|high|testing — apply preset
+    if (validPresets.includes(sub as PresetName)) {
+      const preset = sub as PresetName;
+      const provider = getDefaultProvider() || "openai";
+      const newConfig = applyPreset(provider, preset);
+      setAIConfig(newConfig);
+      // Also update the active provider model so /model and the status bar reflect it
+      setProviderModel(provider as ProviderChoice, newConfig.model);
+
+      const def = PRESET_DEFAULTS[preset];
+      ctx.setLog((l: LogEntry[]) => [
+        ...l,
+        { kind: "user", text },
+        {
+          kind: "assistant",
+          text:
+            `Applied preset: ${preset}\n` +
+            `  Model:       ${newConfig.model}\n` +
+            `  Reasoning:   ${newConfig.reasoning}\n` +
+            `  Temperature: ${def.temperature}\n` +
+            `  Max Tokens:  ${def.maxOutputTokens}\n` +
+            `Saved to model_config.md`,
+        },
+      ]);
+      return true;
+    }
+
+    // /expert provider <name>
+    if (sub === "provider") {
+      const providerArg = args[1]?.toLowerCase() as ProviderChoice | undefined;
+      if (!providerArg || !validProviders.includes(providerArg)) {
+        ctx.setLog((l: LogEntry[]) => [
+          ...l,
+          { kind: "user", text },
+          { kind: "error", text: `Usage: /expert provider <name>\nProviders: ${validProviders.join(", ")}` },
+        ]);
+        return true;
+      }
+      // Switch provider + apply balanced preset for the new provider
+      setDefaultProvider(providerArg);
+      const newConfig = applyPreset(providerArg, "balanced");
+      setAIConfig(newConfig);
+      setProviderModel(providerArg, newConfig.model);
+
+      ctx.setLog((l: LogEntry[]) => [
+        ...l,
+        { kind: "user", text },
+        {
+          kind: "assistant",
+          text:
+            `Switched to provider: ${providerArg}\n` +
+            `Applied balanced preset: model=${newConfig.model}, reasoning=${newConfig.reasoning}\n` +
+            `Saved to model_config.md`,
+        },
+      ]);
+      ctx.setTokenStats(
+        ctx.calculateTokenStats(ctx.history.current, ctx.systemPrompt, undefined, providerArg)
+      );
+      return true;
+    }
+
+    // /expert model <id>
+    if (sub === "model") {
+      const modelId = args.slice(1).join(" ");
+      if (!modelId) {
+        ctx.setLog((l: LogEntry[]) => [
+          ...l,
+          { kind: "user", text },
+          { kind: "error", text: "Usage: /expert model <model-id>" },
+        ]);
+        return true;
+      }
+      const cfg = getAIConfig();
+      const updated = { ...cfg, model: modelId };
+      setAIConfig(updated);
+      const provider = getDefaultProvider() || "openai";
+      setProviderModel(provider as ProviderChoice, modelId);
+
+      ctx.setLog((l: LogEntry[]) => [
+        ...l,
+        { kind: "user", text },
+        { kind: "assistant", text: `Model set to: ${modelId}\nSaved to model_config.md` },
+      ]);
+      return true;
+    }
+
+    // /expert reasoning low|medium|high
+    if (sub === "reasoning") {
+      const level = args[1]?.toLowerCase() as ReasoningLevel | undefined;
+      if (!level || !["low", "medium", "high"].includes(level)) {
+        ctx.setLog((l: LogEntry[]) => [
+          ...l,
+          { kind: "user", text },
+          { kind: "error", text: "Usage: /expert reasoning low|medium|high" },
+        ]);
+        return true;
+      }
+      const cfg = getAIConfig();
+      const updated = { ...cfg, reasoning: level };
+      setAIConfig(updated);
+
+      ctx.setLog((l: LogEntry[]) => [
+        ...l,
+        { kind: "user", text },
+        { kind: "assistant", text: `Reasoning set to: ${level}\nSaved to model_config.md` },
+      ]);
+      return true;
+    }
+
+    // /expert temperature <float>
+    if (sub === "temperature") {
+      const val = parseFloat(args[1] ?? "");
+      if (isNaN(val) || val < 0 || val > 1) {
+        ctx.setLog((l: LogEntry[]) => [
+          ...l,
+          { kind: "user", text },
+          { kind: "error", text: "Usage: /expert temperature <0.0-1.0>" },
+        ]);
+        return true;
+      }
+      const cfg = getAIConfig();
+      const updated = { ...cfg, temperature: val };
+      setAIConfig(updated);
+
+      ctx.setLog((l: LogEntry[]) => [
+        ...l,
+        { kind: "user", text },
+        { kind: "assistant", text: `Temperature set to: ${val}\nSaved to model_config.md` },
+      ]);
+      return true;
+    }
+
+    // /expert maxtokens <int>
+    if (sub === "maxtokens" || sub === "maxoutputtokens" || sub === "max_tokens") {
+      const val = parseInt(args[1] ?? "", 10);
+      if (isNaN(val) || val < 1) {
+        ctx.setLog((l: LogEntry[]) => [
+          ...l,
+          { kind: "user", text },
+          { kind: "error", text: "Usage: /expert maxtokens <number>" },
+        ]);
+        return true;
+      }
+      const cfg = getAIConfig();
+      const updated = { ...cfg, maxOutputTokens: val };
+      setAIConfig(updated);
+
+      ctx.setLog((l: LogEntry[]) => [
+        ...l,
+        { kind: "user", text },
+        { kind: "assistant", text: `Max output tokens set to: ${val}\nSaved to model_config.md` },
+      ]);
+      return true;
+    }
+
+    // Unknown /expert subcommand
+    ctx.setLog((l: LogEntry[]) => [
+      ...l,
+      { kind: "user", text },
+      {
+        kind: "error",
+        text: `Unknown /expert option: "${sub}". Run /expert for usage.`,
+      },
     ]);
     return true;
   }

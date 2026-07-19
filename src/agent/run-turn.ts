@@ -58,12 +58,20 @@ export interface RunTurnOptions {
   history: ModelMessage[];
   /** The resolved model from sdk/ — this function is provider-agnostic. */
   model: LanguageModel;
+  /** The provider name — used to configure provider-specific options (e.g. parallelToolCalls for OpenAI). */
+  provider?: string;
   /** Called whenever run_bash wants permission before executing. */
   onConfirm: ConfirmFn;
   /** Extra system-prompt text (repo map, context) injected by src/context/. */
   systemPrompt?: string;
   /** Safety cap on internal tool-call rounds per turn. */
   maxSteps?: number;
+  /** Optional flag to disable tools. */
+  disableTools?: boolean;
+  /** Sampling temperature (0 = deterministic, 1 = max creative). From AIConfig. */
+  temperature?: number;
+  /** Maximum number of output tokens per response. From AIConfig. */
+  maxOutputTokens?: number;
 }
 
 // ─── JSON sanitisation for small-model fallback ──────────────────────────────
@@ -209,7 +217,7 @@ function extractAssistantText(msg: ModelMessage): string {
 export async function* runTurn(
   options: RunTurnOptions,
 ): AsyncGenerator<AgentEvent, ModelMessage[]> {
-  const { history, model, onConfirm, systemPrompt, maxSteps = 15 } = options;
+  const { history, model, provider, onConfirm, systemPrompt, maxSteps = 15, disableTools, temperature, maxOutputTokens } = options;
 
   // Debug logger — writes verbose diagnostics to zizou-debug.log.
   const log = new TurnLogger();
@@ -217,7 +225,7 @@ export async function* runTurn(
 
   // ── Build the tool map ─────────────────────────────────────────────────
 
-  const tools = {
+  const tools = disableTools ? undefined : {
     readFile,
     writeFile: createWriteFileTool(onConfirm),
     editFile: createEditFileTool(onConfirm),
@@ -242,6 +250,15 @@ export async function* runTurn(
   // surface the error immediately instead so the user can wait or switch
   // providers without burning their daily quota.
 
+  // ── Provider-specific options ──────────────────────────────────────────
+  //
+  // OpenAI's default parallel tool calls cause race conditions in agentic
+  // loops (e.g., writing a file while also reading it). Force sequential
+  // tool execution for reliable read→write→verify behavior.
+  const providerOptions = provider === "openai"
+    ? { openai: { parallelToolCalls: false } }
+    : undefined;
+
   const result = streamText({
     model,
     system: systemPrompt,
@@ -249,6 +266,9 @@ export async function* runTurn(
     stopWhen: stepCountIs(maxSteps),
     messages: history,
     maxRetries: 0,
+    ...(temperature !== undefined ? { temperature } : {}),
+    ...(maxOutputTokens !== undefined ? { maxTokens: maxOutputTokens } : {}),
+    ...(providerOptions ? { providerOptions } : {}),
   });
 
   // ── Consume the live stream ────────────────────────────────────────────

@@ -29,6 +29,7 @@
 import { statSync, readFileSync } from "fs";
 import { resolve, extname } from "path";
 import { spawn } from "child_process";
+import { generateText, type LanguageModel } from "ai";
 import type { PlanStep, StepResult, VerificationResult } from "./types.js";
 import { SessionLogger } from "./debug/index.js";
 
@@ -218,8 +219,10 @@ export async function verifyStep(
   result: StepResult,
   cwd: string,
   preSnapshots: Map<string, FileSnapshot>,
+  model?: LanguageModel,
 ): Promise<VerificationResult> {
   const mismatches: string[] = [];
+  let verboseFeedback: string | undefined = undefined;
 
   SessionLogger.logVerifierStart(step, result.claimedFiles);
 
@@ -294,10 +297,81 @@ export async function verifyStep(
     }
   }
 
+  // ── Check 3: LLM Semantic Verification Loop ───────────────────────────
+  if (model && result.claimedFiles.length > 0) {
+    try {
+      let fileContentsSummary = "";
+      for (const file of result.claimedFiles) {
+        const abs = resolve(cwd, file);
+        try {
+          const content = readFileSync(abs, "utf-8");
+          const truncatedContent = content.length > 4000 ? content.slice(0, 4000) + "\n... (truncated)" : content;
+          fileContentsSummary += `File: ${file}\n\`\`\`\n${truncatedContent}\n\`\`\`\n\n`;
+        } catch {}
+      }
+
+      if (fileContentsSummary) {
+        const prompt = `You are a strict code quality and verification agent. Your task is to verify if the following task has been completed correctly and successfully.
+
+Task Description:
+"${step.description}"
+
+Here are the files that were modified and their current contents:
+${fileContentsSummary}
+
+Please analyze the file contents against the task description.
+Respond in JSON format with the following schema:
+{
+  "verified": boolean,
+  "mismatches": string[],
+  "verboseFeedback": string
+}
+where:
+- "verified" is true if all requirements of the task description are met, and false otherwise.
+- "mismatches" is an array of strings detailing any gaps, errors, or unfulfilled requirements. If verified is true, this should be empty.
+- "verboseFeedback" is a conversational, detailed summary explaining what was verified, what works, and what gaps (if any) were found. Be verbose and friendly.
+
+Ensure your response is valid JSON.`;
+
+        const { text } = await generateText({
+          model,
+          prompt,
+        });
+
+        let cleanText = text.trim();
+        if (cleanText.includes("```")) {
+          const match = cleanText.match(/```(?:json)?\s*([\s\S]*?)\s*```/i);
+          if (match && match[1]) {
+            cleanText = match[1].trim();
+          }
+        }
+
+        const parsed = JSON.parse(cleanText) as {
+          verified: boolean;
+          mismatches: string[];
+          verboseFeedback: string;
+        };
+
+        if (parsed.verboseFeedback) {
+          verboseFeedback = parsed.verboseFeedback;
+        }
+
+        if (!parsed.verified && parsed.mismatches && parsed.mismatches.length > 0) {
+          for (const mismatch of parsed.mismatches) {
+            mismatches.push(`LLM verification mismatch: ${mismatch}`);
+          }
+        }
+      }
+    } catch (err) {
+      verboseFeedback = `LLM verification skipped or failed: ${err instanceof Error ? err.message : String(err)}`;
+    }
+  }
+
   // Verification passes only if there are zero mismatches.
   const finalResult = {
     verified: mismatches.length === 0,
     mismatches,
+    verboseFeedback,
   };
 
   SessionLogger.logVerifierEnd(finalResult);

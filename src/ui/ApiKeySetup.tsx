@@ -6,7 +6,6 @@ import {
   ProviderChoice,
   setApiKey,
   setDefaultProvider,
-  removeApiKey,
   setProviderModel,
   setOllamaBaseUrl,
   getOllamaBaseUrl,
@@ -49,6 +48,8 @@ export function ApiKeySetup({ onComplete }: ApiKeySetupProps) {
   const [selectedOllamaModel, setSelectedOllamaModel] = useState<string>("");
   const [isValidating, setIsValidating] = useState(false);
   const [validationError, setValidationError] = useState<string | null>(null);
+  // When true, the user can press Enter to skip validation and save the key anyway
+  const [canSaveAnyway, setCanSaveAnyway] = useState(false);
 
   useInput((input, key) => {
     if (isValidating) return;
@@ -68,7 +69,7 @@ export function ApiKeySetup({ onComplete }: ApiKeySetupProps) {
       }
       if (key.return) {
         if (provider === "ollama") {
-          setStep("enter-ollama-url");
+          setStep("enter-ollama-model");
         } else {
           setStep("enter-key");
         }
@@ -87,12 +88,101 @@ export function ApiKeySetup({ onComplete }: ApiKeySetupProps) {
         });
       }
       if (key.return && ollamaModels.length > 0) {
-        handleOllamaModelSubmit(selectedOllamaModel);
+        setStep("enter-ollama-url");
       }
     }
   });
 
-  // ── Ollama URL submit ────────────────────────────────────────────────────
+  React.useEffect(() => {
+    if (step === "enter-ollama-model" && ollamaModels.length === 0 && !isValidating) {
+      const fetchInitialModels = async () => {
+        setIsValidating(true);
+        setValidationError(null);
+        const defaultUrl = "http://localhost:11434";
+        try {
+          let models: string[] = [];
+
+          // Try fetching tags API on default URL
+          try {
+            const res = await fetch(`${defaultUrl}/api/tags`);
+            if (res.ok) {
+              const data = await res.json() as any;
+              models = data?.models?.map((m: any) => m.name) || [];
+            }
+          } catch (err) {
+            // Fetch failed. Try auto-starting Ollama server locally
+            try {
+              const { spawn } = await import("child_process");
+              const child = spawn("ollama", ["serve"], {
+                detached: true,
+                stdio: "ignore",
+                windowsHide: true,
+              });
+              child.unref();
+
+              // Poll tags API up to 10 times (every 500ms, total 5 seconds)
+              for (let i = 0; i < 10; i++) {
+                await new Promise((resolve) => setTimeout(resolve, 500));
+                try {
+                  const res = await fetch(`${defaultUrl}/api/tags`);
+                  if (res.ok) {
+                    const data = await res.json() as any;
+                    models = data?.models?.map((m: any) => m.name) || [];
+                    if (models.length > 0) {
+                      break;
+                    }
+                  }
+                } catch (pollErr) {
+                  // Ignore and retry
+                }
+              }
+            } catch (spawnErr) {
+              // Ignore spawn error
+            }
+          }
+
+          // Fallback: Try running `ollama list` CLI command directly
+          if (models.length === 0) {
+            try {
+              const { execSync } = await import("child_process");
+              const stdout = execSync("ollama list", { encoding: "utf8", stdio: ["ignore", "pipe", "ignore"] });
+              const lines = stdout.trim().split(/\r?\n/);
+              if (lines.length > 1) {
+                for (let i = 1; i < lines.length; i++) {
+                  const line = lines[i].trim();
+                  if (!line) continue;
+                  const parts = line.split(/\s+/);
+                  if (parts[0]) {
+                    models.push(parts[0]);
+                  }
+                }
+              }
+            } catch (cliErr) {
+              // Ignore CLI error
+            }
+          }
+
+          if (models.length === 0) {
+            throw new Error("Could not find any local Ollama models. Please check if Ollama is running and has models.");
+          }
+
+          setOllamaModels(models);
+          setSelectedOllamaModel(models[0]);
+        } catch (err: any) {
+          setValidationError(err.message ?? String(err));
+          // Fallback to at least show the default model so selection doesn't break
+          setOllamaModels([DEFAULT_MODELS["ollama"]]);
+          setSelectedOllamaModel(DEFAULT_MODELS["ollama"]);
+        } finally {
+          setIsValidating(false);
+        }
+      };
+
+      fetchInitialModels();
+    }
+  }, [step, ollamaModels.length, isValidating]);
+
+  // ── Ollama URL submit (final validation & save) ───────────────────────────
   const handleUrlSubmit = async (value: string) => {
     const url = value.trim() || "http://localhost:11434";
     setUrlInput(url);
@@ -101,15 +191,15 @@ export function ApiKeySetup({ onComplete }: ApiKeySetupProps) {
     setValidationError(null);
 
     try {
-      // Fetch available models from Ollama
-      const res = await fetch(`${url}/api/tags`);
-      if (!res.ok) throw new Error(`HTTP ${res.status}`);
-      const data = await res.json() as any;
-      const models = data?.models?.map((m: any) => m.name) || [];
-      
-      setOllamaModels(models.length > 0 ? models : [DEFAULT_MODELS["ollama"]]);
-      setSelectedOllamaModel(models.length > 0 ? models[0] : DEFAULT_MODELS["ollama"]);
-      setStep("enter-ollama-model");
+      const model = selectedOllamaModel || DEFAULT_MODELS["ollama"];
+      setModelInput(model);
+      setProviderModel("ollama", model);
+      setDefaultProvider("ollama");
+
+      // Validate by generating a single token
+      const lm = resolveModel("ollama");
+      await generateText({ model: lm, prompt: "hi", maxTokens: 1 });
+      onComplete();
     } catch (err: any) {
       let msg = err.message ?? String(err);
       if (msg.includes("ECONNREFUSED") || msg.includes("fetch")) {
@@ -121,52 +211,65 @@ export function ApiKeySetup({ onComplete }: ApiKeySetupProps) {
     }
   };
 
-  // ── Ollama model submit (then validate) ──────────────────────────────────
-  const handleOllamaModelSubmit = async (value: string) => {
-    const model = value.trim() || DEFAULT_MODELS["ollama"];
-    setModelInput(model);
-    setProviderModel("ollama", model);
-    setIsValidating(true);
-    setValidationError(null);
+  // ── "Save anyway" — skip validation and accept the key as-is ─────────────
+  const handleSaveAnyway = () => {
+    setApiKey(provider, keyInput.trim());
+    setDefaultProvider(provider);
+    onComplete();
+  };
 
-    try {
-      setDefaultProvider("ollama");
-      const lm = resolveModel("ollama");
-      await generateText({ model: lm, prompt: "hi", maxTokens: 1 });
-      onComplete();
-    } catch (err: any) {
-      let msg = err.message ?? String(err);
-      if (msg.includes("ECONNREFUSED") || msg.includes("fetch")) {
-        msg = `Cannot reach Ollama at ${urlInput}. Is 'ollama serve' running?`;
-      }
-      setValidationError(msg);
-    } finally {
-      setIsValidating(false);
+  // ── OpenRouter-specific key validation ──────────────────────────────────
+  // Uses the dedicated /api/v1/key endpoint instead of a generative ping.
+  // Free model pings fail for many reasons (data policy, overloaded endpoints,
+  // maxTokens:1 quirks) — the /key endpoint is fast, reliable, and keycheck-only.
+  const validateOpenRouterKey = async (key: string): Promise<void> => {
+    const res = await fetch("https://openrouter.ai/api/v1/key", {
+      headers: { Authorization: `Bearer ${key}` },
+    });
+    if (!res.ok) {
+      if (res.status === 401) throw new Error("401 Unauthorized — invalid OpenRouter API key.");
+      if (res.status === 403) throw new Error("403 Forbidden — key lacks permissions.");
+      throw new Error(`OpenRouter key check failed (HTTP ${res.status}).`);
     }
+    // Key is valid — we don't need to parse the body
   };
 
   // ── Regular provider key submit ──────────────────────────────────────────
   const handleKeySubmit = async (value: string) => {
+    // If a previous validation failed and canSaveAnyway is true,
+    // pressing Enter a second time saves the key without re-validating.
+    if (canSaveAnyway && validationError) {
+      handleSaveAnyway();
+      return;
+    }
+
     if (value.trim().length === 0 || isValidating) return;
 
+    setCanSaveAnyway(false);
     setIsValidating(true);
     setValidationError(null);
 
     try {
       setApiKey(provider, value.trim());
 
-      // Validate the key by sending a tiny 1-token ping to the provider.
-      // This catches bad keys immediately instead of failing on first real use.
-      const model = resolveModel(provider);
-      await generateText({ model, prompt: "hi", maxTokens: 1, maxRetries: 0 });
+      if (provider === "openrouter") {
+        // Use the dedicated key-check endpoint — no free model ping needed.
+        await validateOpenRouterKey(value.trim());
+      } else {
+        // For all other providers, do a tiny generative ping.
+        // maxTokens:10 avoids the known maxTokens:1 edge-case failures.
+        const model = resolveModel(provider);
+        await generateText({ model, prompt: "hi", maxTokens: 10, maxRetries: 0 });
+      }
 
       setDefaultProvider(provider);
       onComplete();
     } catch (err: any) {
-      // Only remove the key we just set — don't nuke other providers' keys
-      removeApiKey(provider);
+      // Keep the key stored — don't remove it. The user can save anyway.
+      // (Previously we called removeApiKey here, which prevented saving.)
 
       let errMsg = err.message ?? String(err);
+      let canBypass = true; // allow saving anyway by default
 
       // ── Provider-specific error messages ──────────────────────────────
       if (
@@ -176,23 +279,24 @@ export function ApiKeySetup({ onComplete }: ApiKeySetupProps) {
         errMsg.toLowerCase().includes("invalid x-api-key") ||
         errMsg.toLowerCase().includes("incorrect api key")
       ) {
-        errMsg = `Invalid ${SHORT_LABELS[provider]} API key. Please check and try again.`;
+        errMsg = `Invalid ${SHORT_LABELS[provider]} API key. Double-check it or press Enter to save anyway.`;
       } else if (errMsg.includes("No endpoints found") || errMsg.includes("No available model")) {
-        errMsg = "Invalid API key or no models available. Check your key and account balance.";
+        errMsg = "No models available for this key. Press Enter to save anyway.";
       } else if (errMsg.includes("403") || errMsg.toLowerCase().includes("forbidden")) {
-        errMsg = `Access denied. Your ${SHORT_LABELS[provider]} API key may lack permissions.`;
+        errMsg = `Access denied — your key may lack permissions. Press Enter to save anyway.`;
       } else if (errMsg.includes("429") || errMsg.toLowerCase().includes("rate limit")) {
-        // Key is valid but rate-limited — accept it anyway
-        setApiKey(provider, value.trim());
+        // Key is valid but rate-limited — accept it immediately
         setDefaultProvider(provider);
         onComplete();
         return;
       } else if (errMsg.includes("ECONNREFUSED") || errMsg.includes("fetch failed")) {
-        errMsg = `Cannot reach ${SHORT_LABELS[provider]}. Check your network connection.`;
+        errMsg = `Cannot reach ${SHORT_LABELS[provider]}. Check your network. Press Enter to save anyway.`;
       } else if (errMsg.includes("AI_APICallError")) {
-        errMsg = "API call failed. This might be due to model availability. Try again or use a different provider.";
+        errMsg = "API call failed. Press Enter to save anyway.";
       }
+
       setValidationError(errMsg);
+      setCanSaveAnyway(canBypass);
     } finally {
       setIsValidating(false);
     }
@@ -235,13 +339,19 @@ export function ApiKeySetup({ onComplete }: ApiKeySetupProps) {
           </Box>
         )}
         <Box marginTop={1}>
-          <Text color="white">URL: </Text>
-          <TextInput
-            value={urlInput}
-            onChange={setUrlInput}
-            onSubmit={handleUrlSubmit}
-            placeholder="http://localhost:11434"
-          />
+          {isValidating ? (
+            <Text color="yellow">Connecting and checking Ollama server... please wait.</Text>
+          ) : (
+            <>
+              <Text color="white">URL: </Text>
+              <TextInput
+                value={urlInput}
+                onChange={setUrlInput}
+                onSubmit={handleUrlSubmit}
+                placeholder="http://localhost:11434"
+              />
+            </>
+          )}
         </Box>
       </Box>
     );
@@ -289,9 +399,9 @@ export function ApiKeySetup({ onComplete }: ApiKeySetupProps) {
       <Text color="gray">This will be stored in plain text in your OS config directory.</Text>
 
       {validationError && (
-        <Box marginTop={1} paddingX={1} borderStyle="single" borderColor="red" backgroundColor="#15171C">
-          <Text color="red" bold>Validation failed: </Text>
-          <Text color="red">{validationError}</Text>
+        <Box marginTop={1} paddingX={1} borderStyle="single" borderColor={canSaveAnyway ? "yellow" : "red"} backgroundColor="#15171C">
+          <Text color={canSaveAnyway ? "yellow" : "red"} bold>Validation failed: </Text>
+          <Text color={canSaveAnyway ? "yellow" : "red"}>{validationError}</Text>
         </Box>
       )}
 
@@ -301,13 +411,27 @@ export function ApiKeySetup({ onComplete }: ApiKeySetupProps) {
           <Text color="yellow">Validating API key… please wait.</Text>
         ) : (
           <TextInput
-            value={keyInput}
-            onChange={setKeyInput}
+            value={canSaveAnyway && validationError ? "[press Enter to save anyway, or type a new key]" : keyInput}
+            onChange={(v) => {
+              // If the user starts typing after a failed validation, reset the bypass state
+              if (canSaveAnyway && validationError) {
+                setCanSaveAnyway(false);
+                setValidationError(null);
+                setKeyInput(v);
+              } else {
+                setKeyInput(v);
+              }
+            }}
             onSubmit={handleKeySubmit}
-            mask="*"
+            mask={canSaveAnyway && validationError ? undefined : "*"}
           />
         )}
       </Box>
+      {canSaveAnyway && validationError && (
+        <Box marginTop={1}>
+          <Text color="gray" dimColor>↵ Enter = save key anyway  •  Type new key to retry</Text>
+        </Box>
+      )}
     </Box>
   );
 }

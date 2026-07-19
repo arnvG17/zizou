@@ -43,6 +43,7 @@ import { readdirSync, statSync } from "fs";
 import { join, relative } from "path";
 import { loadActiveSessionState, saveActiveSessionState, listSessions, getActiveSession, getActiveSessionId, createSession } from "../session/registry.js";
 import { listCheckpoints, listBranches } from "../checkpoint/manager.js";
+import { getAIConfig, ensureModelConfigMd, applyPreset, setAIConfig } from "../config/ai-config.js";
 
 // ─── Orchestrator imports ────────────────────────────────────────────────────
 // These enable the full clarify → plan → execute → verify pipeline.
@@ -117,7 +118,7 @@ type LogEntry =
   // Displayed by the LogLine component below to show orchestrator state.
   | { kind: "plan-display"; steps: PlanStep[] }         // Full plan for user review
   | { kind: "step-progress"; stepIndex: number; totalSteps: number; description: string }
-  | { kind: "verification"; stepIndex: number; verified: boolean; mismatches: string[] }
+  | { kind: "verification"; stepIndex: number; verified: boolean; mismatches: string[]; verboseFeedback?: string }
   | { kind: "escalation"; reason: string }               // Escalation notification
   | { kind: "mode-switch"; mode: Mode; reason: string }  // Mode change notification
   | { kind: "clarification"; questions: ClarifyingQuestion[] }; // Clarifier questions
@@ -227,6 +228,58 @@ function getAllFilesRecursively(dir: string, rootDir: string): string[] {
   return files;
 }
 
+// ─── Thinking / Loading Animation Constants & Component ─────────────────────
+const THINKING_WORDS = [
+  "beaming", "booping", "bouncing", "brewing", "bubbling", "chasing", "churning",
+  "coalescing", "conjuring", "cooking", "crafting", "crunching", "cuddling",
+  "dancing", "dazzling", "discovering", "doodling", "dreaming", "drifting",
+  "enchanting", "exploring", "finding", "floating", "fluttering", "foraging",
+  "forging", "frolicking", "gathering", "giggling", "gliding", "greeting",
+  "growing", "hatching", "herding", "honking", "hopping", "hugging", "humming",
+  "imagining", "inventing", "jingling", "juggling", "jumping", "kindling",
+  "knitting", "launching", "leaping", "mapping", "marinating", "meandering",
+  "mixing", "moseying", "munching", "napping", "nibbling", "noodling", "orbiting",
+  "painting", "percolating", "petting", "plotting", "pondering", "popping",
+  "prancing", "purring", "puzzling", "questing", "riding", "roaming", "rolling",
+  "sauteeing", "scribbling", "seeking", "shimmying", "singing", "skipping",
+  "sleeping", "snacking", "sniffing", "snuggling", "soaring", "sparking",
+  "spinning", "splashing", "sprouting", "squishing", "stargazing", "stirring",
+  "strolling", "swimming", "swinging", "tickling", "tinkering", "toasting",
+  "tumbling", "twirling", "waddling", "wandering", "watching", "weaving",
+  "whistling", "wibbling", "wiggling", "wishing", "wobbling", "wondering",
+  "yawning", "zooming"
+];
+
+const SPINNER_FRAMES = ["⠋", "⠙", "⠹", "⠸", "⠼", "⠴", "⠦", "⠧", "⠇", "⠏"];
+
+function ThinkingLoader() {
+  const [word, setWord] = useState(() => {
+    const randomIndex = Math.floor(Math.random() * THINKING_WORDS.length);
+    return THINKING_WORDS[randomIndex];
+  });
+  const [frameIndex, setFrameIndex] = useState(0);
+
+  useEffect(() => {
+    // Randomly switch the word every 10 seconds (10000ms)
+    const wordInterval = setInterval(() => {
+      const randomIndex = Math.floor(Math.random() * THINKING_WORDS.length);
+      setWord(THINKING_WORDS[randomIndex]);
+    }, 10000);
+
+    // Spin the loader frame every 80ms for smooth animation
+    const spinnerInterval = setInterval(() => {
+      setFrameIndex((prev) => (prev + 1) % SPINNER_FRAMES.length);
+    }, 80);
+
+    return () => {
+      clearInterval(wordInterval);
+      clearInterval(spinnerInterval);
+    };
+  }, []);
+
+  return <Text color="#39FF14"> ({SPINNER_FRAMES[frameIndex]} {word}…)</Text>;
+}
+
 export interface ChatProps {
   onChangeKeys?: () => void;
   /** The operating mode (build or plan) determined by CLI args. */
@@ -236,6 +289,9 @@ export interface ChatProps {
 }
 
 export function Chat({ onChangeKeys, mode: initialMode = "build", initialPrompt }: ChatProps) {
+  // Ensure model_config.md exists on first startup so users can find and edit it
+  React.useEffect(() => { ensureModelConfigMd(); }, []);
+
   const [log, setLog] = useState<LogEntry[]>([]);
   const [input, setInput] = useState("");
   const [busy, setBusy] = useState(false);
@@ -301,7 +357,7 @@ export function Chat({ onChangeKeys, mode: initialMode = "build", initialPrompt 
   });
 
   useEffect(() => {
-    // Load session state on mount
+    // Load session state
     const sessionState = loadActiveSessionState();
     const activeSession = getActiveSession();
     
@@ -319,18 +375,24 @@ export function Chat({ onChangeKeys, mode: initialMode = "build", initialPrompt 
     }
     
     if (sessionState) {
-      history.current = sessionState.conversation;
-      setTokenStats(sessionState.tokenStats);
+      history.current = sessionState.conversation || [];
+      setTokenStats(sessionState.tokenStats || {
+        inputTokens: 0,
+        outputTokens: 0,
+        totalTokens: 0,
+        pctUsed: 0,
+        cost: 0,
+        contextLimit: 128000,
+      });
       
       // Restore full log from serialized JSON
       try {
         const restoredLog = JSON.parse(sessionState.log);
-        setLog(restoredLog);
+        setLog(restoredLog || []);
       } catch (error) {
-        console.warn("Failed to restore log:", error);
         // Fallback: reconstruct from conversation
         const reconstructedLog: LogEntry[] = [];
-        for (const msg of sessionState.conversation) {
+        for (const msg of (sessionState.conversation || [])) {
           if (msg.role === "user") {
             reconstructedLog.push({ kind: "user", text: String(msg.content) });
           } else if (msg.role === "assistant") {
@@ -343,45 +405,56 @@ export function Chat({ onChangeKeys, mode: initialMode = "build", initialPrompt 
       // Restore current mode
       if (sessionState.currentMode) {
         setCurrentMode(sessionState.currentMode);
+      } else {
+        setCurrentMode("build");
       }
       
-      // Restore orchestrator state
+      // Restore or reset orchestrator state
       if (sessionState.orchestratorState) {
         const orchState = sessionState.orchestratorState;
-        if (orchState.pendingPlan) {
-          setPendingPlan(orchState.pendingPlan);
-          // If there's a pending plan, auto-approve it and execute
-          // Don't ask for approval again on session restore
-          if (orchState.originalPrompt) {
-            setOriginalPrompt(orchState.originalPrompt);
-            // Restore completed step indices
-            if (orchState.completedStepIndices) {
-              setCompletedStepIndices(orchState.completedStepIndices);
-            }
-            // Auto-execute the plan after a short delay to allow UI to render
-            setTimeout(() => {
-              runOrchestratorFlow(
-                orchState.originalPrompt!,
-                orchState.clarificationAnswers || {},
-                orchState.pendingPlan
-              );
-            }, 100);
-          }
+        setPendingPlan(orchState.pendingPlan || null);
+        setPendingClarifications(orchState.pendingClarifications || []);
+        setClarificationAnswers(orchState.clarificationAnswers || {});
+        setCurrentClarificationIndex(orchState.currentClarificationIndex ?? 0);
+        setIsInClarificationFlow(orchState.isInClarificationFlow ?? false);
+        setOriginalPrompt(orchState.originalPrompt || "");
+        setCompletedStepIndices(orchState.completedStepIndices || []);
+        setIsAwaitingPlanApproval(orchState.isAwaitingPlanApproval ?? false);
+
+        if (orchState.pendingPlan && orchState.originalPrompt) {
+          // Auto-execute the plan after a short delay to allow UI to render
+          setTimeout(() => {
+            runOrchestratorFlow(
+              orchState.originalPrompt!,
+              orchState.clarificationAnswers || {},
+              orchState.pendingPlan
+            );
+          }, 100);
         }
-        if (orchState.pendingClarifications) setPendingClarifications(orchState.pendingClarifications);
-        if (orchState.clarificationAnswers) setClarificationAnswers(orchState.clarificationAnswers);
-        if (orchState.currentClarificationIndex !== undefined) setCurrentClarificationIndex(orchState.currentClarificationIndex);
-        if (orchState.isInClarificationFlow !== undefined) setIsInClarificationFlow(orchState.isInClarificationFlow);
-        // Don't restore isAwaitingPlanApproval - auto-execute instead
-        if (orchState.originalPrompt && !orchState.pendingPlan) setOriginalPrompt(orchState.originalPrompt);
+      } else {
+        // Reset orchestrator states for clean session
+        setPendingPlan(null);
+        setPendingClarifications([]);
+        setClarificationAnswers({});
+        setCurrentClarificationIndex(0);
+        setIsInClarificationFlow(false);
+        setOriginalPrompt("");
+        setCompletedStepIndices([]);
+        setIsAwaitingPlanApproval(false);
       }
-      
-      // Restore pinned files
-      for (const file of sessionState.pinnedFiles) {
-        try {
-          addPinnedFile(process.cwd(), file);
-        } catch {}
-      }
+    } else {
+      // Complete reset if no sessionState
+      history.current = [];
+      setLog([]);
+      setCurrentMode("build");
+      setPendingPlan(null);
+      setPendingClarifications([]);
+      setClarificationAnswers({});
+      setCurrentClarificationIndex(0);
+      setIsInClarificationFlow(false);
+      setOriginalPrompt("");
+      setCompletedStepIndices([]);
+      setIsAwaitingPlanApproval(false);
     }
 
     buildSystemPrompt(process.cwd()).then((prompt) => {
@@ -395,7 +468,7 @@ export function Chat({ onChangeKeys, mode: initialMode = "build", initialPrompt 
       const map = buildRepoMap(process.cwd());
       setRepoMap(map);
     } catch {}
-  }, []);
+  }, [sessionName]);
 
   const confirmFn: ConfirmFn = (description) => {
     return new Promise((resolve) => {
@@ -1022,6 +1095,7 @@ export function Chat({ onChangeKeys, mode: initialMode = "build", initialPrompt 
 
     try {
       const provider = getDefaultProvider() || "groq";
+      const aiConfig = getAIConfig();
       const model = resolveModel(provider);
       const budget = getContextMode() as "light" | "default" | "max";
 
@@ -1030,6 +1104,8 @@ export function Chat({ onChangeKeys, mode: initialMode = "build", initialPrompt 
         projectRoot: process.cwd(),
         systemPrompt: systemPromptRef.current,
         budget,
+        temperature: aiConfig.temperature,
+        maxOutputTokens: aiConfig.maxOutputTokens,
       };
 
       // Build the mode context — use current mode state
@@ -1048,6 +1124,8 @@ export function Chat({ onChangeKeys, mode: initialMode = "build", initialPrompt 
         answers,
         approvedSteps,
         completedStepIndices,
+        history.current,
+        provider,
       );
 
       let result = await orchestrator.next();
@@ -1120,12 +1198,17 @@ export function Chat({ onChangeKeys, mode: initialMode = "build", initialPrompt 
                 stepIndex: event.step.index,
                 verified: event.verification.verified,
                 mismatches: event.verification.mismatches,
+                verboseFeedback: event.verification.verboseFeedback,
               },
             ]);
             // Mark step as completed if verification succeeded
             if (event.verification.verified) {
               setCompletedStepIndices((prev) => [...prev, event.step.index]);
             }
+            break;
+
+          case "history-updated":
+            history.current = event.history;
             break;
 
           case "escalation-prompt":
@@ -1254,6 +1337,21 @@ export function Chat({ onChangeKeys, mode: initialMode = "build", initialPrompt 
 
           case "complete":
             // Orchestration finished successfully
+            {
+              const isConversational = (p: string) => {
+                const cleaned = p.trim().toLowerCase();
+                if (/^(hi|hello|hey|yo|hola|greetings|good morning|good afternoon|good evening|howdy|sup|whats up|what's up)(?:\s|[.,!?]|$)/i.test(cleaned)) {
+                  return true;
+                }
+                if (cleaned === "test" || cleaned === "ping" || cleaned === "how are you" || cleaned === "who are you" || cleaned === "what is your name") {
+                  return true;
+                }
+                return false;
+              };
+              if (isConversational(prompt)) {
+                history.current.push({ role: "assistant", content: currentAssistantText });
+              }
+            }
             break;
         }
 
@@ -1450,7 +1548,7 @@ export function Chat({ onChangeKeys, mode: initialMode = "build", initialPrompt 
               <Box borderStyle="round" borderColor="#3B5FE0" paddingX={1} paddingY={1} backgroundColor="#15171C">
                 <Text color="#3B5FE0" bold>{"❯ "}</Text>
                 <TextInput value={input} onChange={setInput} onSubmit={handleSubmit} />
-                {busy && <Text dimColor> (thinking…)</Text>}
+                {busy && <ThinkingLoader />}
               </Box>
 
               {/* Input Footer */}
@@ -1715,6 +1813,11 @@ function LogLine({ entry }: { entry: LogEntry }) {
             {entry.mismatches.map((m, i) => (
               <Text key={i} color="red" dimColor>↳ {m}</Text>
             ))}
+          </Box>
+        )}
+        {entry.verboseFeedback && (
+          <Box paddingLeft={2} marginTop={0.5}>
+            <Text color="gray" italic>Feedback: {entry.verboseFeedback}</Text>
           </Box>
         )}
       </Box>

@@ -100,6 +100,9 @@ export interface StepResult {
 
   /** Map of file paths to their contents before they were modified in this step. */
   oldFileStates?: Map<string, string | null>;
+
+  /** The fully updated conversation history for this step/turn. */
+  conversationHistory?: import("ai").ModelMessage[];
 }
 
 // ─── Verification Result ─────────────────────────────────────────────────────
@@ -125,6 +128,9 @@ export interface VerificationResult {
    * Empty when verified is true.
    */
   mismatches: string[];
+
+  /** Verbose conversational feedback explaining the verification results. */
+  verboseFeedback?: string;
 }
 
 // ─── Project Context ─────────────────────────────────────────────────────────
@@ -153,6 +159,18 @@ export interface ProjectContext {
    * (but NOT for clarifier/planner — see build-system-prompt.ts).
    */
   budget: "light" | "default" | "max";
+
+  /**
+   * Sampling temperature for inference. From AIConfig.
+   * Undefined = use the model provider's default.
+   */
+  temperature?: number;
+
+  /**
+   * Maximum output tokens per response. From AIConfig.
+   * Undefined = use the model provider's default.
+   */
+  maxOutputTokens?: number;
 }
 
 // ─── Clarifying Question ─────────────────────────────────────────────────────

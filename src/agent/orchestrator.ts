@@ -46,7 +46,7 @@
 // DEPENDENCY DIRECTION: imports from agent/ modules, context/, sdk/, tools/.
 // Must NOT import from ui/ or directly from config/provider/.
 
-import type { LanguageModel } from "ai";
+import type { LanguageModel, ModelMessage } from "ai";
 import type { ConfirmFn } from "../tools/types.js";
 import type { Mode, ModeContext } from "./mode.js";
 import type {
@@ -110,6 +110,9 @@ export type OrchestratorEvent =
   // Both modes: a step has been verified after execution.
   // The UI shows whether verification passed or failed.
   | { kind: "step-verified"; step: PlanStep; verification: VerificationResult }
+
+  // Emitted when the conversation history is updated (e.g. at the end of a build-mode step)
+  | { kind: "history-updated"; history: ModelMessage[] }
 
   // Build mode only: escalation triggered — the executor exceeded
   // expected scope. The UI shows a Y/n prompt.
@@ -221,6 +224,8 @@ async function* runBuildMode(
   context: ProjectContext,
   model: LanguageModel,
   onConfirm: ConfirmFn,
+  history?: ModelMessage[],
+  provider?: string,
 ): AsyncGenerator<OrchestratorEvent> {
   // Emit mode info so the UI can update the badge
   yield { kind: "mode-info", mode: "build", reason: "Direct execution — single step" };
@@ -252,11 +257,19 @@ async function* runBuildMode(
     context,
     model,
     onConfirm,
+    undefined,
+    provider,
+    history,
   );
 
   // Forward all agent events (including finish with usage) to the UI
   for (const event of stepResult.agentEvents) {
     yield { kind: "agent-event", event };
+  }
+
+  // Yield the updated conversation history to preserve memory
+  if (stepResult.conversationHistory) {
+    yield { kind: "history-updated", history: stepResult.conversationHistory };
   }
 
   // Verify the execution result against filesystem state
@@ -265,6 +278,7 @@ async function* runBuildMode(
     stepResult,
     context.projectRoot,
     preSnapshots,
+    model,
   );
 
   // Report verification result
@@ -330,6 +344,7 @@ async function* runPlanMode(
   clarificationAnswers: Record<string, string> = {},
   approvedPlan?: PlanStep[],
   completedStepIndices: number[] = [],
+  provider?: string,
 ): AsyncGenerator<OrchestratorEvent> {
   // Emit mode info
   yield { kind: "mode-info", mode: "plan", reason: "Full planning pipeline" };
@@ -404,6 +419,8 @@ async function* runPlanMode(
       context,
       model,
       onConfirm,
+      undefined,
+      provider,
     );
 
     // Forward all agent events (including finish with usage) to the UI
@@ -417,6 +434,7 @@ async function* runPlanMode(
       stepResult,
       context.projectRoot,
       preSnapshots,
+      model,
     );
 
     // Report verification result — in plan mode we continue even if
@@ -442,6 +460,59 @@ async function* runPlanMode(
   yield { kind: "complete" };
 }
 
+// ─── Conversational Mode Helper & Heuristics ───────────────────────────────
+
+function isConversational(prompt: string): boolean {
+  const p = prompt.trim().toLowerCase();
+
+  // A greeting-only message: the greeting word is immediately followed by
+  // punctuation or end-of-string — NOT by more words that form a task.
+  // "hi" → conversational   "hi build me a file" → NOT conversational
+  const greetingOnly = /^(hi|hello|hey|yo|hola|greetings|good morning|good afternoon|good evening|howdy|sup|whats up|what's up)[.,!?\s]*$/i.test(p);
+  if (!greetingOnly) return false;
+
+  // Even if it looks like a greeting, bail out if there are task-intent keywords.
+  // This is a safety net for "hi, can you write me..." style messages.
+  const taskKeywords = /\b(build|make|create|write|generate|add|edit|fix|update|run|install|refactor|implement|change|delete|remove|file|code|function|component|page|app|script|test|html|css|ts|js|tsx|jsx)\b/i;
+  if (taskKeywords.test(p)) return false;
+
+  if (greetingOnly) return true;
+
+  // Pure chit-chat phrases (exact match only)
+  return p === "test" || p === "ping" || p === "how are you" || p === "who are you" || p === "what is your name";
+}
+
+async function* runConversationalMode(
+  history: ModelMessage[],
+  context: ProjectContext,
+  model: LanguageModel,
+  onConfirm: ConfirmFn,
+  provider?: string,
+): AsyncGenerator<OrchestratorEvent> {
+  yield { kind: "mode-info", mode: "build", reason: "Casual conversation" };
+
+  const { runTurn } = await import("./run-turn.js");
+
+  const systemPrompt = "You are Zizou, an AI pair programming agent. Keep your response helpful, concise, and friendly. Since this is a casual conversation, do not mention or invoke any file-modifying tools.";
+
+  const turn = runTurn({
+    history,
+    model,
+    provider,
+    onConfirm,
+    systemPrompt,
+    disableTools: true,
+  });
+
+  let result = await turn.next();
+  while (!result.done) {
+    yield { kind: "agent-event", event: result.value };
+    result = await turn.next();
+  }
+
+  yield { kind: "complete" };
+}
+
 // ─── Public Entry Point ──────────────────────────────────────────────────────
 
 /**
@@ -457,6 +528,7 @@ async function* runPlanMode(
  * @param clarificationAnswers - Pre-collected clarification answers (plan mode).
  * @param approvedPlan - Pre-approved plan to execute (plan mode, after Y/n).
  * @param completedStepIndices - Indices of steps already completed (plan mode).
+ * @param history - Full conversation history (used for casual conversation mode).
  */
 export async function* runOrchestrator(
   userPrompt: string,
@@ -467,10 +539,25 @@ export async function* runOrchestrator(
   clarificationAnswers?: Record<string, string>,
   approvedPlan?: PlanStep[],
   completedStepIndices?: number[],
+  history?: ModelMessage[],
+  provider?: string,
 ): AsyncGenerator<OrchestratorEvent> {
   // Only log session start on the very first entry of the conversation turn
   if (!approvedPlan && (!clarificationAnswers || Object.keys(clarificationAnswers).length === 0)) {
     SessionLogger.logSessionStart(userPrompt, modeContext.mode, context.projectRoot);
+  }
+
+  // Casual conversational path: greetings / chit-chat
+  if (!approvedPlan && (!clarificationAnswers || Object.keys(clarificationAnswers).length === 0) && isConversational(userPrompt)) {
+    const activeHistory = history || [{ role: "user", content: userPrompt }];
+    yield* runConversationalMode(
+      activeHistory,
+      context,
+      model,
+      onConfirm,
+      provider,
+    );
+    return;
   }
 
   if (modeContext.mode === "plan") {
@@ -483,6 +570,7 @@ export async function* runOrchestrator(
       clarificationAnswers || {},
       approvedPlan,
       completedStepIndices || [],
+      provider,
     );
   } else {
     // Build mode: single step → execute → verify → escalation check
@@ -491,6 +579,8 @@ export async function* runOrchestrator(
       context,
       model,
       onConfirm,
+      history,
+      provider,
     );
   }
 }

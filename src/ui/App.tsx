@@ -36,6 +36,10 @@ interface AppProps {
 export function App({ forceSetup = false, mode = "build", initialPrompt }: AppProps) {
   const [hasKey, setHasKey] = useState(() => {
     if (process.env.GROQ_API_KEY) return true;
+    if (process.env.OPENAI_API_KEY) return true;
+    if (process.env.OPENROUTER_API_KEY) return true;
+    if (process.env.ANTHROPIC_API_KEY) return true;
+    if (process.env.GEMINI_API_KEY) return true;
     if (forceSetup) return false;
     return hasAnyApiKey();
   });

@@ -68,7 +68,7 @@ import {
  * exactly what to do without needing the full plan context.
  */
 function buildStepPrompt(step: PlanStep): string {
-  let prompt = `Execute the following task:\n\n${step.description}`;
+  let prompt = `Task: ${step.description}\n\nCall a tool to begin immediately. Do not ask clarifying questions.`;
 
   if (step.targetFiles.length > 0) {
     prompt += `\n\nTarget files to create or modify:\n`;
@@ -131,6 +131,8 @@ export async function executeStep(
   model: LanguageModel,
   onConfirm: ConfirmFn,
   onEvent?: (event: AgentEvent) => void,
+  provider?: string,
+  conversationHistory?: ModelMessage[],
 ): Promise<StepResult> {
   // Build a system prompt with the executor role — repo map follows
   // existing budget scaling (excluded under "light").
@@ -146,12 +148,23 @@ export async function executeStep(
   SessionLogger.logExecutorStepStart(step, context.budget);
   SessionLogger.logExecutorStepLLM(systemPrompt, stepPrompt);
 
-  // Initialize the conversation history with just the step prompt.
-  // Each step gets a fresh conversation — no carryover from previous
-  // steps. This prevents context pollution and keeps the model focused.
-  const history: ModelMessage[] = [
-    { role: "user", content: stepPrompt },
-  ];
+  // Initialize the conversation history. If conversationHistory is provided (e.g. build mode),
+  // we inherit it and swap the last user message with the enriched stepPrompt.
+  // Otherwise, start fresh (plan mode isolation).
+  let history: ModelMessage[];
+  if (conversationHistory && conversationHistory.length > 0) {
+    history = [...conversationHistory];
+    const lastMsg = history[history.length - 1];
+    if (lastMsg && lastMsg.role === "user") {
+      history[history.length - 1] = { ...lastMsg, content: stepPrompt };
+    } else {
+      history.push({ role: "user", content: stepPrompt });
+    }
+  } else {
+    history = [
+      { role: "user", content: stepPrompt },
+    ];
+  }
 
   // Tracking collections for building the StepResult
   const claimedFiles = new Set<string>();
@@ -179,9 +192,12 @@ export async function executeStep(
   const turn = runTurn({
     history,
     model,
+    provider,
     onConfirm,
     systemPrompt,
     maxSteps: 15,
+    temperature: context.temperature,
+    maxOutputTokens: context.maxOutputTokens,
   });
 
   let result = await turn.next();
@@ -335,24 +351,24 @@ export async function executeStep(
 
   if (toolCallsMade.length === 0 && fullResponseText.trim().length > 0) {
     const fallback = extractRawToolCall(fullResponseText);
-    if (fallback) {
-      // Build a local tool map for lookup (mirrors the one in runTurn)
-      const fallbackTools: Record<string, any> = {
-        readFile,
-        writeFile: createWriteFileTool(onConfirm),
-        editFile: createEditFileTool(onConfirm),
-        glob,
-        grep,
-        listDir,
-        openFile,
-        addFileToContext,
-        runBash: createRunBashTool(onConfirm),
-        runBackground: createRunBackgroundTool(onConfirm),
-        manageTasks,
-        managePorts,
-        fileOperations: createFileOperationsTool(onConfirm),
-      };
+    // Build a local tool map for lookup (mirrors the one in runTurn)
+    const fallbackTools: Record<string, any> = {
+      readFile,
+      writeFile: createWriteFileTool(onConfirm),
+      editFile: createEditFileTool(onConfirm),
+      glob,
+      grep,
+      listDir,
+      openFile,
+      addFileToContext,
+      runBash: createRunBashTool(onConfirm),
+      runBackground: createRunBackgroundTool(onConfirm),
+      manageTasks,
+      managePorts,
+      fileOperations: createFileOperationsTool(onConfirm),
+    };
 
+    if (fallback && fallbackTools[fallback.name]) {
       const tool = fallbackTools[fallback.name];
       if (tool) {
         const toolCallId = `fallback_${Math.random().toString(36).slice(2, 9)}`;
@@ -424,8 +440,22 @@ export async function executeStep(
             : { kind: "tool-error", toolCallId, toolName: fallback.name, error: output },
         );
       }
+    } else {
+      // Model replied with text only — no tool call, no parseable pseudo-call.
+      // This is a legitimate response: a question, clarification, or explanation.
+      // Ensure the text is in agentEvents so the UI renders it and the user
+      // can reply. Without this, the text was silently swallowed.
+      if (!agentEvents.some((e) => e.kind === "text-delta")) {
+        agentEvents.push({ kind: "text-delta", text: fullResponseText });
+      }
+      SessionLogger.logExecutorStreamEvent(
+        `\n  [LLM TEXT-ONLY RESPONSE — no tool call made]\n` +
+        `    Text: ${fullResponseText.slice(0, 300)}${fullResponseText.length > 300 ? " ... (truncated)" : ""}\n`
+      );
     }
   }
+
+  const updatedHistory = cleanHistoryForNextTurn(result.value || []);
 
   const finalResult = {
     stepIndex: step.index,
@@ -433,6 +463,7 @@ export async function executeStep(
     toolCallsMade,
     agentEvents,
     oldFileStates,
+    conversationHistory: updatedHistory,
   };
 
   SessionLogger.logExecutorStepEnd({
@@ -443,3 +474,97 @@ export async function executeStep(
   // Return the StepResult for the verifier to check
   return finalResult;
 }
+
+/**
+ * Cleans the conversation history for subsequent turns by stripping large payloads
+ * (like full file contents from readFile or search matches from grep) and leaving only
+ * the tool names, file paths referenced, and whether they succeeded/failed.
+ */
+function cleanHistoryForNextTurn(messages: ModelMessage[]): ModelMessage[] {
+  const filePaths = new Map<string, string>();
+
+  // First pass: extract file paths from tool calls
+  for (const msg of messages) {
+    if (Array.isArray(msg.content)) {
+      for (const part of msg.content) {
+        const anyPart = part as any;
+        if (anyPart.type === "tool-call") {
+          const path = anyPart.args?.path || anyPart.args?.filePath || anyPart.args?.file;
+          if (typeof path === "string") {
+            filePaths.set(anyPart.toolCallId, path);
+          }
+        }
+      }
+    }
+  }
+
+  // Second pass: clean up content
+  return messages.map((msg) => {
+    if (!Array.isArray(msg.content)) {
+      return msg;
+    }
+
+    const cleanedContent = msg.content.map((part: any) => {
+      if (part.type === "tool-call") {
+        // Keep all file-writing/editing arguments intact (including contents)
+        // so the model has the code in history.
+        return part;
+      }
+
+      if (part.type === "tool-result") {
+        const toolName = part.toolName;
+        const res = part.result;
+        let cleanedResult: any = { success: true };
+
+        if (res && typeof res === "object") {
+          cleanedResult.success = res.success !== false;
+          if (res.error) {
+            cleanedResult.error = String(res.error);
+          }
+
+          const file = filePaths.get(part.toolCallId) || "unknown";
+
+          if (toolName === "readFile") {
+            cleanedResult.file = file;
+            cleanedResult.success = res.success !== false;
+            // Preserve the code contents so the LLM doesn't need to re-read
+            cleanedResult.contents = res.contents; 
+            cleanedResult.message = res.success ? "Successfully read file" : "Failed to read file";
+          } else if (toolName === "writeFile") {
+            cleanedResult.file = file;
+            cleanedResult.message = res.success ? "Successfully wrote file" : "Failed to write file";
+          } else if (toolName === "editFile") {
+            cleanedResult.file = file;
+            cleanedResult.message = res.success ? "Successfully edited file" : "Failed to edit file";
+          } else if (toolName === "glob") {
+            cleanedResult.matches = Array.isArray(res.files) ? res.files : [];
+          } else if (toolName === "grep") {
+            cleanedResult.matches = Array.isArray(res.matches) 
+              ? res.matches.map((m: string) => m.split(":")[0]).filter((v: string, idx: number, self: string[]) => self.indexOf(v) === idx) 
+              : [];
+          } else if (toolName === "runBash" || toolName === "runBackground") {
+            cleanedResult.message = res.success ? "Command completed successfully" : "Command failed";
+            if (res.taskId) cleanedResult.taskId = res.taskId;
+          } else {
+            cleanedResult.message = res.message || (res.success ? "Success" : "Failed");
+          }
+        } else {
+          cleanedResult = { success: !part.isError, message: String(res) };
+        }
+
+        return {
+          ...part,
+          result: cleanedResult,
+        };
+      }
+
+      return part;
+    });
+
+    return {
+      ...msg,
+      content: cleanedContent,
+    };
+  }) as ModelMessage[];
+}
+

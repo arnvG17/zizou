@@ -103,13 +103,18 @@ export function hasAnyApiKey(): boolean {
 }
 
 /**
- * Retrieves the default provider choice. Defaults to "groq" if not set.
+ * Retrieves the default provider choice.
+ * Priority when no defaultProvider is saved:
+ *   1. OPENAI_API_KEY env var  → "openai"
+ *   2. GROQ_API_KEY env var    → "groq"
+ *   3. Fallback                → "groq"
  */
 export function getDefaultProvider(): ProviderChoice {
-  if (process.env.GROQ_API_KEY && !config.get("defaultProvider")) {
-    return "groq";
-  }
-  return config.get("defaultProvider") || "groq";
+  const saved = config.get("defaultProvider");
+  if (saved) return saved;
+  if (process.env.OPENAI_API_KEY) return "openai";
+  if (process.env.GROQ_API_KEY) return "groq";
+  return "groq";
 }
 
 /**

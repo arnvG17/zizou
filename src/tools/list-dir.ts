@@ -29,7 +29,7 @@ export const listDir = tool({
       .describe(
         "Directory path to list. Omit or use '.' to list the project root."
       ),
-  }).optional().nullable(),
+  }),
   execute: async (args) => {
     const inputPath = args?.path;
     const SKIP = new Set(["node_modules", ".git", "dist", "build", ".next", ".cache"]);
