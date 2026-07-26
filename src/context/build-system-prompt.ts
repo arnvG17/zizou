@@ -84,7 +84,12 @@ Rules:
 - For general questions / conversation — answer directly, no tool calls.
 - Before editFile: always readFile first to get exact whitespace. Never guess.
 - Before any shell command: briefly state what it does if non-obvious.
-- Act immediately on clear requests. Ask only when the intent is genuinely ambiguous.`;
+- Act immediately on clear requests. Ask only when the intent is genuinely ambiguous.
+
+editFile recovery strategy:
+- If editFile fails with "appeared N times", provide near_line (the line number nearest your intended match), e.g.:
+  editFile({ path: "app.html", old_string: "...", new_string: "...", near_line: 42 })
+- If editFile fails twice on the same file, you will be told to fall back to writeFile with the complete corrected contents. Do this immediately — do not keep retrying editFile with cosmetic variations of old_string.`;
 
 // ─── Role-Aware Repo Map Decision ────────────────────────────────────────────
 //

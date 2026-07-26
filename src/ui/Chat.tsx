@@ -30,10 +30,9 @@ import {
   getDefaultProvider,
   setDefaultProvider,
   setProviderModel,
-  ProviderChoice,
-  getContextMode,
 } from "../config/api-keys.js";
 import type { ConfirmFn } from "../tools/index.js";
+import { sessionPermissions } from "../tools/index.js";
 import { runTurn } from "../agent/run-turn.js";
 import { buildSystemPrompt, addPinnedFile, pinnedContextFiles } from "../context/build-system-prompt.js";
 import { buildRepoMap } from "../context/repo-map.js";
@@ -468,11 +467,23 @@ export function Chat({ onChangeKeys, mode: initialMode = "build", initialPrompt 
       const map = buildRepoMap(process.cwd());
       setRepoMap(map);
     } catch {}
+    sessionPermissions.reset();
   }, [sessionName]);
 
   const confirmFn: ConfirmFn = (description) => {
+    if (sessionPermissions.isPermitted(description)) {
+      return Promise.resolve(true);
+    }
     return new Promise((resolve) => {
-      setPendingConfirm({ description, resolve });
+      setPendingConfirm({
+        description,
+        resolve: (approved: boolean) => {
+          if (approved) {
+            sessionPermissions.grantPermission(description);
+          }
+          resolve(approved);
+        },
+      });
     });
   };
 

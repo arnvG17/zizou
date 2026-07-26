@@ -20,7 +20,7 @@
 
 import { streamText, stepCountIs, type ModelMessage, type LanguageModel } from "ai";
 import {
-  readFile,
+  createReadFileTool,
   createWriteFileTool,
   createEditFileTool,
   glob,
@@ -198,6 +198,22 @@ function tolerantJsonParse(raw: string): any | null {
   return null;
 }
 
+function looksLikePseudoToolCall(text: string): boolean {
+  return /<function\/\w+/.test(text) || /"tool_name"\s*:/.test(text) || /"name"\s*:\s*"[a-zA-Z0-9_-]+"/.test(text);
+}
+
+export interface ToolCallAudit {
+  nativeCalls: number;
+  pseudoCallDetected: boolean;
+}
+
+export function auditResponse(hasNativeCalls: boolean, text: string): ToolCallAudit {
+  return {
+    nativeCalls: hasNativeCalls ? 1 : 0,
+    pseudoCallDetected: looksLikePseudoToolCall(text),
+  };
+}
+
 // ─── Text extraction helper ──────────────────────────────────────────────────
 
 function extractAssistantText(msg: ModelMessage): string {
@@ -223,10 +239,39 @@ export async function* runTurn(
   const log = new TurnLogger();
   log.writePreTurn({ model, history, systemPrompt, maxSteps });
 
+  // ── Duplicate tool call tracker within this turn loop ────────────────
+  const callHashes = new Map<string, { attempts: number; failed: boolean }>();
+
+  const wrapToolForDuplicateDetection = (toolName: string, originalTool: any) => {
+    if (!originalTool || typeof originalTool.execute !== "function") return originalTool;
+    return {
+      ...originalTool,
+      execute: async (args: any, context: any) => {
+        const hash = `${toolName}:${JSON.stringify(args)}`;
+        const existing = callHashes.get(hash);
+        if (existing && existing.failed && existing.attempts >= 1) {
+          existing.attempts++;
+          return {
+            success: false,
+            error:
+              `BLOCKED: this exact call already failed once with the same arguments. ` +
+              `Do not retry unchanged. Read the file again or use a different approach.`,
+          };
+        }
+
+        const res = await originalTool.execute(args, context);
+        const isFailed = !res || res.success === false || !!res.error;
+        const attempts = (existing?.attempts ?? 0) + 1;
+        callHashes.set(hash, { attempts, failed: isFailed });
+        return res;
+      },
+    };
+  };
+
   // ── Build the tool map ─────────────────────────────────────────────────
 
-  const tools = disableTools ? undefined : {
-    readFile,
+  const rawTools = disableTools ? undefined : {
+    readFile: createReadFileTool(onConfirm),
     writeFile: createWriteFileTool(onConfirm),
     editFile: createEditFileTool(onConfirm),
     glob,
@@ -240,6 +285,15 @@ export async function* runTurn(
     managePorts,
     fileOperations: createFileOperationsTool(onConfirm),
   };
+
+  const tools = rawTools
+    ? Object.fromEntries(
+        Object.entries(rawTools).map(([name, toolInstance]) => [
+          name,
+          wrapToolForDuplicateDetection(name, toolInstance),
+        ])
+      )
+    : undefined;
 
   // ── Call the LLM ───────────────────────────────────────────────────────
   //
@@ -393,13 +447,36 @@ export async function* runTurn(
 
   if (lastMsg?.role === "assistant") {
     const textContent = extractAssistantText(lastMsg);
+
+    // Count native tool calls in responseMessages
+    let nativeCallsCount = 0;
+    for (const msg of responseMessages) {
+      if (Array.isArray(msg.content)) {
+        for (const part of msg.content) {
+          if ((part as any).type === "tool-call") {
+            nativeCallsCount++;
+          }
+        }
+      }
+    }
+
+    const audit = auditResponse(nativeCallsCount > 0, textContent);
+
+    if (audit.nativeCalls > 0 && audit.pseudoCallDetected) {
+      log.logFallbackIntercept(
+        `[AUDIT: pseudo_call_alongside_native] nativeCalls=${nativeCallsCount}`
+      );
+    }
+
     const rawToolCall = textContent ? extractRawToolCall(textContent) : null;
     const toolDef = rawToolCall ? (tools as any)[rawToolCall.name] : undefined;
 
     if (rawToolCall && toolDef) {
       didFallback = true;
       const toolCallId = `call_${Math.random().toString(36).slice(2, 9)}`;
-      log.logFallbackIntercept(rawToolCall.name);
+      log.logFallbackIntercept(
+        `[AUDIT: pseudo_call_recovered] toolName=${rawToolCall.name}`
+      );
 
       // Emit the tool-call event
       yield { kind: "tool-call", toolCallId, toolName: rawToolCall.name, input: rawToolCall.arguments };

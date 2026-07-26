@@ -11,7 +11,7 @@
  * requires touching agent code — just create the file and add one line here.
  */
 
-export { readFile } from "./read-file.js";
+export { readFile, createReadFileTool } from "./read-file.js";
 export { createWriteFileTool } from "./write-file.js";
 export { createEditFileTool } from "./edit-file.js";
 export { glob } from "./glob.js";
@@ -24,4 +24,6 @@ export { createRunBackgroundTool } from "./run-background.js";
 export { manageTasks } from "./manage-tasks.js";
 export { managePorts } from "./manage-ports.js";
 export { createFileOperationsTool } from "./file-operations.js";
+export { sessionPermissions, SessionPermissionManager } from "./permissions.js";
 export type { ConfirmFn } from "./types.js";
+

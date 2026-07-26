@@ -35,31 +35,51 @@ import { tool } from "ai";
  * We use `tool()` from the AI SDK as a type-safe helper that wires up the
  * schema to the execute function and ensures the types stay in sync.
  */
-export const readFile = tool({
-  description:
-    "Read the contents of a file at the given path. " +
-    "Returns the full file contents as a string on success, " +
-    "or an error message if the file cannot be read.",
-  inputSchema: z.object({
-    path: z
-      .string()
-      .describe("Absolute or relative path to the file to read"),
-  }),
+import type { ConfirmFn } from "./types.js";
 
-  /**
-   * Execute is called by the AI SDK when the model requests this tool.
-   * We catch all errors and return them as data — never throw — so the
-   * agent loop can continue and the model can decide how to recover.
-   */
-  execute: async ({ path }) => {
-    try {
-      const absPath = resolve(process.cwd(), path);
-      const contents = readFileSync(absPath, "utf-8");
-      return { success: true as const, contents };
-    } catch (err) {
-      const message =
-        err instanceof Error ? err.message : "Unknown error reading file";
-      return { success: false as const, error: message };
-    }
-  },
-});
+/**
+ * createReadFileTool — Factory function that creates a readFile tool.
+ * If confirm callback is provided, asks permission before reading unapproved files.
+ */
+export const createReadFileTool = (confirm?: ConfirmFn) => {
+  return tool({
+    description:
+      "Read the contents of a file at the given path. " +
+      "Returns the full file contents as a string on success, " +
+      "or an error message if the file cannot be read.",
+    inputSchema: z.object({
+      path: z
+        .string()
+        .describe("Absolute or relative path to the file to read"),
+    }),
+
+    /**
+     * Execute is called by the AI SDK when the model requests this tool.
+     * We catch all errors and return them as data — never throw — so the
+     * agent loop can continue and the model can decide how to recover.
+     */
+    execute: async ({ path }) => {
+      try {
+        const absPath = resolve(process.cwd(), path);
+        if (confirm) {
+          const isApproved = await confirm(`Read file: ${absPath}`);
+          if (!isApproved) {
+            return {
+              success: false as const,
+              error: "User denied permission to read this file.",
+            };
+          }
+        }
+        const contents = readFileSync(absPath, "utf-8");
+        return { success: true as const, contents };
+      } catch (err) {
+        const message =
+          err instanceof Error ? err.message : "Unknown error reading file";
+        return { success: false as const, error: message };
+      }
+    },
+  });
+};
+
+export const readFile = createReadFileTool();
+

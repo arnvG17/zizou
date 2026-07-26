@@ -41,7 +41,7 @@ import type { PlanStep, StepResult, ToolCall, ProjectContext } from "./types.js"
 import { SessionLogger } from "./debug/index.js";
 import { captureFileState } from "../checkpoint/patcher.js";
 import {
-  readFile,
+  createReadFileTool,
   createWriteFileTool,
   createEditFileTool,
   glob,
@@ -63,11 +63,53 @@ import {
 // step to execute. The system prompt comes from buildSystemPrompt().
 
 /**
+ * Extracts file paths recently referenced in conversation history from tool calls.
+ * Looks at readFile, openFile, editFile, and writeFile calls to determine which
+ * files the user has been working with. This resolves deictic references like
+ * "that file", "edit it", "the file I just opened", etc.
+ */
+function extractRecentFileReferences(history?: ModelMessage[]): string[] {
+  if (!history || history.length === 0) return [];
+
+  const files = new Set<string>();
+  for (const msg of history) {
+    if (!Array.isArray(msg.content)) continue;
+    for (const part of msg.content) {
+      const anyPart = part as any;
+      if (anyPart.type === "tool-call") {
+        const toolName = anyPart.toolName;
+        if (
+          toolName === "readFile" ||
+          toolName === "openFile" ||
+          toolName === "editFile" ||
+          toolName === "writeFile"
+        ) {
+          const path =
+            anyPart.args?.path ??
+            anyPart.args?.filePath ??
+            anyPart.args?.file ??
+            anyPart.input?.path ??
+            anyPart.input?.filePath;
+          if (typeof path === "string") {
+            files.add(path);
+          }
+        }
+      }
+    }
+  }
+  return Array.from(files);
+}
+
+/**
  * Builds a focused user message for a single step execution.
  * Includes the step description and target files so the model knows
  * exactly what to do without needing the full plan context.
+ *
+ * When conversationHistory is provided (build mode), extracts recently
+ * referenced files so deictic references ("that file", "edit it") resolve
+ * correctly even though the executor gets a fresh prompt.
  */
-function buildStepPrompt(step: PlanStep): string {
+function buildStepPrompt(step: PlanStep, conversationHistory?: ModelMessage[]): string {
   let prompt = `Task: ${step.description}\n\nCall a tool to begin immediately. Do not ask clarifying questions.`;
 
   if (step.targetFiles.length > 0) {
@@ -78,8 +120,22 @@ function buildStepPrompt(step: PlanStep): string {
     prompt += `\nFocus ONLY on the files listed above. Do not modify other files.`;
   }
 
+  // In build mode, if the step has no explicit targetFiles but prior tool calls
+  // referenced files, include them as context so "that file" / "it" resolves.
+  if (step.targetFiles.length === 0 && conversationHistory) {
+    const recentFiles = extractRecentFileReferences(conversationHistory);
+    if (recentFiles.length > 0) {
+      prompt += `\n\nRecently referenced files from this conversation:\n`;
+      for (const file of recentFiles) {
+        prompt += `  - ${file}\n`;
+      }
+      prompt += `\nIf the task refers to "that file", "it", or "the file", it likely means one of the files listed above.`;
+    }
+  }
+
   return prompt;
 }
+
 
 // ─── File Extraction from Tool Calls ─────────────────────────────────────────
 //
@@ -142,8 +198,10 @@ export async function executeStep(
     step.targetFiles,
   );
 
-  // Build the step-specific user message
-  const stepPrompt = buildStepPrompt(step);
+
+  // Build the step-specific user message, passing conversation history
+  // so it can resolve deictic references ("that file", "it") from prior turns.
+  const stepPrompt = buildStepPrompt(step, conversationHistory);
 
   SessionLogger.logExecutorStepStart(step, context.budget);
   SessionLogger.logExecutorStepLLM(systemPrompt, stepPrompt);
@@ -353,7 +411,7 @@ export async function executeStep(
     const fallback = extractRawToolCall(fullResponseText);
     // Build a local tool map for lookup (mirrors the one in runTurn)
     const fallbackTools: Record<string, any> = {
-      readFile,
+      readFile: createReadFileTool(onConfirm),
       writeFile: createWriteFileTool(onConfirm),
       editFile: createEditFileTool(onConfirm),
       glob,

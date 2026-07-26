@@ -49,6 +49,7 @@ import {
   formatColoredDiff,
 } from "../checkpoint/manager.js";
 import type { ConfirmFn } from "../tools/index.js";
+import { sessionPermissions } from "../tools/index.js";
 import type { FilePatch } from "../checkpoint/types.js";
 
 export interface SlashCommandInfo {
@@ -74,6 +75,7 @@ export const SLASH_COMMANDS: SlashCommandInfo[] = [
   { command: "/clear", description: "Reset conversation history & start new session" },
   { command: "/session", description: "Session management (new, list, switch, delete)" },
   { command: "/checkpoint", description: "Checkpoint management (list, diff, restore, branch, switch, delete, revert)" },
+  { command: "/permissions", description: "View or clear active session permissions" },
   { command: "/help", description: "Show available commands & active provider" },
   { command: "/exit", description: "Close Zizou" },
 ];
@@ -266,6 +268,7 @@ export async function handleSlashCommand(ctx: CommandContext): Promise<boolean> 
   if (command === "clear" || command === "reset") {
     ctx.history.current = [];
     clearPinnedFiles();
+    sessionPermissions.reset();
     const provider = getDefaultProvider() || "groq";
     ctx.setLog((_l: LogEntry[]) => []);
     ctx.setTokenStats(ctx.calculateTokenStats([], ctx.systemPrompt, undefined, provider));
@@ -279,6 +282,40 @@ export async function handleSlashCommand(ctx: CommandContext): Promise<boolean> 
       console.warn("Failed to create new session on clear:", error);
     }
     
+    return true;
+  }
+
+  if (command === "permissions") {
+    const sub = args[0]?.toLowerCase();
+    if (sub === "clear" || sub === "reset") {
+      sessionPermissions.reset();
+      ctx.setLog((l: LogEntry[]) => [
+        ...l,
+        { kind: "user", text },
+        { kind: "assistant", text: "Session permissions have been reset. Permission prompts will appear again when tools are called." },
+      ]);
+      return true;
+    }
+
+    const summary = sessionPermissions.getSummary();
+    const fileList = summary.files.length > 0 ? summary.files.map(f => `  - ${f}`).join("\n") : "  (none)";
+    const cmdList = summary.commands.length > 0 ? summary.commands.map(c => `  - ${c}`).join("\n") : "  (none)";
+
+    const textOut = `Active Session Permissions:
+
+Allowed Files (${summary.files.length}):
+${fileList}
+
+Allowed Commands (${summary.commands.length}):
+${cmdList}
+
+(Use /permissions clear to reset permissions for this session)`;
+
+    ctx.setLog((l: LogEntry[]) => [
+      ...l,
+      { kind: "user", text },
+      { kind: "assistant", text: textOut },
+    ]);
     return true;
   }
 
