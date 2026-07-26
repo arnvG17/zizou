@@ -61,6 +61,7 @@ export const SLASH_COMMANDS: SlashCommandInfo[] = [
   { command: "/plan", description: "Switch to plan mode (clarify → plan → execute → verify)" },
   { command: "/build", description: "Switch to build mode (single-step execution)" },
   { command: "/model", description: "Switch provider and/or set custom model name" },
+  { command: "/models", description: "List all available model options for all providers" },
   { command: "/modelid", description: "Set custom model ID for the active provider" },
   { command: "/ollama", description: "Set the Ollama base URL" },
   { command: "/context", description: "Set context mode (light, default, max)" },
@@ -156,6 +157,14 @@ export interface CommandContext {
   ) => any;
 }
 
+function resolveReasoningLevel(input: string | undefined): ReasoningLevel | undefined {
+  const normalized = input?.toLowerCase();
+  if (normalized === "low" || normalized === "lo") return "low";
+  if (normalized === "high" || normalized === "hig") return "high";
+  if (normalized === "medium" || normalized === "med" || normalized === "mid" || normalized === "midoue") return "medium";
+  return undefined;
+}
+
 /**
  * Intercepts user input and executes a slash command if one is detected.
  * Returns true if a command was handled, false otherwise.
@@ -224,6 +233,7 @@ export async function handleSlashCommand(ctx: CommandContext): Promise<boolean> 
   /model <provider> <name>  Switch provider AND set a custom model name
                             e.g. /model groq mixtral-8x7b-32768
                             e.g. /model ollama mistral
+  /models                   List all available model options for all providers
   /modelid <name>           Set a custom model ID for the current provider
                             e.g. /modelid llama3:70b
   /expert                   Show AI config (model, preset, temperature, max tokens)
@@ -349,6 +359,26 @@ export async function handleSlashCommand(ctx: CommandContext): Promise<boolean> 
     ctx.setTokenStats(
       ctx.calculateTokenStats(ctx.history.current, ctx.systemPrompt, undefined, choice)
     );
+    return true;
+  }
+
+  if (command === "models") {
+    const list =
+      `Available Models by Provider:\n` +
+      `${"-".repeat(40)}\n` +
+      `openai      - gpt-4o-mini (default), gpt-4o, o1-mini\n` +
+      `groq        - llama-3.3-70b-versatile (default), mixtral-8x7b-32768, llama-3.1-8b-instant, gemma2-9b-it\n` +
+      `google      - gemini-2.5-flash (default), gemini-2.5-pro, gemini-2.0-flash, gemini-1.5-pro, gemini-1.5-flash\n` +
+      `anthropic   - claude-3-5-sonnet-latest (default), claude-3-5-haiku-latest, claude-3-opus-20240229\n` +
+      `openrouter  - google/gemma-4-31b-it:free (default), meta-llama/llama-3.3-70b-instruct:free, deepseek/deepseek-chat\n` +
+      `ollama      - llama3 (default), mistral, phi3\n\n` +
+      `Use "/model <provider> [model-name]" to switch, or "/modelid <model-name>" to set a custom ID.`;
+
+    ctx.setLog((l: LogEntry[]) => [
+      ...l,
+      { kind: "user", text },
+      { kind: "assistant", text: list },
+    ]);
     return true;
   }
 
@@ -992,10 +1022,9 @@ export async function handleSlashCommand(ctx: CommandContext): Promise<boolean> 
 
   // ── /reasoning — standalone reasoning level command ───────────────────────
   if (command === "reasoning") {
-    const level = args[0]?.toLowerCase() as ReasoningLevel | undefined;
-    const validLevels: ReasoningLevel[] = ["low", "medium", "high"];
+    const level = resolveReasoningLevel(args[0]);
 
-    if (!level || !validLevels.includes(level)) {
+    if (!level) {
       const current = getAIConfig();
       ctx.setLog((l: LogEntry[]) => [
         ...l,
@@ -1154,8 +1183,8 @@ export async function handleSlashCommand(ctx: CommandContext): Promise<boolean> 
 
     // /expert reasoning low|medium|high
     if (sub === "reasoning") {
-      const level = args[1]?.toLowerCase() as ReasoningLevel | undefined;
-      if (!level || !["low", "medium", "high"].includes(level)) {
+      const level = resolveReasoningLevel(args[1]);
+      if (!level) {
         ctx.setLog((l: LogEntry[]) => [
           ...l,
           { kind: "user", text },

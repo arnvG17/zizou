@@ -260,14 +260,21 @@ export async function* runTurn(
     : undefined;
 
   const result = streamText({
+    // 1. LLM Model: The provider-agnostic model instance resolved at runtime.
     model,
+    // 2. System Prompt: Dynamic system prompt compiled by buildSystemPrompt() (rules, OS, pinned files, repo map).
     system: systemPrompt,
+    // 3. Tools: Native tools (readFile, writeFile, runBash, etc.) that the model can invoke.
     tools,
+    // 4. Stop Safety Cap: Caps the internal tool-call/re-prompt loop to prevent infinite runaways (default 15 steps).
     stopWhen: stepCountIs(maxSteps),
+    // 5. Conversation History & User Query: Full thread history with the latest user query already pre-appended.
     messages: history,
+    // 6. Max Retries: Disabled (0) to prevent multiplying token costs on rate limit / 429 errors.
     maxRetries: 0,
     ...(temperature !== undefined ? { temperature } : {}),
     ...(maxOutputTokens !== undefined ? { maxTokens: maxOutputTokens } : {}),
+    // 7. Provider Options: Includes OpenAI-specific overrides (like parallelToolCalls: false to avoid race conditions).
     ...(providerOptions ? { providerOptions } : {}),
   });
 

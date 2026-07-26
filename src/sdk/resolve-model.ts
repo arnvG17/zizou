@@ -24,10 +24,10 @@ import {
 export const DEFAULT_MODELS: Record<ProviderChoice, string> = {
   anthropic: "claude-3-5-sonnet-latest",
   openrouter: "google/gemma-4-31b-it:free",
-  openai: "gpt-4o",
+  openai: "gpt-4o-mini",
   google: "gemini-2.5-flash",
   groq: "llama-3.3-70b-versatile",
-  ollama: "llama3",
+  ollama: "qwen3:4b",
 };
 
 /**

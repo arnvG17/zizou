@@ -120,19 +120,28 @@ When an LLM writes code, the response can be thousands of tokens long. If we wai
 **Streaming** solves this. The API sends the response back chunk-by-chunk (sometimes word-by-word) as it's being generated on the server. The `streamText` function reads this stream in real time.
 
 ### 3. The `streamText` Engine & Tool Execution
-The `streamText` function (from the `ai` package) is the heavy lifter. You give it the model, the conversation history, and an object containing all available tools.
+The [streamText](file:///c:/Users/Arnv/ZIZOUv1/src/agent/run-turn.ts#L262) function (from the Vercel AI SDK `ai` package) is the entry point that actually executes the network request to the LLM. 
+
+This call takes place in [src/agent/run-turn.ts](file:///c:/Users/Arnv/ZIZOUv1/src/agent/run-turn.ts) inside the [runTurn](file:///c:/Users/Arnv/ZIZOUv1/src/agent/run-turn.ts#L217) function, passing the compiled prompt, registered tools, and optimized conversation history:
 
 ```typescript
-const tools = { readFile, writeFile, runBash }; 
-const result = streamText({ model, tools, messages });
+const result = streamText({
+  model,                  // Ready-to-use LanguageModel instance from resolveModel()
+  system: systemPrompt,   // Injected System Prompt (base instructions, OS context, pinned files, repo map)
+  tools,                  // Map of Zizou tools (readFile, writeFile, runBash, etc.)
+  messages: history,      // Conversation history array, with the latest user query pre-appended
+  stopWhen: stepCountIs(maxSteps), // Safety cap to prevent run-away agent loops (default: 15)
+  maxRetries: 0,          // Disabled so rate limits (429) surface immediately to save tokens
+  ...(providerOptions ? { providerOptions } : {}), // e.g. parallelToolCalls: false for OpenAI
+});
 ```
 
-When the LLM decides it needs to use a tool, it stops generating plain text and outputs a hidden JSON payload like `{"tool": "readFile", "arguments": {"path": "main.ts"}}`.
-`streamText` manages the entire execution lifecycle automatically:
-1. It intercepts the JSON payload.
-2. It validates the arguments against the Zod `inputSchema`.
-3. It literally calls the JavaScript `execute` function for the tool.
-4. It packages the file contents into a "tool result" message and sends a *second* network request back to the LLM to continue the thought process.
+Here is where each piece of the payload comes from:
+- **System Prompt (`system`)**: Compiled dynamically via [buildSystemPrompt](file:///c:/Users/Arnv/ZIZOUv1/src/context/build-system-prompt.ts#L139) in [src/context/build-system-prompt.ts](file:///c:/Users/Arnv/ZIZOUv1/src/context/build-system-prompt.ts) to provide the model with agent instructions, ambient OS/workspace context, pinned files, and the role-aware repo map.
+- **Tools (`tools`)**: Configured and registered dynamically based on the current mode (disabled during casual conversations).
+- **User Query & History (`messages`)**: The orchestrator or executor packages the latest user request (or step-specific instruction) and appends it to the running history array before calling [runTurn](file:///c:/Users/Arnv/ZIZOUv1/src/agent/run-turn.ts#L217).
+
+When the LLM decides it needs to use a tool, it stops generating plain text and outputs a structured tool-call payload (which is intercepted and executed locally by the SDK, sending the result back to the model in the next round-trip, up to a maximum of 15 steps).
 
 ### 4. The Interception Loop (`runTurn` & `executeStep`)
 While `streamText` is handling the network and executing tools, the terminal UI needs to know what is happening so it can draw text or display loading badges. 
