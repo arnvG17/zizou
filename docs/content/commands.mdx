@@ -4,13 +4,19 @@ Everything you need to run, extend, and understand Zizou — the AI coding agent
 
 <div id="commands" className="pt-8" />
 
-## Slash Commands
-
 Zizou comes with several built-in slash commands you can use in the chat bar to configure your agent on the fly:
 
-- `/keys` — Opens an interactive setup screen allowing you to switch AI providers and enter or update your API keys.
-- `/models` — Override the default model for a given provider (e.g. switching from `claude-3-5-sonnet-20240620` to another version).
-- `/context` — Displays a panel showing exactly what files the AI currently has in its context window, helping you manage context bloat.
+- `/plan` — Switch to Plan Mode (clarify → plan → confirm → execute → verify).
+- `/build` — Switch to Build Mode (fast single-step execution).
+- `/permissions` — View active session-cached file/command permissions or clear them (`/permissions clear`).
+- `/context <light|default|max>` — Set context mode budget.
+- `/reasoning <low|medium|high>` — Set reasoning level & inference parameters.
+- `/expert` — Configure preset models, temperature, and token parameters.
+- `/keys` — Opens an interactive setup screen allowing you to switch AI providers and update API keys.
+- `/models` — Select or override active models for the selected provider.
+- `/add <filepath>` — Pin a file's contents permanently to context.
+- `/checkpoint` — Manage checkpoints (list, diff, restore, branch, revert).
+- `/clear` — Reset conversation history & session permissions.
 
 <div id="llm-compatibility" className="pt-16" />
 

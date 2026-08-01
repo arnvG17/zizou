@@ -30,6 +30,8 @@ import {
   getDefaultProvider,
   setDefaultProvider,
   setProviderModel,
+  ProviderChoice,
+  getContextMode,
 } from "../config/api-keys.js";
 import type { ConfirmFn } from "../tools/index.js";
 import { sessionPermissions } from "../tools/index.js";

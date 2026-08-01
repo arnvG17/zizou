@@ -110,14 +110,14 @@ function extractRecentFileReferences(history?: ModelMessage[]): string[] {
  * correctly even though the executor gets a fresh prompt.
  */
 function buildStepPrompt(step: PlanStep, conversationHistory?: ModelMessage[]): string {
-  let prompt = `Task: ${step.description}\n\nCall a tool to begin immediately. Do not ask clarifying questions.`;
+  let prompt = `Task: ${step.description}\n\nCall a tool to begin immediately. Do not ask clarifying questions.\nIMPORTANT: You MUST use the writeFile or editFile tools to write changes to disk. Printing file contents or code blocks as plain text in chat does NOT write files.`;
 
   if (step.targetFiles.length > 0) {
     prompt += `\n\nTarget files to create or modify:\n`;
     for (const file of step.targetFiles) {
       prompt += `  - ${file}\n`;
     }
-    prompt += `\nFocus ONLY on the files listed above. Do not modify other files.`;
+    prompt += `\nFocus ONLY on the files listed above. Do not modify other files. Use writeFile or editFile tool calls for each target file.`;
   }
 
   // In build mode, if the step has no explicit targetFiles but prior tool calls

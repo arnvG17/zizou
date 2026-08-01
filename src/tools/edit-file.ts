@@ -188,9 +188,9 @@ export const createEditFileTool = (confirm: ConfirmFn) => {
           }
 
           return recordFailure(
-            "The exact string was not found in the file. The file may have changed " +
-              "since you last read it, or you may have missed some whitespace. " +
-              "Please read the file again or adjust your exact string." +
+            `NOT_FOUND: The exact string was not found in ${path}. The file may have changed ` +
+              `since you last read it, or you may have missed some whitespace. ` +
+              `Please read the file again or adjust your exact string.` +
               hint
           );
         }
@@ -230,7 +230,7 @@ export const createEditFileTool = (confirm: ConfirmFn) => {
             };
           }
 
-          // No near_line — return detailed error with line numbers and context
+          // No near_line — return detailed AMBIGUOUS_MATCH error with line numbers and context
           const matchDetails = matchLines
             .map((line, i) => {
               const context = getContextAroundLine(contents, line);
@@ -239,12 +239,13 @@ export const createEditFileTool = (confirm: ConfirmFn) => {
             .join("\n");
 
           return recordFailure(
-            `The exact string appeared ${count} times in the file, at lines: ${matchLines.join(", ")}.\n` +
+            `AMBIGUOUS_MATCH: old_string matches ${count} locations in ${path}. ` +
+              `Add more surrounding lines (2-3 lines of context above and/or below the target) ` +
+              `to make old_string unique before retrying. Do not guess which occurrence.\n` +
               `\nHere is the context around each match:${matchDetails}\n\n` +
               `To fix this, either:\n` +
               `  1. Include more surrounding context in old_string that is UNIQUE to one occurrence, OR\n` +
-              `  2. Use the near_line parameter (e.g. near_line: ${matchLines[0]}) to target a specific occurrence.\n` +
-              `     near_line picks the match closest to the given line number.`
+              `  2. Use the near_line parameter (e.g. near_line: ${matchLines[0]}) to target a specific occurrence.`
           );
         }
 

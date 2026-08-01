@@ -118,7 +118,7 @@ function sanitizeJsonString(jsonStr: string): string {
 /**
  * Attempts to extract a tool call from raw assistant text when the model
  * failed to use native function-calling. Tries <function/...> tags first,
- * then falls back to raw JSON block parsing.
+ * then raw JSON block parsing, and finally code blocks with file path hints.
  *
  * @returns { name, arguments } if a parseable pseudo-call was found, else null.
  */
@@ -154,6 +154,67 @@ export function extractRawToolCall(text: string): { name: string; arguments: any
       typeof parsed.arguments === "object"
     ) {
       return { name: parsed.name, arguments: parsed.arguments };
+    }
+  }
+
+  // ── Strategy 3: Code block with explicit file path hint ──────────────
+  // Catches cases where models dump code in a markdown block instead of making a writeFile call
+  const codeBlockCall = extractCodeBlockToolCall(text);
+  if (codeBlockCall) {
+    return codeBlockCall;
+  }
+
+  return null;
+}
+
+/**
+ * Strategy 3 helper: extracts a synthetic writeFile tool call from a markdown
+ * code block if a file path reference precedes it or is inside its header comments.
+ */
+function extractCodeBlockToolCall(text: string): { name: string; arguments: any } | null {
+  const codeBlockRegex = /(?:([^\n]+\n){1,4})?```(?:[a-zA-Z0-9_-]+)?\r?\n([\s\S]+?)\r?\n```/g;
+  let match: RegExpExecArray | null;
+
+  const validExts = /\.(ts|tsx|js|jsx|json|html|css|txt|md|py|sh|yaml|yml|rs|go|c|cpp|h)$/i;
+
+  while ((match = codeBlockRegex.exec(text)) !== null) {
+    const precedingText = match[1] || "";
+    const codeContent = match[2];
+
+    if (!codeContent.trim()) continue;
+
+    const filePatterns = [
+      /(?:file|path|filename|create|write|editing|update|in)\s*:?\s*[`"']?([\w./\\-]+?\.[a-zA-Z0-9]+)[`"']?/i,
+      /[`"']([\w./\\-]+?\.[a-zA-Z0-9]+)[`"']/,
+      /([\w./\\-]+\.[a-zA-Z0-9]+):/
+    ];
+
+    let filePath: string | null = null;
+
+    for (const pat of filePatterns) {
+      const m = precedingText.match(pat);
+      if (m && validExts.test(m[1])) {
+        filePath = m[1];
+        break;
+      }
+    }
+
+    if (!filePath) {
+      const firstLines = codeContent.split("\n").slice(0, 2).join("\n");
+      const commentMatch = firstLines.match(/(?:\/\/\s*|#\s*|<!--\s*)([\w./\\-]+\.[a-zA-Z0-9]+)/);
+      if (commentMatch && validExts.test(commentMatch[1])) {
+        filePath = commentMatch[1];
+      }
+    }
+
+    if (filePath) {
+      return {
+        name: "writeFile",
+        arguments: {
+          path: filePath,
+          contents: codeContent,
+        },
+      };
     }
   }
 
@@ -199,7 +260,10 @@ function tolerantJsonParse(raw: string): any | null {
 }
 
 function looksLikePseudoToolCall(text: string): boolean {
-  return /<function\/\w+/.test(text) || /"tool_name"\s*:/.test(text) || /"name"\s*:\s*"[a-zA-Z0-9_-]+"/.test(text);
+  return /<function\/\w+/.test(text) ||
+    /"tool_name"\s*:/.test(text) ||
+    /"name"\s*:\s*"[a-zA-Z0-9_-]+"/.test(text) ||
+    /```[a-zA-Z0-9_-]*\r?\n[\s\S]+?\r?\n```/.test(text);
 }
 
 export interface ToolCallAudit {

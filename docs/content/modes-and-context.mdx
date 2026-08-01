@@ -1,0 +1,52 @@
+# ZIZOU DOCUMENTATION
+
+Everything you need to run, extend, and understand Zizou — the AI coding agent that lives in your terminal.
+
+<div id="modes-and-context" className="pt-8" />
+
+## Operating Modes: Build vs Plan
+
+Zizou supports two execution pipelines designed for different workflow complexities:
+
+### 1. Build Mode (`● Build` — Default)
+- **Fast, One-Shot Execution**: Ideal for single-file edits, quick bug fixes, and concise tasks.
+- **Pipeline**: Prompt → Synthesize single step → Stream tool execution → Verify result.
+- **Escalation Safety Net**: If execution touches more than 3 files or verification fails, Zizou deterministically prompts you to escalate to Plan Mode.
+
+### 2. Plan Mode (`◆ Plan` — `--plan` or `/plan`)
+- **Structured Multi-Step Pipeline**: Designed for complex features, multi-file refactors, and architectural changes.
+- **Pipeline**: Prompt → Clarify (interactive Q&A) → Plan (ordered JSON plan) → User Confirmation (Y/n) → Execute each step → Verify each step.
+- **Dependency Ordering**: Enforces strict topological sorting so setup and file scaffolding steps execute before consumers.
+
+---
+
+<div id="context-and-reasoning" className="pt-16" />
+
+## Context Budgets & Reasoning Levels
+
+### Context Budgets (`/context <mode>`)
+Controls how much project structure is injected into the system prompt:
+- **`light`**: Minimal context. Repo map is excluded for the Executor to keep context lean. (Clarifier and Planner always retain the repo map to prevent scaffolding errors).
+- **`default`**: Includes the full pre-computed codebase symbol index (Repo Map).
+- **`max`**: Maximum context inclusion for deep codebase reasoning.
+
+### Reasoning Levels (`/reasoning <level>` or `/expert`)
+Presets tune inference temperature and output window tokens based on task complexity:
+- **`low`** (`fast` preset): Speed & low cost (Temp: 0.2, Max Tokens: 1,024).
+- **`medium`** (`balanced` preset): Standard balance (Temp: 0.2, Max Tokens: 2,048).
+- **`high`** (`high` preset): Maximum depth & deterministic output for complex code generation (Temp: 0.1, Max Tokens: 4,096).
+
+---
+
+<div id="permissions-and-hardening" className="pt-16" />
+
+## Session Permissions & Loop Hardening
+
+### Session-Level Permission Caching (`/permissions`)
+- **Single Prompt Per Target**: When you approve a file (read/write/edit/delete) or shell command during a session, Zizou caches that permission.
+- **Auto-Approval**: Subsequent operations targeting the same file or command within the session execute automatically without repeated prompts.
+- **Management**: View active permissions or reset them anytime using `/permissions` or `/permissions clear`.
+
+### Tool-Call Loop Hardening
+- **Harness-Enforced `editFile` Recovery**: Caps consecutive `editFile` failures on the same file at 2 attempts. On the 2nd failure, Zizou forces a fallback to `writeFile` with the full file content to stop invalid string-matching loops.
+- **Duplicate Tool-Call Blocking**: If the LLM retries an identical `(toolName, args)` call that previously failed, the harness intercepts it with a synthetic `BLOCKED` notice, forcing the model to read the file or adjust its strategy.
