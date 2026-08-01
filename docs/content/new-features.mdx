@@ -1,0 +1,150 @@
+# ZIZOU DOCUMENTATION
+
+Everything you need to run, extend, and understand Zizou — the AI coding agent that lives in your terminal.
+
+<div id="new-features" className="pt-8" />
+
+## New Features
+
+This document covers the latest features added to Zizou.
+
+### Step-Level Undo/Redo
+
+Zizou now supports step-level undo and redo operations, allowing you to revert file changes at the granularity of individual execution steps.
+
+**Commands:**
+- `/undo` — Reverts the file changes from the last executed step
+- `/redo` — Re-applies changes that were previously undone
+
+**How it works:**
+- When a step completes successfully, Zizou captures a snapshot of all file changes (creates, edits, deletes)
+- `/undo` restores files to their state before that step
+- `/redo` reapplies the changes that were undone
+- State is persisted in `.zizou/` directory
+- Undo/redo stacks are cleared when switching sessions or executing new steps
+
+**Use cases:**
+- Mistake correction: Undo a step that made unintended changes
+- Experimentation: Try different approaches and revert between them
+- Safety net: Quickly recover from accidental file modifications
+
+**Behavior:**
+- If a step created a file, `/undo` deletes it
+- If a step deleted a file, `/undo` restores it
+- Multiple sequential `/undo` calls walk back through multiple steps
+- Any new step execution after an `/undo` clears the redo stack
+
+### @ Fuzzy File Search
+
+Type `@` in the chat input to trigger fuzzy file search, making it easy to reference project files without typing full paths.
+
+**How to use:**
+1. Type `@` in the chat input
+2. Start typing a file name or path fragment
+3. Use arrow keys (↑/↓) to navigate through matches
+4. Press Enter to insert the selected file path
+5. Continue typing your prompt
+
+**Features:**
+- Fuzzy matching: Finds files even with partial or typo'd names
+- Cached indexing: Fast performance even on large projects (500+ files)
+- Multiple references: Use `@` multiple times in a single prompt
+- Gitignore-aware: Excludes `node_modules`, `.git`, and other ignored directories
+- Live filtering: Results update as you type
+
+**Supported file types:**
+- Source files: `.ts`, `.tsx`, `.js`, `.jsx`, `.mjs`, `.cjs`
+- Web files: `.html`, `.css`, `.json`
+- Config files: `.md`, `.py`, `.sh`, `.yaml`, `.yml`
+- And more code-related extensions
+
+### Model-Tier Indicators
+
+Zizou now displays which model tier handled each execution step, making it clear whether work was done locally or in the cloud.
+
+**Visual indicators:**
+- `[local]` — Green tag for local execution (Ollama)
+- `[hosted]` — Yellow tag for cloud-based providers (Anthropic, OpenAI, Groq, Google, OpenRouter)
+
+**Where they appear:**
+- Step progress displays (e.g., "Step 2/5: Create component [hosted]")
+- Verification result displays
+- Helps you track which tier is handling different parts of your workflow
+
+**Why this matters:**
+- Cost awareness: See which operations are incurring API costs
+- Performance tracking: Understand latency differences between local and hosted models
+- Debugging: Know which model tier produced specific outputs
+
+### Cost Tracking
+
+Zizou now tracks and displays the accumulated cost of your session based on actual token usage from the AI SDK.
+
+**Where to see it:**
+- Status bar shows running total in USD (e.g., "$0.0123")
+- Updates after each model call with actual usage data
+- Shows both token count and percentage of context limit
+
+**How it works:**
+- Uses actual token counts from the AI SDK's `usage` metadata
+- Multiplies by per-model rate tables for accurate cost calculation
+- Supports all major providers with up-to-date pricing
+- Unknown models are excluded from the total (shown as "unpriced" in logs)
+
+**Rate table:**
+- Anthropic Claude models: $3/M input, $15/M output
+- OpenAI GPT models: $2.5/M input, $10/M output
+- Google Gemini models: $0.075/M input, $0.3/M output
+- Groq Llama models: $0.59/M input, $0.79/M output
+- Ollama (local): Free
+
+**Updating rates:**
+- Rates are maintained in `src/tui/cost-tracker.ts`
+- Single configuration file for easy updates as pricing changes
+- Default fallback for unknown models: $1/M input, $5/M output
+
+### ZIZOU.md Project Conventions
+
+You can now create a `ZIZOU.md` file at your project root to declare project-specific conventions that Zizou will automatically follow.
+
+**How to use:**
+1. Create a file named `ZIZOU.md` at your project root
+2. Add your project-specific rules and conventions
+3. Zizou automatically reads and injects this content into the planner's context
+
+**Example ZIZOU.md:**
+```markdown
+# Project Conventions
+
+## Scope Guardrails
+- Never touch `src/legacy/` directory without explicit permission
+- Do not modify auto-generated files in `src/generated/`
+- Always run tests after touching test files
+
+## Code Style
+- Use TypeScript strict mode
+- Follow existing naming conventions
+- Add JSDoc comments to exported functions
+
+## Architecture
+- New features go in `src/features/`
+- Utilities go in `src/utils/`
+- Keep components focused and reusable
+```
+
+**How it works:**
+- Content is injected into the planner's system prompt with clear delimiters
+- Helps the planner understand project-specific constraints
+- Prevents the planner from suggesting changes that violate your conventions
+- Executor context can also include conventions for relevant steps
+
+**Benefits:**
+- Prevents unwanted changes to protected areas of your codebase
+- Communicates architectural rules to the AI
+- Reduces back-and-forth corrections
+- Makes your project's self-documentation enforceable
+
+**Silent no-op:**
+- If `ZIZOU.md` doesn't exist, Zizou works normally
+- No errors or warnings when the file is absent
+- Easy to add/remove as needed

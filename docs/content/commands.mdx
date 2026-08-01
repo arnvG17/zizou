@@ -16,7 +16,60 @@ Zizou comes with several built-in slash commands you can use in the chat bar to 
 - `/models` — Select or override active models for the selected provider.
 - `/add <filepath>` — Pin a file's contents permanently to context.
 - `/checkpoint` — Manage checkpoints (list, diff, restore, branch, revert).
+- `/undo` — Undo the last step's file changes.
+- `/redo` — Redo the last undone step.
+- `/export` — Export conversation transcript to markdown file.
 - `/clear` — Reset conversation history & session permissions.
+
+<div id="new-features" className="pt-16" />
+
+## New Features
+
+### Step-Level Undo/Redo
+
+Zizou now supports step-level undo and redo operations, allowing you to revert file changes at the granularity of individual execution steps:
+
+- `/undo` — Reverts the file changes from the last executed step. If a step created a file, `/undo` deletes it. If a step deleted a file, `/undo` restores it.
+- `/redo` — Re-applies changes that were previously undone.
+- Undo/redo state is persisted in `.zizou/` and cleared when switching sessions.
+- Multiple sequential `/undo` calls walk back through multiple steps.
+
+### @ File Search
+
+Type `@` in the chat input to trigger fuzzy file search:
+
+- Press `@` and start typing to filter project files.
+- Use arrow keys to navigate through matches.
+- Press Enter to insert the selected file path into your prompt.
+- Supports multiple `@` references in a single prompt.
+- Respects `.gitignore` patterns (excludes `node_modules`, `.git`, etc.).
+- File index is cached and debounced for performance on large projects.
+
+### Model-Tier Indicators
+
+Zizou now displays which model tier handled each step:
+
+- `[local]` — Green tag for local execution (Ollama).
+- `[hosted]` — Yellow tag for cloud-based providers (Anthropic, OpenAI, Groq, Google, etc.).
+- Tags appear in step progress and verification displays.
+
+### Cost Tracking
+
+Running cost is displayed in the status bar and updated after each model call:
+
+- Shows accumulated cost in USD based on actual token usage from the AI SDK.
+- Uses per-model rate tables for accurate calculation.
+- Unknown models are excluded from the total (shown as "unpriced" in logs).
+- Rates are easily updatable in a single configuration file.
+
+### ZIZOU.md Project Conventions
+
+You can now create a `ZIZOU.md` file at your project root to declare project-specific conventions:
+
+- Content is automatically injected into the planner's context with clear delimiters.
+- Use this to declare scope guardrails, path conventions, or coding standards.
+- Example: "Never touch `src/legacy/` directory without explicit permission."
+- Absence of `ZIZOU.md` is a silent no-op (no errors or warnings).
 
 <div id="llm-compatibility" className="pt-16" />
 

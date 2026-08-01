@@ -103,6 +103,9 @@ export interface StepResult {
 
   /** The fully updated conversation history for this step/turn. */
   conversationHistory?: import("ai").ModelMessage[];
+
+  /** The model tier that handled this step (hosted vs local). */
+  modelTier?: "hosted" | "local";
 }
 
 // ─── Verification Result ─────────────────────────────────────────────────────

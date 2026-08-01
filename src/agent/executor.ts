@@ -515,6 +515,9 @@ export async function executeStep(
 
   const updatedHistory = cleanHistoryForNextTurn(result.value || []);
 
+  // Determine model tier based on provider
+  const modelTier: "hosted" | "local" = provider === "ollama" ? "local" : "hosted";
+
   const finalResult = {
     stepIndex: step.index,
     claimedFiles: Array.from(claimedFiles),
@@ -522,6 +525,7 @@ export async function executeStep(
     agentEvents,
     oldFileStates,
     conversationHistory: updatedHistory,
+    modelTier,
   };
 
   SessionLogger.logExecutorStepEnd({

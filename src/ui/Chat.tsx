@@ -45,6 +45,8 @@ import { join, relative } from "path";
 import { loadActiveSessionState, saveActiveSessionState, listSessions, getActiveSession, getActiveSessionId, createSession } from "../session/registry.js";
 import { listCheckpoints, listBranches } from "../checkpoint/manager.js";
 import { getAIConfig, ensureModelConfigMd, applyPreset, setAIConfig } from "../config/ai-config.js";
+import { FileSearchOverlay } from "../tui/file-search-overlay.js";
+import { estimateCost, formatCost, getModelRate } from "../tui/cost-tracker.js";
 
 // ─── Orchestrator imports ────────────────────────────────────────────────────
 // These enable the full clarify → plan → execute → verify pipeline.
@@ -118,8 +120,8 @@ type LogEntry =
   // ── New orchestrator log entry kinds ──────────────────────────────────
   // Displayed by the LogLine component below to show orchestrator state.
   | { kind: "plan-display"; steps: PlanStep[] }         // Full plan for user review
-  | { kind: "step-progress"; stepIndex: number; totalSteps: number; description: string }
-  | { kind: "verification"; stepIndex: number; verified: boolean; mismatches: string[]; verboseFeedback?: string }
+  | { kind: "step-progress"; stepIndex: number; totalSteps: number; description: string; modelTier?: "hosted" | "local" }
+  | { kind: "verification"; stepIndex: number; verified: boolean; mismatches: string[]; verboseFeedback?: string; modelTier?: "hosted" | "local" | undefined }
   | { kind: "escalation"; reason: string }               // Escalation notification
   | { kind: "mode-switch"; mode: Mode; reason: string }  // Mode change notification
   | { kind: "clarification"; questions: ClarifyingQuestion[] }; // Clarifier questions
@@ -135,7 +137,8 @@ function calculateTokenStats(
   history: ModelMessage[],
   systemPrompt: string,
   actualUsage?: { inputTokens: number; outputTokens: number },
-  provider: ProviderChoice = "groq"
+  provider: ProviderChoice = "groq",
+  usageEntries?: Array<{ model: string; inputTokens: number; outputTokens: number }>
 ) {
   let inputTokens = 0;
   let outputTokens = 0;
@@ -179,26 +182,32 @@ function calculateTokenStats(
 
   const pctUsed = Math.min(100, parseFloat(((totalTokens / contextLimit) * 100).toFixed(1)));
 
-  // Cost calculation based on provider rates
-  let inputRate = 0.000003; // default $3/M (Anthropic)
-  let outputRate = 0.000015; // default $15/M (Anthropic)
+  // Calculate cost from usage entries if available
+  let cost = 0;
+  if (usageEntries && usageEntries.length > 0) {
+    cost = estimateCost(usageEntries);
+  } else {
+    // Fallback to simple calculation
+    let inputRate = 0.000003; // default $3/M (Anthropic)
+    let outputRate = 0.000015; // default $15/M (Anthropic)
 
-  if (provider === "openai") {
-    inputRate = 0.0000025; // $2.5/M
-    outputRate = 0.00001; // $10/M
-  } else if (provider === "google") {
-    inputRate = 0.000000075; // $0.075/M
-    outputRate = 0.0000003; // $0.3/M
-  } else if (provider === "groq") {
-    inputRate = 0.00000059; // $0.59/M
-    outputRate = 0.00000079; // $0.79/M
-  } else if (provider === "ollama") {
-    // Ollama runs locally — no cost
-    inputRate = 0;
-    outputRate = 0;
+    if (provider === "openai") {
+      inputRate = 0.0000025; // $2.5/M
+      outputRate = 0.00001; // $10/M
+    } else if (provider === "google") {
+      inputRate = 0.000000075; // $0.075/M
+      outputRate = 0.0000003; // $0.3/M
+    } else if (provider === "groq") {
+      inputRate = 0.00000059; // $0.59/M
+      outputRate = 0.00000079; // $0.79/M
+    } else if (provider === "ollama") {
+      // Ollama runs locally — no cost
+      inputRate = 0;
+      outputRate = 0;
+    }
+
+    cost = parseFloat((inputTokens * inputRate + outputTokens * outputRate).toFixed(4));
   }
-
-  const cost = parseFloat((inputTokens * inputRate + outputTokens * outputRate).toFixed(4));
 
   return {
     inputTokens,
@@ -307,6 +316,8 @@ export function Chat({ onChangeKeys, mode: initialMode = "build", initialPrompt 
   const [selectedModelIndex, setSelectedModelIndex] = useState(0);
   const [customModelInput, setCustomModelInput] = useState("");
 
+  const [showFileSearch, setShowFileSearch] = useState(false);
+
   const { cols } = useTerminalSize();
   const showSidebar = cols >= 90 && log.length > 0;
 
@@ -356,6 +367,9 @@ export function Chat({ onChangeKeys, mode: initialMode = "build", initialPrompt 
     cost: 0,
     contextLimit: 128000,
   });
+
+  // Track usage entries for cost calculation
+  const [usageEntries, setUsageEntries] = useState<Array<{ model: string; inputTokens: number; outputTokens: number }>>([]);
 
   useEffect(() => {
     // Load session state
@@ -463,7 +477,7 @@ export function Chat({ onChangeKeys, mode: initialMode = "build", initialPrompt 
       setSystemPromptText(prompt);
       setContextReady(true);
       const provider = getDefaultProvider() || "groq";
-      setTokenStats(calculateTokenStats(history.current, prompt, undefined, provider));
+      setTokenStats(calculateTokenStats(history.current, prompt, undefined, provider, usageEntries));
     });
     try {
       const map = buildRepoMap(process.cwd());
@@ -511,6 +525,14 @@ export function Chat({ onChangeKeys, mode: initialMode = "build", initialPrompt 
   useEffect(() => {
     if (!input.startsWith("/")) {
       setClosedSuggestions(false);
+    }
+    
+    // Detect @ for file search
+    const atMatch = input.match(/@([^\s]*)$/);
+    if (atMatch && atMatch[1].length >= 1) {
+      setShowFileSearch(true);
+    } else {
+      setShowFileSearch(false);
     }
   }, [input]);
 
@@ -936,7 +958,7 @@ export function Chat({ onChangeKeys, mode: initialMode = "build", initialPrompt 
               setSystemPromptText(prompt);
               setContextReady(true);
               const provider = getDefaultProvider() || "groq";
-              setTokenStats(calculateTokenStats(history.current, prompt, undefined, provider));
+              setTokenStats(calculateTokenStats(history.current, prompt, undefined, provider, usageEntries));
             });
             try {
               const map = buildRepoMap(process.cwd());
@@ -979,7 +1001,7 @@ export function Chat({ onChangeKeys, mode: initialMode = "build", initialPrompt 
           setSystemPromptText(prompt);
           setContextReady(true);
           const provider = getDefaultProvider() || "groq";
-          setTokenStats(calculateTokenStats(history.current, prompt, undefined, provider));
+          setTokenStats(calculateTokenStats(history.current, prompt, undefined, provider, usageEntries));
         });
         try {
           const map = buildRepoMap(process.cwd());
@@ -1080,7 +1102,7 @@ export function Chat({ onChangeKeys, mode: initialMode = "build", initialPrompt 
 
     // Update token stats immediately for the user prompt
     const provider = getDefaultProvider() || "groq";
-    setTokenStats(calculateTokenStats(history.current, systemPromptRef.current, undefined, provider));
+    setTokenStats(calculateTokenStats(history.current, systemPromptRef.current, undefined, provider, usageEntries));
 
     // ── Route through orchestrator ───────────────────────────────────────
     // Both build and plan mode now go through the orchestrator.
@@ -1198,6 +1220,7 @@ export function Chat({ onChangeKeys, mode: initialMode = "build", initialPrompt 
                 stepIndex: event.step.index,
                 totalSteps: event.totalSteps,
                 description: event.step.description,
+                modelTier: event.modelTier,
               },
             ]);
             break;
@@ -1212,6 +1235,7 @@ export function Chat({ onChangeKeys, mode: initialMode = "build", initialPrompt 
                 verified: event.verification.verified,
                 mismatches: event.verification.mismatches,
                 verboseFeedback: event.verification.verboseFeedback,
+                modelTier: event.modelTier,
               },
             ]);
             // Mark step as completed if verification succeeded
@@ -1332,6 +1356,18 @@ export function Chat({ onChangeKeys, mode: initialMode = "build", initialPrompt 
             } else if (agentEvent.kind === "finish") {
               if (agentEvent.usage) {
                 hasActualUsage = true;
+                const modelId = getActiveModelId(provider);
+                
+                // Add to usage entries for cost tracking
+                setUsageEntries((prev) => [
+                  ...prev,
+                  {
+                    model: modelId,
+                    inputTokens: agentEvent.usage.inputTokens,
+                    outputTokens: agentEvent.usage.outputTokens,
+                  },
+                ]);
+                
                 setTokenStats(
                   calculateTokenStats(
                     history.current,
@@ -1340,7 +1376,8 @@ export function Chat({ onChangeKeys, mode: initialMode = "build", initialPrompt 
                       inputTokens: agentEvent.usage.inputTokens,
                       outputTokens: agentEvent.usage.outputTokens,
                     },
-                    provider
+                    provider,
+                    usageEntries
                   )
                 );
               }
@@ -1373,7 +1410,7 @@ export function Chat({ onChangeKeys, mode: initialMode = "build", initialPrompt 
 
       // Update token stats at the end if actual usage wasn't received
       if (!hasActualUsage) {
-        setTokenStats(calculateTokenStats(history.current, systemPromptRef.current, undefined, provider));
+        setTokenStats(calculateTokenStats(history.current, systemPromptRef.current, undefined, provider, usageEntries));
       }
     } catch (err: any) {
       setLog((l) => [...l, { kind: "error", text: err.message ?? String(err) }]);
@@ -1558,9 +1595,33 @@ export function Chat({ onChangeKeys, mode: initialMode = "build", initialPrompt 
                 </Box>
               )}
 
+              {/* File Search Overlay */}
+              {showFileSearch && (
+                <FileSearchOverlay
+                  inputValue={input}
+                  cursorPosition={input.length}
+                  onSelectFile={(filePath) => {
+                    // Replace @<query> at the end of input with the selected file path
+                    const atMatch = input.match(/@([^\s]*)$/);
+                    if (atMatch) {
+                      const beforeAt = input.slice(0, atMatch.index);
+                      const newInput = beforeAt + filePath;
+                      setInput(newInput);
+                    }
+                    setShowFileSearch(false);
+                  }}
+                  onClose={() => setShowFileSearch(false)}
+                />
+              )}
+
               <Box borderStyle="round" borderColor="#3B5FE0" paddingX={1} paddingY={1} backgroundColor="#15171C">
                 <Text color="#3B5FE0" bold>{"❯ "}</Text>
-                <TextInput value={input} onChange={setInput} onSubmit={handleSubmit} />
+                <TextInput 
+                  value={input} 
+                  onChange={setInput} 
+                  onSubmit={handleSubmit}
+                  placeholder={""}
+                />
                 {busy && <ThinkingLoader />}
               </Box>
 
@@ -1802,10 +1863,14 @@ function LogLine({ entry }: { entry: LogEntry }) {
 
   if (entry.kind === "step-progress") {
     // Shows which step is currently executing (e.g., "Step 2/5: ...")
+    const tierLabel = entry.modelTier === "local" ? "[local]" : entry.modelTier === "hosted" ? "[hosted]" : "";
+    const tierColor = entry.modelTier === "local" ? "green" : entry.modelTier === "hosted" ? "yellow" : "gray";
+    
     return (
       <Box marginBottom={1} flexDirection="row" gap={1}>
         <Text color="#3B5FE0" bold>▶</Text>
         <Text color="#E6E6E6" bold>Step {entry.stepIndex + 1}/{entry.totalSteps}:</Text>
+        {tierLabel && <Text color={tierColor} bold>{tierLabel}</Text>}
         <Text color="gray">{entry.description}</Text>
       </Box>
     );
@@ -1813,10 +1878,14 @@ function LogLine({ entry }: { entry: LogEntry }) {
 
   if (entry.kind === "verification") {
     // Shows verification result — green check for pass, red X for fail
+    const tierLabel = entry.modelTier === "local" ? "[local]" : entry.modelTier === "hosted" ? "[hosted]" : "";
+    const tierColor = entry.modelTier === "local" ? "green" : entry.modelTier === "hosted" ? "yellow" : "gray";
+    
     return (
       <Box marginBottom={1} flexDirection="column">
         <Box flexDirection="row" gap={1}>
           <Text color={entry.verified ? "#5FB87A" : "red"}>{entry.verified ? "✓" : "✗"}</Text>
+          {tierLabel && <Text color={tierColor} bold>{tierLabel}</Text>}
           <Text color={entry.verified ? "#5FB87A" : "red"} bold>
             Step {entry.stepIndex + 1} verification {entry.verified ? "passed" : "failed"}
           </Text>

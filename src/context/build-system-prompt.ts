@@ -38,6 +38,7 @@ import { getContextMode } from "../config/api-keys.js";
 import { existsSync, readFileSync } from "fs";
 import { resolve } from "path";
 import { platform } from "os";
+import { loadProjectConventions } from "./load-project-conventions.js";
 
 // ─── Agent Role Type ─────────────────────────────────────────────────────────
 //
@@ -164,6 +165,13 @@ export async function buildSystemPrompt(
     repoMap = buildRepoMap(projectRoot);
   }
 
+  // Load project conventions from ZIZOU.md if present
+  let projectConventions = "";
+  const conventions = await loadProjectConventions(projectRoot);
+  if (conventions) {
+    projectConventions = `\n\n--- PROJECT CONVENTIONS (from ZIZOU.md) ---\n${conventions}\n--- END PROJECT CONVENTIONS ---`;
+  }
+
   const { os, shell } = getOSInfo();
 
   // Injected at runtime so the model always has the real workspace path.
@@ -197,8 +205,8 @@ Both will work — relative paths are resolved to the workspace root automatical
   // said "no" or because scanRepo found no source files), tell the model
   // to use tools for exploration instead.
   if (!repoMap) {
-    return `${BASE_INSTRUCTIONS}${SESSION_CONTEXT}${pinnedText}\n\n(Repo map is disabled for this context configuration, or no source files were found. Use tools like listDir to explore.)`;
+    return `${BASE_INSTRUCTIONS}${SESSION_CONTEXT}${projectConventions}${pinnedText}\n\n(Repo map is disabled for this context configuration, or no source files were found. Use tools like listDir to explore.)`;
   }
 
-  return `${BASE_INSTRUCTIONS}${SESSION_CONTEXT}${pinnedText}\n\n--- REPO MAP ---\n${repoMap}\n--- END REPO MAP ---`;
+  return `${BASE_INSTRUCTIONS}${SESSION_CONTEXT}${projectConventions}${pinnedText}\n\n--- REPO MAP ---\n${repoMap}\n--- END REPO MAP ---`;
 }

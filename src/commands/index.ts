@@ -48,6 +48,8 @@ import {
   revertSessionChanges,
   formatColoredDiff,
 } from "../checkpoint/manager.js";
+import { performUndo, performRedo, getUndoStackSize, getRedoStackSize, clearStacks } from "../checkpoints/undo-redo-stack.js";
+import { exportTranscript } from "./export-transcript.js";
 import type { ConfirmFn } from "../tools/index.js";
 import { sessionPermissions } from "../tools/index.js";
 import type { FilePatch } from "../checkpoint/types.js";
@@ -75,6 +77,9 @@ export const SLASH_COMMANDS: SlashCommandInfo[] = [
   { command: "/clear", description: "Reset conversation history & start new session" },
   { command: "/session", description: "Session management (new, list, switch, delete)" },
   { command: "/checkpoint", description: "Checkpoint management (list, diff, restore, branch, switch, delete, revert)" },
+  { command: "/undo", description: "Undo the last step's file changes" },
+  { command: "/redo", description: "Redo the last undone step" },
+  { command: "/export", description: "Export conversation transcript to markdown" },
   { command: "/permissions", description: "View or clear active session permissions" },
   { command: "/help", description: "Show available commands & active provider" },
   { command: "/exit", description: "Close Zizou" },
@@ -155,7 +160,8 @@ export interface CommandContext {
     history: ModelMessage[],
     systemPrompt: string,
     actualUsage?: { inputTokens: number; outputTokens: number },
-    provider?: ProviderChoice
+    provider?: ProviderChoice,
+    usageEntries?: Array<{ model: string; inputTokens: number; outputTokens: number }>
   ) => any;
 }
 
@@ -254,6 +260,9 @@ export async function handleSlashCommand(ctx: CommandContext): Promise<boolean> 
   /prompt                   Dump the full system prompt sent to the LLM
   /skills                   List available custom agent skills
   /clear                    Reset conversation history & start new session
+  /undo                     Undo the last step's file changes
+  /redo                     Redo the last undone step
+  /export                   Export conversation transcript to markdown
   /exit                     Close Zizou
 
   Mode:    ${currentMode === "plan" ? "◆ Plan" : "● Build"}
@@ -594,6 +603,8 @@ ${cmdList}
 
       try {
         const session = createSession(sessionArg);
+        // Clear undo/redo stacks when creating a new session
+        clearStacks();
         ctx.onSessionChange?.(session.name);
         ctx.setLog((l: LogEntry[]) => [
           ...l,
@@ -645,6 +656,8 @@ ${cmdList}
 
       try {
         const session = switchSession(sessionArg);
+        // Clear undo/redo stacks when switching sessions
+        clearStacks();
         ctx.onSessionChange?.(session.name);
         ctx.setLog((l: LogEntry[]) => [
           ...l,
@@ -1054,6 +1067,95 @@ ${cmdList}
       { kind: "user", text },
       { kind: "assistant", text: "Usage:\n  /checkpoint list              List all checkpoints\n  /checkpoint diff               Show local uncommitted changes\n  /checkpoint diff <id>         Show changes in checkpoint\n  /checkpoint diff <from> <to>  Compare two checkpoints\n  /checkpoint restore <id>      Restore to checkpoint\n  /checkpoint branch <name>     Create new branch\n  /checkpoint switch <branch>   Switch to branch\n  /checkpoint delete <id>       Delete checkpoint\n  /checkpoint revert            Revert all uncommitted changes" },
     ]);
+    return true;
+  }
+
+  // ── /undo — undo the last step's file changes ───────────────────────────────
+  if (command === "undo") {
+    const undoSize = getUndoStackSize();
+    
+    if (undoSize === 0) {
+      ctx.setLog((l: LogEntry[]) => [
+        ...l,
+        { kind: "user", text },
+        { kind: "assistant", text: "Nothing to undo — no steps have been executed yet." },
+      ]);
+      return true;
+    }
+
+    try {
+      const snapshot = performUndo();
+      if (snapshot) {
+        const fileCount = snapshot.fileDiffs.length;
+        const fileNames = snapshot.fileDiffs.map(d => d.path).join(", ");
+        ctx.setLog((l: LogEntry[]) => [
+          ...l,
+          { kind: "user", text },
+          { kind: "assistant", text: `Undid step ${snapshot.stepId}.\nReverted ${fileCount} file(s): ${fileNames}` },
+        ]);
+      }
+    } catch (error) {
+      ctx.setLog((l: LogEntry[]) => [
+        ...l,
+        { kind: "user", text },
+        { kind: "error", text: `Failed to undo: ${error instanceof Error ? error.message : "Unknown error"}` },
+      ]);
+    }
+    return true;
+  }
+
+  // ── /redo — redo the last undone step ───────────────────────────────────────
+  if (command === "redo") {
+    const redoSize = getRedoStackSize();
+    
+    if (redoSize === 0) {
+      ctx.setLog((l: LogEntry[]) => [
+        ...l,
+        { kind: "user", text },
+        { kind: "assistant", text: "Nothing to redo — no steps have been undone." },
+      ]);
+      return true;
+    }
+
+    try {
+      const snapshot = performRedo();
+      if (snapshot) {
+        const fileCount = snapshot.fileDiffs.length;
+        const fileNames = snapshot.fileDiffs.map(d => d.path).join(", ");
+        ctx.setLog((l: LogEntry[]) => [
+          ...l,
+          { kind: "user", text },
+          { kind: "assistant", text: `Redid step ${snapshot.stepId}.\nReapplied ${fileCount} file(s): ${fileNames}` },
+        ]);
+      }
+    } catch (error) {
+      ctx.setLog((l: LogEntry[]) => [
+        ...l,
+        { kind: "user", text },
+        { kind: "error", text: `Failed to redo: ${error instanceof Error ? error.message : "Unknown error"}` },
+      ]);
+    }
+    return true;
+  }
+
+  // ── /export — export conversation transcript to markdown ───────────────────
+  if (command === "export") {
+    try {
+      const conversation = ctx.history.current;
+      const filepath = exportTranscript(conversation);
+      
+      ctx.setLog((l: LogEntry[]) => [
+        ...l,
+        { kind: "user", text },
+        { kind: "assistant", text: `Conversation exported to:\n${filepath}` },
+      ]);
+    } catch (error) {
+      ctx.setLog((l: LogEntry[]) => [
+        ...l,
+        { kind: "user", text },
+        { kind: "error", text: `Failed to export: ${error instanceof Error ? error.message : "Unknown error"}` },
+      ]);
+    }
     return true;
   }
 

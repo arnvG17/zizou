@@ -65,6 +65,8 @@ import { type AgentEvent } from "./run-turn.js";
 import { SessionLogger } from "./debug/index.js";
 import { createCheckpoint } from "../checkpoint/manager.js";
 import { captureFileState } from "../checkpoint/patcher.js";
+import { captureBeforeState, buildSnapshot } from "../checkpoints/step-snapshot.js";
+import { pushSnapshot, clearStacks } from "../checkpoints/undo-redo-stack.js";
 import { resolve } from "path";
 
 // ─── Constants ───────────────────────────────────────────────────────────────
@@ -105,11 +107,11 @@ export type OrchestratorEvent =
 
   // Both modes: a step is about to begin execution.
   // The UI shows progress like "Step 2/5: Create component file".
-  | { kind: "step-start"; step: PlanStep; totalSteps: number }
+  | { kind: "step-start"; step: PlanStep; totalSteps: number; modelTier?: "hosted" | "local" }
 
   // Both modes: a step has been verified after execution.
   // The UI shows whether verification passed or failed.
-  | { kind: "step-verified"; step: PlanStep; verification: VerificationResult }
+  | { kind: "step-verified"; step: PlanStep; verification: VerificationResult; modelTier?: "hosted" | "local" }
 
   // Emitted when the conversation history is updated (e.g. at the end of a build-mode step)
   | { kind: "history-updated"; history: ModelMessage[] }
@@ -241,16 +243,21 @@ async function* runBuildMode(
   };
 
   // Signal that we're starting the (only) step
-  yield { kind: "step-start", step: syntheticStep, totalSteps: 1 };
+  const startModelTier: "hosted" | "local" = provider === "ollama" ? "local" : "hosted";
+  yield { kind: "step-start", step: syntheticStep, totalSteps: 1, modelTier: startModelTier };
 
   // Capture pre-execution filesystem state.
   // In build mode, targetFiles is empty, so this captures nothing upfront.
   // The verifier will still check claimedFiles from the StepResult.
   const preSnapshots = capturePreSnapshot(syntheticStep, context.projectRoot);
 
-  // Capture old file states for checkpoint creation
+  // Capture old file states for checkpoint creation and undo/redo
   // We need to capture content before execution to create proper patches
   const oldFileStates = new Map<string, string | null>();
+  // In build mode, we don't know targetFiles upfront, so we capture an empty before state
+  // The snapshot will be built after execution using claimedFiles
+  const beforeStates = new Map<string, string | null>();
+  
   // Execute the step via the executor
   const stepResult = await executeStep(
     syntheticStep,
@@ -282,11 +289,21 @@ async function* runBuildMode(
   );
 
   // Report verification result
-  yield { kind: "step-verified", step: syntheticStep, verification };
+  yield { kind: "step-verified", step: syntheticStep, verification, modelTier: stepResult.modelTier };
 
   if (verification.verified) {
     try {
       createCheckpoint(syntheticStep.description, stepResult.claimedFiles, stepResult.oldFileStates);
+      
+      // Push undo/redo snapshot after successful verification
+      // Use the oldFileStates captured by the executor, and build the after state by reading current disk
+      const touchedPaths = stepResult.claimedFiles.length > 0 ? stepResult.claimedFiles : syntheticStep.targetFiles;
+      const snapshot = buildSnapshot(
+        syntheticStep.index.toString(),
+        stepResult.oldFileStates || new Map(),
+        touchedPaths
+      );
+      pushSnapshot(snapshot);
     } catch (error) {
       // Log but don't fail the step if checkpoint creation fails
       console.warn("Failed to create checkpoint for step:", error);
@@ -400,18 +417,18 @@ async function* runPlanMode(
       yield { 
         kind: "step-verified", 
         step, 
-        verification: { verified: true, mismatches: [] } 
+        verification: { verified: true, mismatches: [] },
+        modelTier: "hosted" // Default for skipped steps
       };
       continue;
     }
 
     // Signal step start
-    yield { kind: "step-start", step, totalSteps };
+    const stepModelTier: "hosted" | "local" = provider === "ollama" ? "local" : "hosted";
+    yield { kind: "step-start", step, totalSteps, modelTier: stepModelTier };
 
     // Capture pre-execution filesystem state for this step's target files
     const preSnapshots = capturePreSnapshot(step, context.projectRoot);
-
-
 
     // Execute the step
     const stepResult = await executeStep(
@@ -440,7 +457,7 @@ async function* runPlanMode(
     // Report verification result — in plan mode we continue even if
     // verification fails (the user already approved the plan), but we
     // still report the result so they can see what went wrong.
-    yield { kind: "step-verified", step, verification };
+    yield { kind: "step-verified", step, verification, modelTier: stepResult.modelTier };
 
     // ── Checkpoint creation on successful verification ─────────────────
     //
@@ -449,6 +466,15 @@ async function* runPlanMode(
     if (verification.verified) {
       try {
         createCheckpoint(step.description, stepResult.claimedFiles, stepResult.oldFileStates);
+        
+        // Push undo/redo snapshot after successful verification
+        // Use the oldFileStates captured by the executor, and build the after state by reading current disk
+        const snapshot = buildSnapshot(
+          step.index.toString(),
+          stepResult.oldFileStates || new Map(),
+          stepResult.claimedFiles.length > 0 ? stepResult.claimedFiles : step.targetFiles
+        );
+        pushSnapshot(snapshot);
       } catch (error) {
         // Log but don't fail the step if checkpoint creation fails
         console.warn("Failed to create checkpoint for step:", error);
