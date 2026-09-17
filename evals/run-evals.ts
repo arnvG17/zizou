@@ -146,13 +146,13 @@ async function drainOrchestrator(
   const allEvents: OrchestratorEvent[] = [];
 
   // Phase 1: Initial invocation
-  const gen = runOrchestrator(
-    task.prompt,
+  const gen = runOrchestrator({
+    userPrompt: task.prompt,
     modeContext,
     context,
     model,
-    autoConfirm,
-  );
+    onConfirm: autoConfirm,
+  });
 
   for await (const event of gen) {
     allEvents.push(event);
@@ -183,14 +183,14 @@ async function drainOrchestrator(
         budget: "default",
       };
 
-      const gen2 = runOrchestrator(
-        task.prompt,
+      const gen2 = runOrchestrator({
+        userPrompt: task.prompt,
         modeContext,
-        context2,
+        context: context2,
         model,
-        autoConfirm,
-        mappedAnswers,
-      );
+        onConfirm: autoConfirm,
+        clarificationAnswers: mappedAnswers,
+      });
 
       for await (const event2 of gen2) {
         allEvents.push(event2);
@@ -205,15 +205,15 @@ async function drainOrchestrator(
             budget: "default",
           };
 
-          const gen3 = runOrchestrator(
-            task.prompt,
+          const gen3 = runOrchestrator({
+            userPrompt: task.prompt,
             modeContext,
-            context3,
+            context: context3,
             model,
-            autoConfirm,
-            task.clarifierAnswers ?? {},
-            steps,
-          );
+            onConfirm: autoConfirm,
+            clarificationAnswers: task.clarifierAnswers ?? {},
+            approvedPlan: steps,
+          });
 
           for await (const event3 of gen3) {
             allEvents.push(event3);
@@ -234,15 +234,15 @@ async function drainOrchestrator(
         budget: "default",
       };
 
-      const gen2 = runOrchestrator(
-        task.prompt,
+      const gen2 = runOrchestrator({
+        userPrompt: task.prompt,
         modeContext,
-        context2,
+        context: context2,
         model,
-        autoConfirm,
-        task.clarifierAnswers ?? {},
-        steps,
-      );
+        onConfirm: autoConfirm,
+        clarificationAnswers: task.clarifierAnswers ?? {},
+        approvedPlan: steps,
+      });
 
       for await (const event2 of gen2) {
         allEvents.push(event2);

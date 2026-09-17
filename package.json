@@ -1,6 +1,6 @@
 {
   "name": "zizou-ai",
-  "version": "1.2.11",
+  "version": "1.2.12",
   "type": "module",
   "description": "An open-source AI coding agent CLI tool",
   "bin": {
@@ -13,6 +13,7 @@
     "dev": "bun run src/cli.tsx",
     "dev-harness": "bun run src/dev-harness.ts",
     "typecheck": "tsc --noEmit -p tsconfig.json",
+    "test": "bun test src/",
     "build": "bun run build.ts",
     "eval": "bun run evals/run-evals.ts",
     "prepublishOnly": "npm run build"
@@ -33,6 +34,7 @@
     "zod": "^3.24.0"
   },
   "devDependencies": {
+    "@types/bun": "^1.4.2",
     "@types/node": "^22.0.0",
     "@types/react": "^19.2.17",
     "typescript": "^6.0.3"

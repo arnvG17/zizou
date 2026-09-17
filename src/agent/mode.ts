@@ -2,7 +2,17 @@
 //
 // LAYER: agent/
 //
-// Defines the two operating modes for the orchestration loop:
+// Defines the three operating modes for the orchestration loop:
+//
+//   "chat"  — Conversation only. Tools are disabled entirely; nothing on
+//             disk can change. Entered automatically for greetings and
+//             chit-chat (a deterministic regex, see orchestrator.ts), or
+//             pinned explicitly with /chat.
+//
+//             This path always existed, but it reported itself to the UI as
+//             mode "build", so the badge claimed a file-modifying mode was
+//             running when tools were switched off. A mode the user can see
+//             and pin is worth more than a hidden branch.
 //
 //   "build" — The default. Synthesizes a single PlanStep from the raw user
 //             prompt and hands it straight to the executor. No clarifier,
@@ -36,10 +46,11 @@
 // ─── Types ───────────────────────────────────────────────────────────────────
 
 /**
- * The two operating modes for the orchestration loop.
- * "build" = single-step, no planning. "plan" = full multi-step with review.
+ * The three operating modes for the orchestration loop.
+ * "chat" = conversation, tools disabled. "build" = single-step, no planning.
+ * "plan" = full multi-step with review.
  */
-export type Mode = "build" | "plan";
+export type Mode = "chat" | "build" | "plan";
 
 /**
  * Captures both the active mode AND how we got there — important because

@@ -198,7 +198,7 @@ export function ApiKeySetup({ onComplete }: ApiKeySetupProps) {
 
       // Validate by generating a single token
       const lm = resolveModel("ollama");
-      await generateText({ model: lm, prompt: "hi", maxTokens: 1 });
+      await generateText({ model: lm, prompt: "hi", maxOutputTokens: 1 });
       onComplete();
     } catch (err: any) {
       let msg = err.message ?? String(err);
@@ -221,7 +221,7 @@ export function ApiKeySetup({ onComplete }: ApiKeySetupProps) {
   // ── OpenRouter-specific key validation ──────────────────────────────────
   // Uses the dedicated /api/v1/key endpoint instead of a generative ping.
   // Free model pings fail for many reasons (data policy, overloaded endpoints,
-  // maxTokens:1 quirks) — the /key endpoint is fast, reliable, and keycheck-only.
+  // maxOutputTokens:1 quirks) — the /key endpoint is fast, reliable, and keycheck-only.
   const validateOpenRouterKey = async (key: string): Promise<void> => {
     const res = await fetch("https://openrouter.ai/api/v1/key", {
       headers: { Authorization: `Bearer ${key}` },
@@ -257,9 +257,9 @@ export function ApiKeySetup({ onComplete }: ApiKeySetupProps) {
         await validateOpenRouterKey(value.trim());
       } else {
         // For all other providers, do a tiny generative ping.
-        // maxTokens:10 avoids the known maxTokens:1 edge-case failures.
+        // maxOutputTokens:10 avoids the known maxOutputTokens:1 edge-case failures.
         const model = resolveModel(provider);
-        await generateText({ model, prompt: "hi", maxTokens: 10, maxRetries: 0 });
+        await generateText({ model, prompt: "hi", maxOutputTokens: 10, maxRetries: 0 });
       }
 
       setDefaultProvider(provider);

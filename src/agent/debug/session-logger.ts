@@ -232,10 +232,16 @@ export class SessionLogger {
   }
 
   /**
-   * Log a subsequent LLM round request (Round 2+), showing the verbatim conversation history
-   * including previous assistant tool calls and tool results sent back to the LLM.
+   * Log the verbatim conversation exchanged with the LLM during a step —
+   * assistant tool calls and the tool results fed back in.
+   *
+   * Called ONCE after the turn with the canonical ModelMessage[] that runTurn
+   * returns (the AI SDK's own responseMessages). It used to be called per
+   * round with a history the executor rebuilt by hand from the event stream;
+   * that reconstruction was ~120 lines re-deriving what the SDK already gives
+   * us, and it could drift from what was actually sent.
    */
-  static logLLMRoundStart(roundIndex: number, system: string, history: ModelMessage[]): void {
+  static logLLMConversation(system: string, history: ModelMessage[]): void {
     const historyText = history.map((msg, i) => {
       const role = msg.role.toUpperCase();
       if (typeof msg.content === "string") {
@@ -262,7 +268,7 @@ export class SessionLogger {
     }).join("\n" + "  " + "─".repeat(48) + "\n");
 
     this.append(
-      subTitleBlock(`LLM SUBSEQUENT REQUEST (ROUND ${roundIndex})`) +
+      subTitleBlock("LLM CONVERSATION (MESSAGES EXCHANGED)") +
       `[SYSTEM PROMPT]\n` +
       `----------------------------------------\n` +
       `${system}\n` +

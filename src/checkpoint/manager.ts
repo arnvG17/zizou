@@ -9,7 +9,7 @@ import { randomUUID } from "crypto";
 import { readdirSync, statSync } from "fs";
 import { join, relative } from "path";
 import { loadCheckpointHistory, saveCheckpointHistory } from "./storage.js";
-import { captureFileState, restoreFileState, createFilePatch, applyFilePatch } from "./patcher.js";
+import { captureFileState, restoreFileState, createFilePatch } from "./patcher.js";
 import type { Checkpoint, CheckpointBranch, FilePatch } from "./types.js";
 
 /**
@@ -20,7 +20,12 @@ import type { Checkpoint, CheckpointBranch, FilePatch } from "./types.js";
  * @param changedFiles - List of files that were changed
  * @param oldFileStates - Map of file paths to their content before the change (optional, will capture if not provided)
  */
-export function createCheckpoint(description: string, changedFiles: string[], oldFileStates?: Map<string, string | null>): Checkpoint {
+export function createCheckpoint(
+  description: string,
+  changedFiles: string[],
+  oldFileStates?: Map<string, string | null>,
+  sessionId?: string,
+): Checkpoint {
   const history = loadCheckpointHistory();
   
   // Get the active branch
@@ -55,7 +60,14 @@ export function createCheckpoint(description: string, changedFiles: string[], ol
   // Capture file states and create patches
   const patches: FilePatch[] = [];
   for (const filePath of changedFiles) {
-    const oldContent = oldFileStates?.get(filePath) ?? captureFileState(filePath);
+    // Use `has`, not `??`. A recorded null means "this file did not exist
+    // before the change" — a legitimate value. `??` treated it as absent and
+    // fell through to captureFileState(), which returns the file's CURRENT
+    // content, making oldContent === newContent so no patch was written at
+    // all. Every file creation was silently dropped from the checkpoint.
+    const oldContent = oldFileStates?.has(filePath)
+      ? oldFileStates.get(filePath)!
+      : captureFileState(filePath);
     const newContent = captureFileState(filePath); // Current state after change
     
     // Only create a patch if the file actually changed
@@ -72,15 +84,21 @@ export function createCheckpoint(description: string, changedFiles: string[], ol
     stepIndex,
     description,
     timestamp: new Date().toISOString(),
+    sessionId,
     patches,
   };
   
   // Add to history
   history.checkpoints.set(checkpoint.id, checkpoint);
-  
+
   // Update branch head
   const branch = history.branches.find(b => b.id === branchId)!;
   if (branch.rootCheckpointId === "") {
+    branch.rootCheckpointId = checkpoint.id;
+  } else if (branch.headCheckpointId === "" && parentId === null) {
+    // The user undid every checkpoint and then made a new change. Like
+    // committing after a reset: this becomes the branch's new root, and the
+    // undone chain stays in history but is no longer reachable from the head.
     branch.rootCheckpointId = checkpoint.id;
   }
   branch.headCheckpointId = checkpoint.id;
@@ -98,46 +116,177 @@ export function createCheckpoint(description: string, changedFiles: string[], ol
 export function restoreCheckpoint(checkpointId: string): void {
   const history = loadCheckpointHistory();
   const targetCheckpoint = history.checkpoints.get(checkpointId);
-  
+
   if (!targetCheckpoint) {
     throw new Error(`Checkpoint ${checkpointId} not found`);
   }
-  
-  // Collect all checkpoints from the branch's root to the target
+
   const branch = history.branches.find(b => b.id === targetCheckpoint.branchId);
   if (!branch) {
     throw new Error(`Branch ${targetCheckpoint.branchId} not found`);
   }
-  
-  // Build the chain of checkpoints from root to target
-  const checkpointChain: Checkpoint[] = [];
-  let currentId = checkpointId;
-  
-  while (currentId) {
-    const checkpoint = history.checkpoints.get(currentId);
+
+  // Restoring has TWO halves, and only the first used to be implemented:
+  //
+  //   1. Files the target checkpoint knows about → set to their state AT the
+  //      target (replay root→target). This is what reconstructFileStates does.
+  //
+  //   2. Files first touched AFTER the target → must be rolled back, or they
+  //      are left on disk at their newer state. Replaying forward can never
+  //      undo them, because the target's chain has no patch mentioning them.
+  //      Without this, restoring backwards silently leaves newer edits behind
+  //      and history.json permanently disagrees with the working tree.
+  const targetStates = reconstructFileStates(checkpointId);
+
+  // Walk from the head that is currently on disk back toward the target,
+  // recording each file's pre-change content. We walk backwards, so later
+  // writes overwrite earlier ones and the value that survives is from the
+  // checkpoint CLOSEST to the target — i.e. the file's state at the target.
+  const activeBranch = history.branches.find(b => b.id === history.activeBranchId) ?? branch;
+  const rollback = new Map<string, string | null>();
+  let cursor: string | null = activeBranch.headCheckpointId;
+  const seen = new Set<string>(); // guard against a malformed/cyclic chain
+  while (cursor && cursor !== checkpointId && !seen.has(cursor)) {
+    seen.add(cursor);
+    const checkpoint: Checkpoint | undefined = history.checkpoints.get(cursor);
     if (!checkpoint) break;
-    checkpointChain.unshift(checkpoint);
-    currentId = checkpoint.parentId || "";
-  }
-  
-  // Restore to the target state by applying all patches up to the target
-  // First, revert to the branch root (no changes)
-  // Then apply patches up to the target
-  for (const checkpoint of checkpointChain) {
     for (const patch of checkpoint.patches) {
-      applyFilePatch(patch);
+      rollback.set(patch.filePath, patch.oldContent);
+    }
+    cursor = checkpoint.parentId;
+  }
+
+  // Half 1: authoritative state at the target.
+  for (const [filePath, content] of targetStates) {
+    restoreFileState(filePath, content);
+  }
+
+  // Half 2: everything the target never knew about, rolled back to its
+  // pre-change content. targetStates wins on any overlap.
+  for (const [filePath, content] of rollback) {
+    if (!targetStates.has(filePath)) {
+      restoreFileState(filePath, content);
     }
   }
-  
-  // Update the active branch's head to the restored checkpoint
+
+  // The restored checkpoint is now the head of its branch.
   branch.headCheckpointId = checkpointId;
-  
-  // If restoring to a checkpoint that's not the current head, create a new branch
-  if (checkpointId !== branch.headCheckpointId) {
-    // This is handled by the caller - they can create a new branch if needed
-  }
-  
+
   saveCheckpointHistory(history);
+}
+
+// ─── Undo / redo ─────────────────────────────────────────────────────────────
+//
+// Undo and redo are POINTER MOVES along the checkpoint chain — not a separate
+// stack. There used to be a second store (checkpoints/undo-redo-stack.ts, a
+// Conf file under <cwd>/.zizou) holding its own snapshots, and the two never
+// talked to each other:
+//
+//   - /undo restored files but left history.json claiming the undone content
+//     was still current, so /checkpoint diff reported the undone step as a
+//     fresh local modification and /checkpoint revert would RE-APPLY it.
+//   - /checkpoint restore changed the disk without touching the stacks, so a
+//     later /undo reverted to a "before" state that no longer matched reality.
+//
+// With one chain and one head pointer, that divergence cannot be expressed.
+//
+// A head of "" means "before the root checkpoint" — every change undone.
+
+/** The checkpoint the working tree currently reflects, or null if fully undone. */
+function getHeadCheckpoint(history: ReturnType<typeof loadCheckpointHistory>): Checkpoint | null {
+  const branch = history.branches.find(b => b.id === history.activeBranchId);
+  if (!branch || !branch.headCheckpointId) return null;
+  return history.checkpoints.get(branch.headCheckpointId) ?? null;
+}
+
+/** The checkpoint that would be re-applied by redo, if any. */
+function getRedoTarget(history: ReturnType<typeof loadCheckpointHistory>): Checkpoint | null {
+  const branch = history.branches.find(b => b.id === history.activeBranchId);
+  if (!branch) return null;
+
+  // Fully undone: the next thing forward is the branch root.
+  if (!branch.headCheckpointId) {
+    return history.checkpoints.get(branch.rootCheckpointId) ?? null;
+  }
+
+  // Otherwise the child of the current head on this branch. If a restore
+  // created several children, take the most recent — that is the one the
+  // user was last working on.
+  const children = [...history.checkpoints.values()]
+    .filter(c => c.parentId === branch.headCheckpointId && c.branchId === branch.id)
+    .sort((a, b) => new Date(b.timestamp).getTime() - new Date(a.timestamp).getTime());
+
+  return children[0] ?? null;
+}
+
+/** How many checkpoints can still be undone. */
+export function getUndoDepth(): number {
+  const history = loadCheckpointHistory();
+  let depth = 0;
+  let cursor = getHeadCheckpoint(history);
+  const seen = new Set<string>();
+  while (cursor && !seen.has(cursor.id)) {
+    seen.add(cursor.id);
+    depth++;
+    cursor = cursor.parentId ? history.checkpoints.get(cursor.parentId) ?? null : null;
+  }
+  return depth;
+}
+
+/** How many checkpoints can be redone. */
+export function getRedoDepth(): number {
+  const history = loadCheckpointHistory();
+  let depth = 0;
+  let cursor = getRedoTarget(history);
+  const seen = new Set<string>();
+  while (cursor && !seen.has(cursor.id)) {
+    seen.add(cursor.id);
+    depth++;
+    const next: Checkpoint | undefined = [...history.checkpoints.values()]
+      .filter(c => c.parentId === cursor!.id && c.branchId === cursor!.branchId)
+      .sort((a, b) => new Date(b.timestamp).getTime() - new Date(a.timestamp).getTime())[0];
+    cursor = next ?? null;
+  }
+  return depth;
+}
+
+/**
+ * Reverts the head checkpoint's changes and moves the head to its parent.
+ * Returns the checkpoint that was undone, or null if there was nothing to undo.
+ */
+export function undoCheckpoint(): Checkpoint | null {
+  const history = loadCheckpointHistory();
+  const branch = history.branches.find(b => b.id === history.activeBranchId);
+  const head = getHeadCheckpoint(history);
+  if (!branch || !head) return null;
+
+  // Reverting a patch means restoring each file to its pre-change content.
+  for (const patch of head.patches) {
+    restoreFileState(patch.filePath, patch.oldContent);
+  }
+
+  branch.headCheckpointId = head.parentId ?? "";
+  saveCheckpointHistory(history);
+  return head;
+}
+
+/**
+ * Re-applies the next checkpoint forward and moves the head onto it.
+ * Returns the checkpoint that was redone, or null if there was nothing to redo.
+ */
+export function redoCheckpoint(): Checkpoint | null {
+  const history = loadCheckpointHistory();
+  const branch = history.branches.find(b => b.id === history.activeBranchId);
+  const target = getRedoTarget(history);
+  if (!branch || !target) return null;
+
+  for (const patch of target.patches) {
+    restoreFileState(patch.filePath, patch.newContent);
+  }
+
+  branch.headCheckpointId = target.id;
+  saveCheckpointHistory(history);
+  return target;
 }
 
 /**
@@ -179,19 +328,20 @@ export function createBranch(name: string, fromCheckpointId: string): Checkpoint
  * Switches the active branch.
  */
 export function switchBranch(branchId: string): void {
-  const history = loadCheckpointHistory();
-  const branch = history.branches.find(b => b.id === branchId);
-  
+  const branch = loadCheckpointHistory().branches.find(b => b.id === branchId);
+
   if (!branch) {
     throw new Error(`Branch ${branchId} not found`);
   }
-  
-  // Restore to the branch's head
+
+  // Restore to the branch's head. This loads and saves history itself.
   restoreCheckpoint(branch.headCheckpointId);
-  
-  // Update active branch
+
+  // Re-load AFTER the restore. Holding the pre-restore history object here
+  // and saving it would clobber the head pointer restoreCheckpoint just wrote.
+  const history = loadCheckpointHistory();
   history.activeBranchId = branchId;
-  
+
   saveCheckpointHistory(history);
 }
 
@@ -507,31 +657,54 @@ export function deleteCheckpoint(checkpointId: string): void {
 
 /**
  * Reconstructs the state of the workspace before the session began (at the parent of the root checkpoint).
+ *
+ * Returns null when there is NO session baseline to compare against — i.e. the
+ * active branch has no root checkpoint, or that root has no parent (the normal
+ * case for a fresh project whose first checkpoint IS the root).
+ *
+ * WHY null AND NOT AN EMPTY MAP: an empty map is indistinguishable from "the
+ * session started with zero files on disk". getSessionChanges() would then
+ * classify every file in the project as newly created with oldContent=null,
+ * and revertSessionChanges() would unlink the entire working tree. The absence
+ * of a baseline must be an explicit, unrepresentable-as-data state.
  */
-export function getSessionInitialFileStates(): Map<string, string | null> {
+export function getSessionInitialFileStates(): Map<string, string | null> | null {
   const history = loadCheckpointHistory();
   const activeBranch = history.branches.find(b => b.id === history.activeBranchId);
   if (!activeBranch || !activeBranch.rootCheckpointId) {
-    return new Map();
+    return null;
   }
-  
+
   const rootCheckpoint = history.checkpoints.get(activeBranch.rootCheckpointId);
   if (!rootCheckpoint || !rootCheckpoint.parentId) {
-    // If the root checkpoint has no parent, the initial state is empty (no files tracked yet)
-    return new Map();
+    // Root checkpoint has no parent — there is no recorded pre-session state.
+    return null;
   }
-  
+
   return reconstructFileStates(rootCheckpoint.parentId);
 }
 
 /**
+ * Whether a session baseline exists to diff or revert against.
+ * Callers should use this to tell "nothing changed" apart from "we have no
+ * idea what the starting state was".
+ */
+export function hasSessionBaseline(): boolean {
+  return getSessionInitialFileStates() !== null;
+}
+
+/**
  * Gets all changes in the workspace since the session began.
+ * Returns an empty list when there is no session baseline (see above).
  */
 export function getSessionChanges(): LocalChange[] {
   const initialStates = getSessionInitialFileStates();
+  if (initialStates === null) {
+    return [];
+  }
   const changes: LocalChange[] = [];
   const CWD = process.cwd();
-  
+
   // 1. Check all files that existed at the start of the session
   for (const [filePath, initialContent] of initialStates.entries()) {
     const currentContent = captureFileState(filePath);
@@ -577,6 +750,16 @@ export function getSessionChanges(): LocalChange[] {
  * Reverts all changes in the workspace back to the initial state of the session.
  */
 export function revertSessionChanges(): void {
+  // Refuse rather than guess. Without a baseline every file looks "created",
+  // and reverting a create means deleting it — i.e. emptying the project.
+  if (getSessionInitialFileStates() === null) {
+    throw new Error(
+      "No session baseline recorded for this branch, so there is no known " +
+      "state to revert to. Use '/checkpoint revert' (without 'session') to " +
+      "revert to the head checkpoint instead."
+    );
+  }
+
   const changes = getSessionChanges();
   for (const change of changes) {
     restoreFileState(change.filePath, change.oldContent);

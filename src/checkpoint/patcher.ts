@@ -9,14 +9,24 @@ import { readFileSync, writeFileSync, existsSync, unlinkSync } from "fs";
 import { resolve } from "path";
 import type { FilePatch } from "./types.js";
 
-const CWD = process.cwd();
+/**
+ * Resolves a possibly-relative path against the CURRENT working directory.
+ *
+ * This deliberately calls process.cwd() per use rather than caching it at
+ * module load. A cached value is captured on first import — before the CLI has
+ * necessarily settled on its working directory — and never updates afterwards,
+ * so every file read and write would resolve against a stale root.
+ */
+function toAbsolute(filePath: string): string {
+  return resolve(process.cwd(), filePath);
+}
 
 /**
  * Captures the current state of a file.
  * Returns the file content as a string, or null if the file doesn't exist.
  */
 export function captureFileState(filePath: string): string | null {
-  const absPath = resolve(CWD, filePath);
+  const absPath = toAbsolute(filePath);
   try {
     return readFileSync(absPath, "utf-8");
   } catch {
@@ -31,7 +41,7 @@ export function captureFileState(filePath: string): string | null {
  * If content is a string, writes it to the file.
  */
 export function restoreFileState(filePath: string, content: string | null): void {
-  const absPath = resolve(CWD, filePath);
+  const absPath = toAbsolute(filePath);
   
   if (content === null) {
     // Delete the file if it exists

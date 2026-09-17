@@ -95,8 +95,10 @@ export interface StepResult {
   /** Full log of every tool call made during this step's execution. */
   toolCallsMade: ToolCall[];
 
-  /** All agent events emitted during execution (including finish with usage). */
-  agentEvents: import("./run-turn.js").AgentEvent[];
+  // NOTE: there is deliberately no `agentEvents` field. executeStep is an
+  // async generator and yields each AgentEvent as it happens. Buffering them
+  // here as well meant the orchestrator replayed the whole step after it had
+  // already finished, which defeated streaming entirely.
 
   /** Map of file paths to their contents before they were modified in this step. */
   oldFileStates?: Map<string, string | null>;
@@ -106,6 +108,32 @@ export interface StepResult {
 
   /** The model tier that handled this step (hosted vs local). */
   modelTier?: "hosted" | "local";
+}
+
+// ─── Plan ────────────────────────────────────────────────────────────────────
+
+/**
+ * A complete plan: the decisions the planner made, plus the steps.
+ *
+ * WHY ASSUMPTIONS INSTEAD OF UPFRONT QUESTIONS: plan mode used to run a
+ * clarifier first, blocking on a list of abstract questions ("Do you have a
+ * preferred UI framework?") before showing anything. That was redundant with
+ * the plan-approval gate that follows it, and worse to answer: you were
+ * guessing at a plan you could not see.
+ *
+ * Now the planner picks sensible defaults, states them, and you react to a
+ * concrete plan. Rejecting it and saying what is wrong is the clarification.
+ */
+export interface Plan {
+  /**
+   * Judgement calls the planner made that the user did not specify —
+   * framework choice, scope, storage, and so on. Displayed above the steps.
+   * Empty when the request left nothing open.
+   */
+  assumptions: string[];
+
+  /** The ordered steps to execute. */
+  steps: PlanStep[];
 }
 
 // ─── Verification Result ─────────────────────────────────────────────────────

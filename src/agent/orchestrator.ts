@@ -64,9 +64,7 @@ import { capturePreSnapshot, verifyStep } from "./verifier.js";
 import { type AgentEvent } from "./run-turn.js";
 import { SessionLogger } from "./debug/index.js";
 import { createCheckpoint } from "../checkpoint/manager.js";
-import { captureFileState } from "../checkpoint/patcher.js";
-import { captureBeforeState, buildSnapshot } from "../checkpoints/step-snapshot.js";
-import { pushSnapshot, clearStacks } from "../checkpoints/undo-redo-stack.js";
+import { getActiveSessionId } from "../session/registry.js";
 import { resolve } from "path";
 
 // ─── Constants ───────────────────────────────────────────────────────────────
@@ -123,6 +121,50 @@ export type OrchestratorEvent =
   // The orchestration loop has finished (all steps complete, or
   // escalation was offered and declined).
   | { kind: "complete" };
+
+// ─── Step helpers ────────────────────────────────────────────────────────────
+
+/**
+ * Runs a step to completion, re-yielding each AgentEvent wrapped as an
+ * OrchestratorEvent and handing back the StepResult.
+ *
+ * `yield*` alone would forward the raw AgentEvents, but the UI consumes the
+ * orchestrator's own event union — so each one needs wrapping on the way out.
+ */
+async function* streamStep(
+  steps: AsyncGenerator<AgentEvent, StepResult>,
+): AsyncGenerator<OrchestratorEvent, StepResult> {
+  let result = await steps.next();
+  while (!result.done) {
+    yield { kind: "agent-event", event: result.value };
+    result = await steps.next();
+  }
+  return result.value;
+}
+
+/**
+ * Records a verified step in the checkpoint history.
+ *
+ * ONE call site's worth of logic, called from both modes. Build and plan mode
+ * each had their own near-identical copy of this block, and each wrote to TWO
+ * stores: the checkpoint history and a separate undo/redo snapshot stack that
+ * knew nothing about it. There is now a single chain; /undo and /redo move a
+ * head pointer along it (see checkpoint/manager.ts).
+ */
+function recordStepCheckpoint(step: PlanStep, stepResult: StepResult): void {
+  try {
+    createCheckpoint(
+      step.description,
+      stepResult.claimedFiles,
+      stepResult.oldFileStates,
+      getActiveSessionId() ?? undefined,
+    );
+  } catch (error) {
+    // A failed checkpoint must not fail the step — the work on disk is real
+    // either way, we just lose the ability to undo it.
+    console.warn("Failed to create checkpoint for step:", error);
+  }
+}
 
 // ─── Escalation Logic ────────────────────────────────────────────────────────
 //
@@ -258,21 +300,17 @@ async function* runBuildMode(
   // The snapshot will be built after execution using claimedFiles
   const beforeStates = new Map<string, string | null>();
   
-  // Execute the step via the executor
-  const stepResult = await executeStep(
-    syntheticStep,
-    context,
-    model,
-    onConfirm,
-    undefined,
-    provider,
-    history,
+  // Execute the step, streaming its events to the UI as they happen.
+  const stepResult = yield* streamStep(
+    executeStep({
+      step: syntheticStep,
+      context,
+      model,
+      onConfirm,
+      provider,
+      conversationHistory: history,
+    }),
   );
-
-  // Forward all agent events (including finish with usage) to the UI
-  for (const event of stepResult.agentEvents) {
-    yield { kind: "agent-event", event };
-  }
 
   // Yield the updated conversation history to preserve memory
   if (stepResult.conversationHistory) {
@@ -292,22 +330,7 @@ async function* runBuildMode(
   yield { kind: "step-verified", step: syntheticStep, verification, modelTier: stepResult.modelTier };
 
   if (verification.verified) {
-    try {
-      createCheckpoint(syntheticStep.description, stepResult.claimedFiles, stepResult.oldFileStates);
-      
-      // Push undo/redo snapshot after successful verification
-      // Use the oldFileStates captured by the executor, and build the after state by reading current disk
-      const touchedPaths = stepResult.claimedFiles.length > 0 ? stepResult.claimedFiles : syntheticStep.targetFiles;
-      const snapshot = buildSnapshot(
-        syntheticStep.index.toString(),
-        stepResult.oldFileStates || new Map(),
-        touchedPaths
-      );
-      pushSnapshot(snapshot);
-    } catch (error) {
-      // Log but don't fail the step if checkpoint creation fails
-      console.warn("Failed to create checkpoint for step:", error);
-    }
+    recordStepCheckpoint(syntheticStep, stepResult);
   }
 
   // ── Escalation check ─────────────────────────────────────────────────
@@ -430,20 +453,10 @@ async function* runPlanMode(
     // Capture pre-execution filesystem state for this step's target files
     const preSnapshots = capturePreSnapshot(step, context.projectRoot);
 
-    // Execute the step
-    const stepResult = await executeStep(
-      step,
-      context,
-      model,
-      onConfirm,
-      undefined,
-      provider,
+    // Execute the step, streaming its events to the UI as they happen.
+    const stepResult = yield* streamStep(
+      executeStep({ step, context, model, onConfirm, provider }),
     );
-
-    // Forward all agent events (including finish with usage) to the UI
-    for (const event of stepResult.agentEvents) {
-      yield { kind: "agent-event", event };
-    }
 
     // Verify the step's execution
     const verification = await verifyStep(
@@ -464,21 +477,7 @@ async function* runPlanMode(
     // If verification succeeded, create a checkpoint for this step.
     // This tracks the changes locally via the file-based checkpoint system.
     if (verification.verified) {
-      try {
-        createCheckpoint(step.description, stepResult.claimedFiles, stepResult.oldFileStates);
-        
-        // Push undo/redo snapshot after successful verification
-        // Use the oldFileStates captured by the executor, and build the after state by reading current disk
-        const snapshot = buildSnapshot(
-          step.index.toString(),
-          stepResult.oldFileStates || new Map(),
-          stepResult.claimedFiles.length > 0 ? stepResult.claimedFiles : step.targetFiles
-        );
-        pushSnapshot(snapshot);
-      } catch (error) {
-        // Log but don't fail the step if checkpoint creation fails
-        console.warn("Failed to create checkpoint for step:", error);
-      }
+      recordStepCheckpoint(step, stepResult);
     }
   }
 
@@ -515,7 +514,7 @@ async function* runConversationalMode(
   onConfirm: ConfirmFn,
   provider?: string,
 ): AsyncGenerator<OrchestratorEvent> {
-  yield { kind: "mode-info", mode: "build", reason: "Casual conversation" };
+  yield { kind: "mode-info", mode: "chat", reason: "Conversation — tools disabled" };
 
   const { runTurn } = await import("./run-turn.js");
 
@@ -541,40 +540,75 @@ async function* runConversationalMode(
 
 // ─── Public Entry Point ──────────────────────────────────────────────────────
 
+/** Everything runOrchestrator needs, as one object. */
+export interface RunOrchestratorOptions {
+  /** The user's original request text. */
+  userPrompt: string;
+  /** Which mode to run in and why (user flag or escalation). */
+  modeContext: ModeContext;
+  /** Ambient project info (root, prompt, budget). */
+  context: ProjectContext;
+  /** The resolved LLM to use. */
+  model: LanguageModel;
+  /** Callback for user confirmation of shell commands and file writes. */
+  onConfirm: ConfirmFn;
+  /** Pre-collected clarification answers (plan mode). */
+  clarificationAnswers?: Record<string, string>;
+  /** Pre-approved plan to execute (plan mode, after the Y/n gate). */
+  approvedPlan?: PlanStep[];
+  /** Indices of steps already completed (plan mode). */
+  completedStepIndices?: number[];
+  /** Full conversation history (used for build and conversational modes). */
+  history?: ModelMessage[];
+  /** Provider name, e.g. "ollama" — selects provider options and model tier. */
+  provider?: string;
+}
+
 /**
  * Main orchestrator entry point. Routes to build or plan mode based on
  * the ModeContext, and returns an async generator of OrchestratorEvents
  * for the UI to consume.
  *
- * @param userPrompt - The user's original request text.
- * @param modeContext - Which mode to run in and why (user flag or escalation).
- * @param context - Ambient project info (root, prompt, budget).
- * @param model - The resolved LLM to use.
- * @param onConfirm - Callback for user confirmation of shell commands.
- * @param clarificationAnswers - Pre-collected clarification answers (plan mode).
- * @param approvedPlan - Pre-approved plan to execute (plan mode, after Y/n).
- * @param completedStepIndices - Indices of steps already completed (plan mode).
- * @param history - Full conversation history (used for casual conversation mode).
+ * Takes an options object rather than positional arguments: there were ten
+ * parameters, three of them optional and adjacent, so call sites were a row
+ * of `undefined`s and a mis-slotted argument would type-check fine.
  */
 export async function* runOrchestrator(
-  userPrompt: string,
-  modeContext: ModeContext,
-  context: ProjectContext,
-  model: LanguageModel,
-  onConfirm: ConfirmFn,
-  clarificationAnswers?: Record<string, string>,
-  approvedPlan?: PlanStep[],
-  completedStepIndices?: number[],
-  history?: ModelMessage[],
-  provider?: string,
+  options: RunOrchestratorOptions,
 ): AsyncGenerator<OrchestratorEvent> {
+  const {
+    userPrompt,
+    modeContext,
+    context,
+    model,
+    onConfirm,
+    clarificationAnswers,
+    approvedPlan,
+    completedStepIndices,
+    history,
+    provider,
+  } = options;
+
+  // A re-entry that carries an approved plan or clarification answers is a
+  // continuation of the turn already in progress, not a new one.
+  const isMidFlow =
+    !!approvedPlan ||
+    (!!clarificationAnswers && Object.keys(clarificationAnswers).length > 0);
+
   // Only log session start on the very first entry of the conversation turn
-  if (!approvedPlan && (!clarificationAnswers || Object.keys(clarificationAnswers).length === 0)) {
+  if (!isMidFlow) {
     SessionLogger.logSessionStart(userPrompt, modeContext.mode, context.projectRoot);
   }
 
-  // Casual conversational path: greetings / chit-chat
-  if (!approvedPlan && (!clarificationAnswers || Object.keys(clarificationAnswers).length === 0) && isConversational(userPrompt)) {
+  // ── Chat mode ────────────────────────────────────────────────────────
+  //
+  // Either pinned by the user (/chat) or auto-detected for a greeting. The
+  // auto-detect is a deterministic regex, never an LLM classification call —
+  // see the rationale in mode.ts.
+  //
+  // Mid-flow re-entries (answering clarifications, executing an approved
+  // plan) are never chat, whatever the prompt text looks like.
+  if (!isMidFlow && (modeContext.mode === "chat" || isConversational(userPrompt))) {
     const activeHistory = history || [{ role: "user", content: userPrompt }];
     yield* runConversationalMode(
       activeHistory,

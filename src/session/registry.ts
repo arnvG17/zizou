@@ -5,7 +5,9 @@
 // Session CRUD operations - create, list, switch, delete sessions.
 
 import { randomUUID } from "crypto";
+import type { Mode } from "../agent/mode.js";
 import type { SessionMeta, SessionState, TokenStats } from "./types.js";
+import { SESSION_SCHEMA_VERSION } from "./types.js";
 import { loadRegistry, saveRegistry, loadSessionState, saveSessionState, archiveSessionState } from "./state-io.js";
 import type { ModelMessage } from "ai";
 
@@ -159,7 +161,7 @@ export function saveActiveSessionState(
   tokenStats: TokenStats,
   pinnedFiles: string[],
   log?: any[],
-  currentMode?: "build" | "plan",
+  currentMode?: Mode,
   orchestratorState?: any
 ): void {
   const activeId = getActiveSessionId();
@@ -186,6 +188,9 @@ export function saveActiveSessionState(
   
   const updatedState: SessionState = {
     ...existingState,
+    // Stamp the current schema on every write, so a session saved by this
+    // version is trusted on load and one saved by an older version is not.
+    schemaVersion: SESSION_SCHEMA_VERSION,
     conversation,
     tokenStats,
     log: log ? JSON.stringify(log) : existingState.log,

@@ -5,6 +5,7 @@
 // Type definitions for session persistence and registry.
 
 import type { ModelMessage } from "ai";
+import type { Mode } from "../agent/mode.js";
 
 export interface SessionMeta {
   id: string;          // uuid
@@ -27,11 +28,25 @@ export interface TokenStats {
   contextLimit: number;
 }
 
+/**
+ * Current on-disk shape of a session's state.
+ *
+ * Bump this whenever `orchestratorState` or `currentMode` changes shape.
+ * Sessions written by an older version keep their conversation transcript but
+ * have their orchestrator state dropped — see isCurrentSessionSchema. A
+ * half-understood in-flight plan is not worth a migration; the transcript is.
+ *
+ * v2: mode gained "chat"; orchestrator flow moved behind a reducer.
+ */
+export const SESSION_SCHEMA_VERSION = 2;
+
 export interface SessionState {
+  /** Absent on sessions written before versioning existed (treated as v1). */
+  schemaVersion?: number;
   conversation: ModelMessage[];
   tokenStats: TokenStats;
   log: string;  // Full UI log serialized as JSON string to avoid circular dependency
-  currentMode: "build" | "plan";  // Current operating mode
+  currentMode: Mode;  // Current operating mode
   orchestratorState?: {
     pendingPlan?: any[];  // Plan steps
     pendingClarifications?: any[];  // Clarification questions
@@ -45,4 +60,9 @@ export interface SessionState {
   pinnedFiles: string[];
   createdAt: string;
   lastActiveAt: string;
+}
+
+/** True when this session's orchestrator state can be trusted as-is. */
+export function isCurrentSessionSchema(state: SessionState): boolean {
+  return state.schemaVersion === SESSION_SCHEMA_VERSION;
 }

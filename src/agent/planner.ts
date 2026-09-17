@@ -2,14 +2,17 @@
 //
 // LAYER: agent/
 //
-// Structured plan generator — invoked in PLAN MODE ONLY, after the
-// clarifier has gathered any needed answers from the user.
+// Structured plan generator — invoked in PLAN MODE ONLY.
 //
 // PURPOSE:
-//   Takes the user's prompt + clarification answers + project context and
-//   produces a structured JSON plan: an array of PlanStep objects with
-//   explicit dependency ordering. The orchestrator then executes these
+//   Takes the user's prompt + project context and produces a structured JSON
+//   plan: the assumptions it had to make, plus an array of PlanStep objects
+//   with explicit dependency ordering. The orchestrator then executes those
 //   steps one at a time in dependsOn order.
+//
+//   There is no clarifier stage. The planner DECIDES and declares what it
+//   decided; the user reviews a concrete plan at the y/n gate and rejects it
+//   with a reason if an assumption is wrong. See the Plan type in types.ts.
 //
 // KEY DESIGN DECISIONS:
 //   1. NO TOOL ACCESS: The planner sees the repo map and clarifications
@@ -48,44 +51,58 @@ You are acting as a PLANNER — your job is to create a structured, ordered
 plan for implementing the user's request. You do NOT execute anything;
 you only describe what should be done.
 
-RULES:
-1. Output ONLY a JSON array of plan steps. No markdown, no explanation.
-2. Each step must have: index, description, targetFiles, dependsOn.
-3. Use dependsOn to enforce ordering — if step 3 edits a file created in
-   step 1, then step 3 must have dependsOn: [1].
-4. Keep steps atomic — each step should do ONE thing (create a file, modify
-   a function, install a dependency, etc.).
-5. List ALL files each step will create or modify in targetFiles.
-6. Steps should be ordered so dependencies are created before consumers.
-7. Include setup steps (create directories, install packages) before code steps.
+NEVER ask the user questions. If the request leaves something open, DECIDE
+using the most conventional choice for this project, and record that decision
+in "assumptions". The user reviews the plan before anything runs, so a stated
+assumption they can reject is always better than a question that blocks them.
 
-OUTPUT FORMAT — respond with ONLY a JSON array:
-[
-  {
-    "index": 0,
-    "description": "Create the new component file with boilerplate",
-    "targetFiles": ["src/components/Auth.tsx"],
-    "dependsOn": []
-  },
-  {
-    "index": 1,
-    "description": "Add authentication hook",
-    "targetFiles": ["src/hooks/useAuth.ts"],
-    "dependsOn": []
-  },
-  {
-    "index": 2,
-    "description": "Wire Auth component into the main App layout",
-    "targetFiles": ["src/App.tsx"],
-    "dependsOn": [0, 1]
-  }
-]
+RULES:
+1. Output ONLY a JSON object. No markdown, no explanation.
+2. "assumptions" is an array of short strings: decisions you made that the
+   user did not specify (framework, scope, storage, styling, and so on).
+   Use [] only when the request genuinely left nothing open.
+3. "steps" is an array of steps, each with: index, description, targetFiles, dependsOn.
+4. Use dependsOn to enforce ordering — if step 3 edits a file created in
+   step 1, then step 3 must have dependsOn: [1].
+5. Keep steps atomic — each step should do ONE thing (create a file, modify
+   a function, install a dependency, etc.).
+6. List ALL files each step will create or modify in targetFiles.
+7. Include setup steps (create directories, install packages) before code steps.
+8. Prefer what already exists in the repo map over introducing new tools.
+
+OUTPUT FORMAT — respond with ONLY this JSON object:
+{
+  "assumptions": [
+    "React with Vite, matching the existing frontend",
+    "No backend — state is held in memory only"
+  ],
+  "steps": [
+    {
+      "index": 0,
+      "description": "Create the new component file with boilerplate",
+      "targetFiles": ["src/components/Auth.tsx"],
+      "dependsOn": []
+    },
+    {
+      "index": 1,
+      "description": "Add authentication hook",
+      "targetFiles": ["src/hooks/useAuth.ts"],
+      "dependsOn": []
+    },
+    {
+      "index": 2,
+      "description": "Wire Auth component into the main App layout",
+      "targetFiles": ["src/App.tsx"],
+      "dependsOn": [0, 1]
+    }
+  ]
+}
 
 IMPORTANT:
 - Index must be sequential starting from 0.
 - dependsOn must only reference indices that exist and are lower than the current index.
 - targetFiles must be relative paths from the workspace root.
-- Output ONLY the JSON array. No text before or after it.
+- Output ONLY the JSON object. No text before or after it.
 `;
 
 // ─── Main Plan Function ──────────────────────────────────────────────────────

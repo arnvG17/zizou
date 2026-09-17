@@ -46,6 +46,15 @@ export interface Checkpoint {
   /** ISO timestamp when checkpoint was created. */
   timestamp: string;
 
+  /**
+   * The session that produced this checkpoint, when one was active.
+   *
+   * Checkpoint history is per-project and shared across sessions, so without
+   * this there is no way to tell which session's work a checkpoint belongs to.
+   * Optional because checkpoints written before this field existed have none.
+   */
+  sessionId?: string;
+
   /** Incremental diff patches for changed files. */
   patches: FilePatch[];
 }

@@ -4,37 +4,23 @@
 //
 // Storage utilities for session directory structure and project hashing.
 
-import { homedir } from "os";
 import { join, resolve } from "path";
 import { existsSync, mkdirSync, readFileSync } from "fs";
+import { getZizouDir, getProjectHash } from "../config/project-hash.js";
 
-const ZIZOU_DIR = join(homedir(), ".zizou");
-const SESSIONS_DIR = join(ZIZOU_DIR, "sessions");
+// Re-exported because callers in this layer already import it from here.
+export { getProjectHash };
 
-/**
- * Gets the project hash for the current working directory.
- * Uses a hash of the directory path for local persistence.
- */
-export function getProjectHash(): string {
-  const cwd = process.cwd();
-  
-  // Simple hash of the directory path
-  let hash = 0;
-  const str = cwd.toLowerCase();
-  for (let i = 0; i < str.length; i++) {
-    const char = str.charCodeAt(i);
-    hash = ((hash << 5) - hash) + char;
-    hash = hash & hash; // Convert to 32bit integer
-  }
-  return Math.abs(hash).toString(16);
+/** ~/.zizou/sessions — computed per call, not cached at module load. */
+function sessionsRoot(): string {
+  return join(getZizouDir(), "sessions");
 }
 
 /**
  * Gets the session directory for the current project.
  */
 export function getSessionDir(): string {
-  const projectHash = getProjectHash();
-  return join(SESSIONS_DIR, projectHash);
+  return join(sessionsRoot(), getProjectHash());
 }
 
 /**

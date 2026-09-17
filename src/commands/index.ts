@@ -46,6 +46,7 @@ import {
   computeLineDiff,
   getSessionChanges,
   revertSessionChanges,
+  hasSessionBaseline,
   formatColoredDiff,
 } from "../checkpoint/manager.js";
 import { performUndo, performRedo, getUndoStackSize, getRedoStackSize, clearStacks } from "../checkpoints/undo-redo-stack.js";
@@ -53,6 +54,8 @@ import { exportTranscript } from "./export-transcript.js";
 import type { ConfirmFn } from "../tools/index.js";
 import { sessionPermissions } from "../tools/index.js";
 import type { FilePatch } from "../checkpoint/types.js";
+import type { PlanStep, ClarifyingQuestion } from "../agent/types.js";
+import type { Mode } from "../agent/mode.js";
 
 export interface SlashCommandInfo {
   command: string;
@@ -61,6 +64,7 @@ export interface SlashCommandInfo {
 
 export const SLASH_COMMANDS: SlashCommandInfo[] = [
   { command: "/settings", description: "Modify agent configuration (aliases: /keys)" },
+  { command: "/chat", description: "Switch to chat mode (conversation only, tools disabled)" },
   { command: "/plan", description: "Switch to plan mode (clarify → plan → execute → verify)" },
   { command: "/build", description: "Switch to build mode (single-step execution)" },
   { command: "/model", description: "Switch provider and/or set custom model name" },
@@ -93,6 +97,14 @@ Ask me to edit files, run commands, or design features.
 Type \x1b[38;2;59;95;224m/help\x1b[0m for all settings. Let's create something cool!`;
 
 // Types matching the Chat UI state
+/**
+ * A single rendered line in the chat transcript.
+ *
+ * THIS IS THE ONE DEFINITION. Chat.tsx used to declare its own near-copy with
+ * six extra orchestrator variants, so `setLog` could not be passed to a command
+ * handler without a type error — and because .tsx was excluded from tsconfig,
+ * nobody saw it.
+ */
 export type LogEntry =
   | { kind: "user"; text: string }
   | { kind: "assistant"; text: string; thoughtDuration?: string }
@@ -101,11 +113,20 @@ export type LogEntry =
       toolCallId: string;
       name: string;
       input: unknown;
+      output?: unknown;
+      errorMessage?: string;
       startTime: number;
       duration?: string;
       status: "running" | "success" | "error";
     }
-  | { kind: "error"; text: string };
+  | { kind: "error"; text: string }
+  // ── Orchestrator log entry kinds, rendered by Chat.tsx's LogLine ──────
+  | { kind: "plan-display"; steps: PlanStep[] }
+  | { kind: "step-progress"; stepIndex: number; totalSteps: number; description: string; modelTier?: "hosted" | "local" }
+  | { kind: "verification"; stepIndex: number; verified: boolean; mismatches: string[]; verboseFeedback?: string; modelTier?: "hosted" | "local" | undefined }
+  | { kind: "escalation"; reason: string }
+  | { kind: "mode-switch"; mode: Mode; reason: string }
+  | { kind: "clarification"; questions: ClarifyingQuestion[] };
 
 const SHORT_LABELS: Record<ProviderChoice, string> = {
   groq: "Groq",
@@ -149,9 +170,9 @@ export interface CommandContext {
   onSelectModel?: () => void;
   onContextChange?: () => void;
   /** Callback to switch between build and plan mode from within the TUI. */
-  onModeChange?: (mode: "build" | "plan") => void;
+  onModeChange?: (mode: Mode) => void;
   /** Returns the current mode so /help can display it. */
-  getCurrentMode?: () => "build" | "plan";
+  getCurrentMode?: () => Mode;
   /** Callback to update session name in UI when session changes. */
   onSessionChange?: (sessionName: string) => void;
   setLog: (updater: (prev: LogEntry[]) => LogEntry[]) => void;
@@ -189,10 +210,25 @@ export async function handleSlashCommand(ctx: CommandContext): Promise<boolean> 
     process.exit(0);
   }
 
-  // ── /plan and /build — switch orchestrator mode ────────────────────────
-  // Toggles between the two operating modes from within the TUI.
+  // ── /chat, /plan and /build — switch orchestrator mode ─────────────────
+  // /chat  → conversation only, tools disabled
   // /plan  → full pipeline: clarifier → planner → execute → verify
   // /build → single-step execution (default)
+  if (command === "chat") {
+    if (ctx.onModeChange) {
+      ctx.onModeChange("chat");
+    }
+    ctx.setLog((l: LogEntry[]) => [
+      ...l,
+      { kind: "user", text },
+      {
+        kind: "assistant",
+        text: `Switched to ○ Chat mode.\nTools are disabled — nothing on disk will change.\nUse /build to start making changes again.`,
+      },
+    ]);
+    return true;
+  }
+
   if (command === "plan") {
     if (ctx.onModeChange) {
       ctx.onModeChange("plan");
@@ -763,10 +799,14 @@ ${cmdList}
         const branchName = activeBranch ? activeBranch.name : "unknown";
         
         if (changes.length === 0) {
+          // Distinguish "nothing changed" from "no baseline to compare against".
+          const noBaseline = isFullSession && !hasSessionBaseline();
           ctx.setLog((l: LogEntry[]) => [
             ...l,
             { kind: "user", text },
-            { kind: "assistant", text: isFullSession
+            { kind: "assistant", text: noBaseline
+                ? `No session baseline recorded for branch "${branchName}", so a full-session diff isn't available. Use '/checkpoint diff' to see changes since the head checkpoint.`
+                : isFullSession
                 ? `No changes found in the entire session for branch "${branchName}".`
                 : `No uncommitted local changes since checkpoint ${headId}.`
             },
@@ -868,10 +908,13 @@ ${cmdList}
       const changes = isFullSession ? getSessionChanges() : getLocalChanges();
       
       if (changes.length === 0) {
+        const noBaseline = isFullSession && !hasSessionBaseline();
         ctx.setLog((l: LogEntry[]) => [
           ...l,
           { kind: "user", text },
-          { kind: "assistant", text: isFullSession
+          { kind: noBaseline ? "error" : "assistant", text: noBaseline
+              ? "No session baseline recorded, so there is no known state to revert to. Use '/checkpoint revert' (without 'session') to revert to the head checkpoint instead."
+              : isFullSession
               ? "No changes in the session to revert."
               : "No uncommitted local changes to revert."
           },

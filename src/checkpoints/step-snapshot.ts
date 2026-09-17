@@ -8,7 +8,13 @@
 import { captureFileState, restoreFileState } from "../checkpoint/patcher.js";
 import { resolve } from "path";
 
-const CWD = process.cwd();
+/**
+ * Resolves against the CURRENT cwd rather than one cached at module load —
+ * see the matching note in checkpoint/patcher.ts.
+ */
+function toAbsolute(filePath: string): string {
+  return resolve(process.cwd(), filePath);
+}
 
 /**
  * Represents a single step's file changes for undo/redo purposes.
@@ -49,7 +55,7 @@ export function captureBeforeState(paths: string[]): Map<string, string | null> 
   const beforeStates = new Map<string, string | null>();
   
   for (const path of paths) {
-    const absPath = resolve(CWD, path);
+    const absPath = toAbsolute(path);
     const content = captureFileState(path);
     beforeStates.set(absPath, content);
   }
@@ -72,19 +78,39 @@ export function buildSnapshot(
   touchedPaths: string[]
 ): StepSnapshot {
   const fileDiffs: FileDiff[] = [];
-  
+
   for (const path of touchedPaths) {
-    const absPath = resolve(CWD, path);
-    const beforeContent = before.get(absPath);
+    const absPath = toAbsolute(path);
+
+    // The `before` map may be keyed by absolute path (captureBeforeState) or
+    // by whatever path the model passed to the tool (the executor's
+    // oldFileStates, which is relative). Try both before concluding anything.
+    let beforeContent: string | null | undefined;
+    if (before.has(absPath)) {
+      beforeContent = before.get(absPath);
+    } else if (before.has(path)) {
+      beforeContent = before.get(path);
+    } else {
+      beforeContent = undefined;
+    }
+
+    // A miss is NOT the same as "the file did not exist before". Recording
+    // before:null for an unknown file makes undo unlink a file it should have
+    // restored. Skip the file instead — undo leaves it untouched, which is
+    // wrong but recoverable; deleting it is neither.
+    if (beforeContent === undefined) {
+      continue;
+    }
+
     const afterContent = captureFileState(path);
-    
+
     fileDiffs.push({
       path,
-      before: beforeContent ?? null,
+      before: beforeContent,
       after: afterContent,
     });
   }
-  
+
   return {
     stepId,
     timestamp: new Date().toISOString(),

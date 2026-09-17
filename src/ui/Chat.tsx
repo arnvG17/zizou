@@ -20,7 +20,7 @@
 //     - "mode-switch"    → shows mode change notifications
 //     - "clarification"  → shows clarifying questions from the clarifier
 
-import React, { useState, useRef, useEffect, useMemo } from "react";
+import React, { useState, useRef, useReducer, useEffect, useMemo } from "react";
 import { Box, Text, useInput } from "ink";
 import TextInput from "ink-text-input";
 import pkg from "../../package.json";
@@ -40,6 +40,7 @@ import { buildSystemPrompt, addPinnedFile, pinnedContextFiles } from "../context
 import { buildRepoMap } from "../context/repo-map.js";
 import { useTerminalSize, SidebarWordmark, SidebarMountains } from "./Figurine.js";
 import { handleSlashCommand, SLASH_COMMANDS, WELCOME_MESSAGE, getSkills } from "../commands/index.js";
+import type { LogEntry as SharedLogEntry } from "../commands/index.js";
 import { readdirSync, statSync } from "fs";
 import { join, relative } from "path";
 import { loadActiveSessionState, saveActiveSessionState, listSessions, getActiveSession, getActiveSessionId, createSession } from "../session/registry.js";
@@ -51,10 +52,28 @@ import { estimateCost, formatCost, getModelRate } from "../tui/cost-tracker.js";
 // ─── Orchestrator imports ────────────────────────────────────────────────────
 // These enable the full clarify → plan → execute → verify pipeline.
 import type { Mode } from "../agent/mode.js";
+import { isCurrentSessionSchema } from "../session/types.js";
+import {
+  flowReducer,
+  initialFlowState,
+  type FlowAction,
+  type OrchestratorFlowState,
+} from "./orchestrator-flow.js";
 import { runOrchestrator, type OrchestratorEvent } from "../agent/orchestrator.js";
 import type { PlanStep, ClarifyingQuestion } from "../agent/types.js";
 
 const PROVIDERS: ProviderChoice[] = ["groq", "google", "openrouter", "anthropic", "openai", "ollama"];
+
+/**
+ * How each mode is presented in the three badges (header, input footer,
+ * sidebar). Kept in one table so a new mode can't be added to the type and
+ * then silently render as another mode's colour.
+ */
+const MODE_BADGE: Record<Mode, { label: string; glyph: string; color: string }> = {
+  chat: { label: "Chat", glyph: "○", color: "#5BA37F" },
+  build: { label: "Build", glyph: "●", color: "#3B5FE0" },
+  plan: { label: "Plan", glyph: "◆", color: "#D08A4E" },
+};
 
 const SHORT_LABELS: Record<ProviderChoice, string> = {
   groq: "Groq",
@@ -102,29 +121,10 @@ const MODEL_OPTIONS: ModelOption[] = [
 // EXTENDED: New entry kinds for orchestrator events (plan display,
 // verification results, escalation prompts, step progress, etc.).
 // The original kinds (user, assistant, tool-call, error) are unchanged.
-type LogEntry =
-  | { kind: "user"; text: string }
-  | { kind: "assistant"; text: string; thoughtDuration?: string }
-  | {
-      kind: "tool-call";
-      toolCallId: string;
-      name: string;
-      input: unknown;
-      output?: unknown;
-      errorMessage?: string;
-      startTime: number;
-      duration?: string;
-      status: "running" | "success" | "error";
-    }
-  | { kind: "error"; text: string }
-  // ── New orchestrator log entry kinds ──────────────────────────────────
-  // Displayed by the LogLine component below to show orchestrator state.
-  | { kind: "plan-display"; steps: PlanStep[] }         // Full plan for user review
-  | { kind: "step-progress"; stepIndex: number; totalSteps: number; description: string; modelTier?: "hosted" | "local" }
-  | { kind: "verification"; stepIndex: number; verified: boolean; mismatches: string[]; verboseFeedback?: string; modelTier?: "hosted" | "local" | undefined }
-  | { kind: "escalation"; reason: string }               // Escalation notification
-  | { kind: "mode-switch"; mode: Mode; reason: string }  // Mode change notification
-  | { kind: "clarification"; questions: ClarifyingQuestion[] }; // Clarifier questions
+// LogEntry is defined once, in commands/index.ts, because slash-command
+// handlers receive setLog and must agree on the shape. Chat.tsx used to
+// declare a near-duplicate with six extra variants.
+type LogEntry = SharedLogEntry;
 
 function formatDuration(ms: number): string {
   if (ms < 1000) {
@@ -346,18 +346,31 @@ export function Chat({ onChangeKeys, mode: initialMode = "build", initialPrompt 
 
   // ─── Orchestrator state ──────────────────────────────────────────────
   //
-  // Tracks the current operating mode, any pending orchestrator flow
-  // state (clarification answers, approved plans), and the original
-  // prompt for escalation re-entry.
-  const [currentMode, setCurrentMode] = useState<Mode>(initialMode);
-  const [pendingClarifications, setPendingClarifications] = useState<ClarifyingQuestion[]>([]);
-  const [clarificationAnswers, setClarificationAnswers] = useState<Record<string, string>>({});
-  const [currentClarificationIndex, setCurrentClarificationIndex] = useState(0);
-  const [pendingPlan, setPendingPlan] = useState<PlanStep[] | null>(null);
-  const [originalPrompt, setOriginalPrompt] = useState<string>("");
-  const [isInClarificationFlow, setIsInClarificationFlow] = useState(false);
-  const [isAwaitingPlanApproval, setIsAwaitingPlanApproval] = useState(false);
-  const [completedStepIndices, setCompletedStepIndices] = useState<number[]>([]);
+  // One reducer, not nine useState hooks. Plan mode spans several renders:
+  // the orchestrator yields, stops, and is re-invoked with what the user
+  // supplied — so handlers must pass this state back in. Reading it from the
+  // render closure read whatever it was when that closure was created.
+  // See orchestrator-flow.ts for the four bugs that caused.
+  const [flow, dispatchFlow] = useReducer(flowReducer, {
+    ...initialFlowState,
+    mode: initialMode,
+  });
+
+  // A synchronously-current mirror of `flow`. React state updates are async,
+  // but the escalation and clarification handlers must re-invoke the
+  // orchestrator with the state they JUST produced, within the same tick.
+  const flowRef = useRef(flow);
+
+  /**
+   * Applies an action to both the ref (immediately) and React (for render),
+   * and returns the resulting state so the caller can pass it straight on.
+   */
+  function applyFlow(action: FlowAction): OrchestratorFlowState {
+    const next = flowReducer(flowRef.current, action);
+    flowRef.current = next;
+    dispatchFlow(action);
+    return next;
+  }
 
   const [tokenStats, setTokenStats] = useState({
     inputTokens: 0,
@@ -417,59 +430,48 @@ export function Chat({ onChangeKeys, mode: initialMode = "build", initialPrompt 
         setLog(reconstructedLog);
       }
       
-      // Restore current mode
-      if (sessionState.currentMode) {
-        setCurrentMode(sessionState.currentMode);
-      } else {
-        setCurrentMode("build");
-      }
-      
-      // Restore or reset orchestrator state
-      if (sessionState.orchestratorState) {
-        const orchState = sessionState.orchestratorState;
-        setPendingPlan(orchState.pendingPlan || null);
-        setPendingClarifications(orchState.pendingClarifications || []);
-        setClarificationAnswers(orchState.clarificationAnswers || {});
-        setCurrentClarificationIndex(orchState.currentClarificationIndex ?? 0);
-        setIsInClarificationFlow(orchState.isInClarificationFlow ?? false);
-        setOriginalPrompt(orchState.originalPrompt || "");
-        setCompletedStepIndices(orchState.completedStepIndices || []);
-        setIsAwaitingPlanApproval(orchState.isAwaitingPlanApproval ?? false);
+      // ── Restore the orchestrator flow ────────────────────────────────
+      //
+      // Schema-versioned: if the stored shape predates the reducer we keep
+      // the conversation transcript and drop the flow, rather than resuming
+      // a half-understood state.
+      const orchState = isCurrentSessionSchema(sessionState)
+        ? sessionState.orchestratorState
+        : undefined;
 
-        if (orchState.pendingPlan && orchState.originalPrompt) {
-          // Auto-execute the plan after a short delay to allow UI to render
-          setTimeout(() => {
-            runOrchestratorFlow(
-              orchState.originalPrompt!,
-              orchState.clarificationAnswers || {},
-              orchState.pendingPlan
-            );
-          }, 100);
-        }
-      } else {
-        // Reset orchestrator states for clean session
-        setPendingPlan(null);
-        setPendingClarifications([]);
-        setClarificationAnswers({});
-        setCurrentClarificationIndex(0);
-        setIsInClarificationFlow(false);
-        setOriginalPrompt("");
-        setCompletedStepIndices([]);
-        setIsAwaitingPlanApproval(false);
+      applyFlow({
+        type: "restore",
+        state: {
+          mode: sessionState.currentMode ?? "build",
+          pendingPlan: orchState?.pendingPlan ?? null,
+          pendingClarifications: orchState?.pendingClarifications ?? [],
+          clarificationAnswers: orchState?.clarificationAnswers ?? {},
+          currentClarificationIndex: orchState?.currentClarificationIndex ?? 0,
+          isInClarificationFlow: orchState?.isInClarificationFlow ?? false,
+          originalPrompt: orchState?.originalPrompt ?? "",
+          completedStepIndices: orchState?.completedStepIndices ?? [],
+          isAwaitingPlanApproval: orchState?.isAwaitingPlanApproval ?? false,
+        },
+      });
+
+      // A plan left pending from last time is OFFERED, never auto-run.
+      // It used to re-execute itself on mount via setTimeout, with
+      // completedStepIndices still empty — silently redoing finished steps.
+      if (orchState?.pendingPlan && orchState.originalPrompt) {
+        setLog((l) => [
+          ...l,
+          { kind: "plan-display", steps: orchState.pendingPlan! },
+          {
+            kind: "assistant",
+            text: "This plan was left pending in this session. Execute it? (y/n)",
+          },
+        ]);
       }
     } else {
       // Complete reset if no sessionState
       history.current = [];
       setLog([]);
-      setCurrentMode("build");
-      setPendingPlan(null);
-      setPendingClarifications([]);
-      setClarificationAnswers({});
-      setCurrentClarificationIndex(0);
-      setIsInClarificationFlow(false);
-      setOriginalPrompt("");
-      setCompletedStepIndices([]);
-      setIsAwaitingPlanApproval(false);
+      applyFlow({ type: "reset" });
     }
 
     buildSystemPrompt(process.cwd()).then((prompt) => {
@@ -485,6 +487,22 @@ export function Chat({ onChangeKeys, mode: initialMode = "build", initialPrompt 
     } catch {}
     sessionPermissions.reset();
   }, [sessionName]);
+
+  // ── Auto-submit the CLI prompt ───────────────────────────────────────
+  //
+  // `zizou "fix the typo"` and `zizou plan "add auth"` pass the prompt down
+  // as initialPrompt. It was accepted and never referenced, so the prompt was
+  // silently dropped and the user was left at an empty input — even though
+  // App.tsx documents this as auto-submitting.
+  //
+  // Waits for contextReady so the system prompt is built before the turn,
+  // and guards with a ref so a re-render can't submit it twice.
+  const autoSubmittedRef = useRef(false);
+  useEffect(() => {
+    if (!contextReady || !initialPrompt || autoSubmittedRef.current) return;
+    autoSubmittedRef.current = true;
+    handleSubmit(initialPrompt);
+  }, [contextReady, initialPrompt]);
 
   const confirmFn: ConfirmFn = (description) => {
     if (sessionPermissions.isPermitted(description)) {
@@ -929,7 +947,7 @@ export function Chat({ onChangeKeys, mode: initialMode = "build", initialPrompt 
 
       if (suggestionMode === "commands") {
         const executableCommands = [
-          "/settings", "/keys", "/clear", "/reset", "/exit", "/quit", "/prompt", "/skills", "/help", "/model", "/plan", "/build"
+          "/settings", "/keys", "/clear", "/reset", "/exit", "/quit", "/prompt", "/skills", "/help", "/model", "/chat", "/plan", "/build"
         ];
         if (executableCommands.includes(selected)) {
           shouldExecute = true;
@@ -965,8 +983,8 @@ export function Chat({ onChangeKeys, mode: initialMode = "build", initialPrompt 
               setRepoMap(map);
             } catch {}
           },
-          onModeChange: (mode: "build" | "plan") => setCurrentMode(mode),
-          getCurrentMode: () => currentMode,
+          onModeChange: (mode: Mode) => applyFlow({ type: "set-mode", mode }),
+          getCurrentMode: () => flowRef.current.mode,
           setLog,
           setTokenStats,
           calculateTokenStats,
@@ -1008,8 +1026,8 @@ export function Chat({ onChangeKeys, mode: initialMode = "build", initialPrompt 
           setRepoMap(map);
         } catch {}
       },
-      onModeChange: (mode: "build" | "plan") => setCurrentMode(mode),
-      getCurrentMode: () => currentMode,
+      onModeChange: (mode: Mode) => applyFlow({ type: "set-mode", mode }),
+      getCurrentMode: () => flowRef.current.mode,
       setLog,
       setTokenStats,
       calculateTokenStats,
@@ -1022,70 +1040,60 @@ export function Chat({ onChangeKeys, mode: initialMode = "build", initialPrompt 
     // ── Clarification flow: user is answering clarifying questions ────
     // When the orchestrator has yielded clarification questions, we
     // intercept user input as answers instead of new prompts.
-    if (isInClarificationFlow && pendingClarifications.length > 0) {
+    const currentFlow = flowRef.current;
+    if (currentFlow.isInClarificationFlow && currentFlow.pendingClarifications.length > 0) {
       const trimmedInput = userText.trim().toLowerCase();
-      
-      // Check if user wants to skip remaining questions
+
+      // Skip the rest, but KEEP the answers already given.
       if (trimmedInput === "skip") {
         setLog((l) => [
           ...l,
           { kind: "user", text: userText },
           { kind: "assistant", text: "Skipping remaining questions..." },
         ]);
-        
-        setIsInClarificationFlow(false);
-        setPendingClarifications([]);
-        setCurrentClarificationIndex(0);
-        
-        // Re-run orchestrator in plan mode with answers collected so far
-        runOrchestratorFlow(originalPrompt, clarificationAnswers);
+
+        const next = applyFlow({ type: "clarifications-skipped" });
+        runOrchestratorFlow(next.originalPrompt, next, { answers: next.clarificationAnswers });
         return;
       }
-      
-      const currentQ = pendingClarifications[currentClarificationIndex];
-      const newAnswers = { ...clarificationAnswers, [currentQ.question]: userText };
-      setClarificationAnswers(newAnswers);
 
-      setLog((l) => [
-        ...l,
-        { kind: "user", text: userText },
-      ]);
+      const currentQ = currentFlow.pendingClarifications[currentFlow.currentClarificationIndex];
+      const next = applyFlow({
+        type: "clarification-answered",
+        question: currentQ.question,
+        answer: userText,
+      });
 
-      // Move to next question or finish clarification
-      if (currentClarificationIndex + 1 < pendingClarifications.length) {
-        setCurrentClarificationIndex(currentClarificationIndex + 1);
-        const nextQ = pendingClarifications[currentClarificationIndex + 1];
+      setLog((l) => [...l, { kind: "user", text: userText }]);
+
+      if (next.isInClarificationFlow) {
+        // More questions to go — show the next one and wait.
+        const nextQ = next.pendingClarifications[next.currentClarificationIndex];
         setLog((l) => [
           ...l,
           { kind: "assistant", text: `${nextQ.required ? "(required) " : ""}${nextQ.question}` },
         ]);
       } else {
-        // All questions answered — re-invoke orchestrator with answers
-        setIsInClarificationFlow(false);
-        setPendingClarifications([]);
-        setCurrentClarificationIndex(0);
-
-        // Re-run orchestrator in plan mode with collected answers
-        runOrchestratorFlow(originalPrompt, newAnswers);
+        // All answered — re-invoke with the accumulated answers.
+        runOrchestratorFlow(next.originalPrompt, next, { answers: next.clarificationAnswers });
       }
       return;
     }
 
     // ── Plan approval flow: user is saying Y/n to a displayed plan ────
-    if (isAwaitingPlanApproval && pendingPlan) {
+    if (currentFlow.isAwaitingPlanApproval && currentFlow.pendingPlan) {
       const answer = userText.trim().toLowerCase();
       setLog((l) => [...l, { kind: "user", text: userText }]);
 
       if (answer === "y" || answer === "yes" || answer === "continue") {
-        setIsAwaitingPlanApproval(false);
-        const approvedSteps = pendingPlan;
-        setPendingPlan(null);
-
-        // Re-invoke orchestrator with the approved plan
-        runOrchestratorFlow(originalPrompt, clarificationAnswers, approvedSteps);
+        const approvedSteps = currentFlow.pendingPlan;
+        const next = applyFlow({ type: "plan-approved" });
+        runOrchestratorFlow(next.originalPrompt, next, {
+          answers: next.clarificationAnswers,
+          approvedSteps,
+        });
       } else {
-        setIsAwaitingPlanApproval(false);
-        setPendingPlan(null);
+        applyFlow({ type: "plan-rejected" });
         setLog((l) => [
           ...l,
           { kind: "assistant", text: "Plan cancelled. You can modify your request and try again." },
@@ -1098,27 +1106,35 @@ export function Chat({ onChangeKeys, mode: initialMode = "build", initialPrompt 
     setLog((l) => [...l, { kind: "user", text: userText }]);
     history.current.push({ role: "user", content: userText });
     setBusy(true);
-    setOriginalPrompt(userText);
+
+    // A new prompt starts a fresh flow: clarifications, pending plan and
+    // completed-step indices all reset. Carrying completedStepIndices over
+    // used to make the NEXT plan skip the steps at those indices.
+    const freshFlow = applyFlow({ type: "prompt-submitted", prompt: userText });
 
     // Update token stats immediately for the user prompt
     const provider = getDefaultProvider() || "groq";
     setTokenStats(calculateTokenStats(history.current, systemPromptRef.current, undefined, provider, usageEntries));
 
     // ── Route through orchestrator ───────────────────────────────────────
-    // Both build and plan mode now go through the orchestrator.
+    // Chat, build and plan mode all go through the orchestrator.
     // The orchestrator yields OrchestratorEvents that we render as log entries.
-    runOrchestratorFlow(userText);
+    runOrchestratorFlow(userText, freshFlow);
   }
 
   // ─── Orchestrator Flow Runner ────────────────────────────────────────
   //
   // Drives the orchestrator async generator and translates its events
-  // into log entries and UI state changes. Separated from handleSubmit
-  // so it can be re-invoked during clarification/plan-approval flows.
+  // into log entries and flow-state transitions.
+  //
+  // `flow` is passed IN rather than read from the render closure. This
+  // function is re-invoked mid-turn (after clarifications, after plan
+  // approval, after escalation) and must see the state the caller just
+  // produced — not the state captured when this closure was created.
   async function runOrchestratorFlow(
     prompt: string,
-    answers?: Record<string, string>,
-    approvedSteps?: PlanStep[],
+    flowState: OrchestratorFlowState,
+    opts: { answers?: Record<string, string>; approvedSteps?: PlanStep[] } = {},
   ) {
     setBusy(true);
     const submitTime = Date.now();
@@ -1143,25 +1159,28 @@ export function Chat({ onChangeKeys, mode: initialMode = "build", initialPrompt 
         maxOutputTokens: aiConfig.maxOutputTokens,
       };
 
-      // Build the mode context — use current mode state
+      // Mode comes from the flow state passed in, so an escalation that just
+      // switched to plan mode is honoured on this very call rather than one
+      // render later. `reason` is real now — "escalated" used to be
+      // unreachable because this was hardcoded to "user-flag".
       const modeContext = {
-        mode: currentMode,
-        reason: "user-flag" as const,
+        mode: flowState.mode,
+        reason: flowState.modeReason,
       };
 
       // ── Drive the orchestrator ──────────────────────────────────────────
-      const orchestrator = runOrchestrator(
-        prompt,
+      const orchestrator = runOrchestrator({
+        userPrompt: prompt,
         modeContext,
-        projectContext,
+        context: projectContext,
         model,
-        confirmFn,
-        answers,
-        approvedSteps,
-        completedStepIndices,
-        history.current,
+        onConfirm: confirmFn,
+        clarificationAnswers: opts.answers,
+        approvedPlan: opts.approvedSteps,
+        completedStepIndices: flowState.completedStepIndices,
+        history: history.current,
         provider,
-      );
+      });
 
       let result = await orchestrator.next();
       while (!result.done) {
@@ -1170,8 +1189,8 @@ export function Chat({ onChangeKeys, mode: initialMode = "build", initialPrompt 
         // ── Handle orchestrator-level events ──────────────────────────────
         switch (event.kind) {
           case "mode-info":
-            // Update the mode badge in the footer and show a mode notification
-            setCurrentMode(event.mode);
+            // Reflect what actually ran (chat mode may be auto-detected).
+            applyFlow({ type: "mode-reported", mode: event.mode });
             setLog((l) => [
               ...l,
               { kind: "mode-switch", mode: event.mode, reason: event.reason },
@@ -1181,9 +1200,7 @@ export function Chat({ onChangeKeys, mode: initialMode = "build", initialPrompt 
           case "clarification-needed":
             // The clarifier generated questions — enter clarification flow.
             // Present questions one at a time and collect answers.
-            setPendingClarifications(event.questions);
-            setCurrentClarificationIndex(0);
-            setIsInClarificationFlow(true);
+            applyFlow({ type: "clarifications-received", questions: event.questions });
 
             // Show the clarification UI
             setLog((l) => [
@@ -1198,8 +1215,7 @@ export function Chat({ onChangeKeys, mode: initialMode = "build", initialPrompt 
 
           case "plan-ready":
             // The planner generated a plan — display it for Y/n approval.
-            setPendingPlan(event.steps);
-            setIsAwaitingPlanApproval(true);
+            applyFlow({ type: "plan-received", steps: event.steps });
 
             setLog((l) => [
               ...l,
@@ -1238,10 +1254,13 @@ export function Chat({ onChangeKeys, mode: initialMode = "build", initialPrompt 
                 modelTier: event.modelTier,
               },
             ]);
-            // Mark step as completed if verification succeeded
-            if (event.verification.verified) {
-              setCompletedStepIndices((prev) => [...prev, event.step.index]);
-            }
+            // Record completion. The reducer ignores duplicates, which the
+            // orchestrator produces for steps it skipped as already-done.
+            applyFlow({
+              type: "step-verified",
+              stepIndex: event.step.index,
+              verified: event.verification.verified,
+            });
             break;
 
           case "history-updated":
@@ -1265,15 +1284,15 @@ export function Chat({ onChangeKeys, mode: initialMode = "build", initialPrompt 
             });
 
             if (shouldSwitch) {
-              // Switch to plan mode and re-enter from scratch
-              setCurrentMode("plan");
-              setClarificationAnswers({});
+              // Switch to plan mode and re-enter from scratch. The new state
+              // is passed straight in, so this call really does run plan mode
+              // — it used to re-read "build" from the closure and ping-pong.
+              const escalated = applyFlow({ type: "escalation-accepted" });
               setLog((l) => [
                 ...l,
                 { kind: "mode-switch", mode: "plan", reason: "Escalated from build mode" },
               ]);
-              // Re-invoke orchestrator in plan mode with the original prompt
-              runOrchestratorFlow(originalPrompt);
+              runOrchestratorFlow(escalated.originalPrompt, escalated);
               return;
             } else {
               setLog((l) => [
@@ -1357,14 +1376,17 @@ export function Chat({ onChangeKeys, mode: initialMode = "build", initialPrompt 
               if (agentEvent.usage) {
                 hasActualUsage = true;
                 const modelId = getActiveModelId(provider);
-                
+                // Bind once: the setState callbacks below are closures, so the
+                // `if` narrowing above doesn't reach inside them.
+                const usage = agentEvent.usage;
+
                 // Add to usage entries for cost tracking
                 setUsageEntries((prev) => [
                   ...prev,
                   {
                     model: modelId,
-                    inputTokens: agentEvent.usage.inputTokens,
-                    outputTokens: agentEvent.usage.outputTokens,
+                    inputTokens: usage.inputTokens,
+                    outputTokens: usage.outputTokens,
                   },
                 ]);
                 
@@ -1373,8 +1395,8 @@ export function Chat({ onChangeKeys, mode: initialMode = "build", initialPrompt 
                     history.current,
                     systemPromptRef.current,
                     {
-                      inputTokens: agentEvent.usage.inputTokens,
-                      outputTokens: agentEvent.usage.outputTokens,
+                      inputTokens: usage.inputTokens,
+                      outputTokens: usage.outputTokens,
                     },
                     provider,
                     usageEntries
@@ -1424,16 +1446,16 @@ export function Chat({ onChangeKeys, mode: initialMode = "build", initialPrompt 
           tokenStats,
           pinnedFilesArray,
           log,
-          currentMode,
+          flowRef.current.mode,
           {
-            pendingPlan,
-            pendingClarifications,
-            clarificationAnswers,
-            currentClarificationIndex,
-            isInClarificationFlow,
-            isAwaitingPlanApproval,
-            originalPrompt,
-            completedStepIndices,
+            pendingPlan: flowRef.current.pendingPlan,
+            pendingClarifications: flowRef.current.pendingClarifications,
+            clarificationAnswers: flowRef.current.clarificationAnswers,
+            currentClarificationIndex: flowRef.current.currentClarificationIndex,
+            isInClarificationFlow: flowRef.current.isInClarificationFlow,
+            isAwaitingPlanApproval: flowRef.current.isAwaitingPlanApproval,
+            originalPrompt: flowRef.current.originalPrompt,
+            completedStepIndices: flowRef.current.completedStepIndices,
           }
         );
       } catch {}
@@ -1461,7 +1483,7 @@ export function Chat({ onChangeKeys, mode: initialMode = "build", initialPrompt 
             <Text color="gray">{sessionId}</Text>
           </Box>
           <Box flexDirection="row" gap={2}>
-            <Text color={currentMode === "plan" ? "#D08A4E" : "#3B5FE0"} bold>{currentMode === "plan" ? "◆ Plan" : "● Build"}</Text>
+            <Text color={MODE_BADGE[flow.mode].color} bold>{MODE_BADGE[flow.mode].glyph} {MODE_BADGE[flow.mode].label}</Text>
             <Text color="gray">{formattedTokensStr} tokens</Text>
           </Box>
         </Box>
@@ -1628,7 +1650,7 @@ export function Chat({ onChangeKeys, mode: initialMode = "build", initialPrompt 
               {/* Input Footer */}
               <Box flexDirection="row" justifyContent="space-between" paddingX={1} marginTop={0}>
                 <Box flexDirection="row" gap={1}>
-                  <Text backgroundColor={currentMode === "plan" ? "#D08A4E" : "#3B5FE0"} color="white" bold> {currentMode === "plan" ? "Plan" : "Build"} ({getContextMode()}) </Text>
+                  <Text backgroundColor={MODE_BADGE[flow.mode].color} color="white" bold> {MODE_BADGE[flow.mode].label} ({getContextMode()}) </Text>
                   <Text color="gray">{getActiveModelId(getDefaultProvider() || "groq")}</Text>
                 </Box>
                 <Box flexDirection="row" gap={2}>
@@ -1656,14 +1678,14 @@ export function Chat({ onChangeKeys, mode: initialMode = "build", initialPrompt 
             <Text color="#E6E6E6" bold>{sessionName}</Text>
             <Text color="gray">{sessionId}</Text>
             <Box flexDirection="row" gap={1} marginTop={0}>
-              <Text color={currentMode === "plan" ? "#D08A4E" : "#3B5FE0"} bold>{currentMode === "plan" ? "◆ Plan" : "● Build"}</Text>
+              <Text color={MODE_BADGE[flow.mode].color} bold>{MODE_BADGE[flow.mode].glyph} {MODE_BADGE[flow.mode].label}</Text>
               <Text color="gray">mode</Text>
             </Box>
           </Box>
 
           {/* Section 2: Context statistics */}
           <Box flexDirection="column" marginBottom={1}>
-            <Text color="#E6E6E6" bold marginBottom={0}>Context</Text>
+            <Text color="#E6E6E6" bold>Context</Text>
             <Text color="gray">Max: {tokenStats.contextLimit.toLocaleString()} tokens</Text>
             <Text color="gray">In:  {tokenStats.inputTokens.toLocaleString()}</Text>
             <Text color="gray">Out: {tokenStats.outputTokens.toLocaleString()}</Text>

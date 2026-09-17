@@ -139,24 +139,12 @@ export function validateFileSyntax(filePath: string): string | null {
       case ".jsx":
       case ".ts":
       case ".tsx":
-        // Basic syntax check - look for obvious syntax errors
-        // This is a lightweight check, not a full parser
-        const openBraces = (content.match(/\{/g) || []).length;
-        const closeBraces = (content.match(/\}/g) || []).length;
-        const openParens = (content.match(/\(/g) || []).length;
-        const closeParens = (content.match(/\)/g) || []).length;
-        const openBrackets = (content.match(/\[/g) || []).length;
-        const closeBrackets = (content.match(/\]/g) || []).length;
-
-        if (openBraces !== closeBraces) {
-          return `Unbalanced braces in ${ext} file`;
-        }
-        if (openParens !== closeParens) {
-          return `Unbalanced parentheses in ${ext} file`;
-        }
-        if (openBrackets !== closeBrackets) {
-          return `Unbalanced brackets in ${ext} file`;
-        }
+        // NOTE: We intentionally skip delimiter-counting checks here.
+        // Naive brace/paren/bracket counting produces false positives on
+        // valid code: characters inside string literals, template literals,
+        // regex patterns, and comments are all counted, making the check
+        // unreliable without a real parser. Bun/tsc will catch real syntax
+        // errors at execution time.
         break;
 
       case ".css":
@@ -356,10 +344,20 @@ Ensure your response is valid JSON.`;
           verboseFeedback = parsed.verboseFeedback;
         }
 
+        // LLM semantic feedback is advisory only — it goes into verboseFeedback
+        // but does NOT contribute to the mismatches array. Reasons:
+        //   • Build mode is inherently iterative; asking "does this one file
+        //     fully implement the task?" after the first tool call is the wrong
+        //     semantic and will almost always produce false failures.
+        //   • Plan mode steps already have the user's approval; a secondary LLM
+        //     judge contradicting that approval causes unnecessary escalations.
+        //   • Filesystem checks (mtime, existence) are the ground truth for
+        //     whether the executor actually did something — keep that authoritative.
         if (!parsed.verified && parsed.mismatches && parsed.mismatches.length > 0) {
-          for (const mismatch of parsed.mismatches) {
-            mismatches.push(`LLM verification mismatch: ${mismatch}`);
-          }
+          const llmNote = `LLM review notes (advisory): ${parsed.mismatches.join("; ")}`;
+          verboseFeedback = verboseFeedback
+            ? `${verboseFeedback}\n\n${llmNote}`
+            : llmNote;
         }
       }
     } catch (err) {

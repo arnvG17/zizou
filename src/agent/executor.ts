@@ -35,26 +35,13 @@
 
 import { type LanguageModel, type ModelMessage } from "ai";
 import { buildSystemPrompt, type AgentRole } from "../context/build-system-prompt.js";
-import { runTurn, extractRawToolCall, type AgentEvent } from "./run-turn.js";
+import { runTurn, type AgentEvent } from "./run-turn.js";
+import { extractRawToolCall } from "./fallback-tool-parse.js";
 import type { ConfirmFn } from "../tools/types.js";
 import type { PlanStep, StepResult, ToolCall, ProjectContext } from "./types.js";
 import { SessionLogger } from "./debug/index.js";
 import { captureFileState } from "../checkpoint/patcher.js";
-import {
-  createReadFileTool,
-  createWriteFileTool,
-  createEditFileTool,
-  glob,
-  grep,
-  listDir,
-  openFile,
-  addFileToContext,
-  createRunBashTool,
-  createRunBackgroundTool,
-  manageTasks,
-  managePorts,
-  createFileOperationsTool,
-} from "../tools/index.js";
+import { buildToolMap } from "../tools/index.js";
 
 // ─── Step Prompt Builder ─────────────────────────────────────────────────────
 //
@@ -163,33 +150,44 @@ function extractFileFromToolCall(toolName: string, input: unknown): string | nul
 
 // ─── Main Execute Function ───────────────────────────────────────────────────
 
+/** Everything executeStep needs. One object so callers don't juggle seven positional args. */
+export interface ExecuteStepOptions {
+  /** The plan step to execute. */
+  step: PlanStep;
+  /** Ambient project info (root, prompt, budget). */
+  context: ProjectContext;
+  /** The resolved LLM to use for execution. */
+  model: LanguageModel;
+  /** Callback for user confirmation of shell commands and file writes. */
+  onConfirm: ConfirmFn;
+  /** Provider name — selects provider-specific options and the model tier. */
+  provider?: string;
+  /** Prior conversation, so the step prompt can resolve "that file" / "it". */
+  conversationHistory?: ModelMessage[];
+}
+
 /**
- * Executes a single PlanStep and returns a StepResult.
+ * Executes a single PlanStep, STREAMING AgentEvents as they happen and
+ * returning the StepResult when the step finishes.
  *
  * This is the core execution function used in both modes:
  *   - Build mode: orchestrator synthesizes a single step, calls this once.
  *   - Plan mode: orchestrator calls this for each step in dependency order.
  *
- * The function drives runTurn() with a step-scoped context and captures
- * the tool call stream to build the StepResult.
+ * WHY A GENERATOR: this used to take an `onEvent` callback AND accumulate
+ * every event into `StepResult.agentEvents`. Both orchestrator call sites
+ * passed onEvent as undefined and replayed the accumulated array after the
+ * step had already finished — so nothing reached the UI until the whole step
+ * was done, and all of runTurn's streaming was thrown away. Yielding directly
+ * removes the duplicate event channel and restores real streaming.
  *
- * @param step - The plan step to execute.
- * @param context - Ambient project info (root, prompt, budget).
- * @param model - The resolved LLM to use for execution.
- * @param onConfirm - Callback for user confirmation of shell commands.
- * @param onEvent - Optional callback to forward agent events to the UI.
- *                  The orchestrator uses this to stream events to Chat.tsx.
- * @returns StepResult with claimed files and tool call log.
+ * Consume it with `yield*` to get the StepResult as the generator's return.
  */
-export async function executeStep(
-  step: PlanStep,
-  context: ProjectContext,
-  model: LanguageModel,
-  onConfirm: ConfirmFn,
-  onEvent?: (event: AgentEvent) => void,
-  provider?: string,
-  conversationHistory?: ModelMessage[],
-): Promise<StepResult> {
+export async function* executeStep(
+  options: ExecuteStepOptions,
+): AsyncGenerator<AgentEvent, StepResult> {
+  const { step, context, model, onConfirm, provider, conversationHistory } = options;
+
   // Build a system prompt with the executor role — repo map follows
   // existing budget scaling (excluded under "light").
   const systemPrompt = await buildSystemPrompt(
@@ -227,26 +225,26 @@ export async function executeStep(
   // Tracking collections for building the StepResult
   const claimedFiles = new Set<string>();
   const toolCallsMade: ToolCall[] = [];
-  const agentEvents: AgentEvent[] = [];
   const oldFileStates = new Map<string, string | null>();
   let fullResponseText = "";
-
-  // ── Conversation history tracking for subsequent rounds ─────────────────────
-  const loggedHistory: ModelMessage[] = [
-    { role: "user", content: stepPrompt }
-  ];
-  let roundIndex = 1;
-  let currentAssistantParts: any[] = [];
-  let currentToolParts: any[] = [];
+  let sawTextDelta = false;
 
   // Track in-progress tool calls so we can pair call → result
   const pendingToolCalls = new Map<string, { toolName: string; input: unknown }>();
 
   // ── Drive the runTurn loop ─────────────────────────────────────────────
   //
-  // runTurn is an async generator that yields AgentEvents. We consume
-  // every event, forward it to the UI (if onEvent is provided), and
-  // capture tool calls for the StepResult.
+  // runTurn is an async generator that yields AgentEvents. We re-yield every
+  // event straight through to the caller and capture what the verifier needs
+  // along the way.
+  //
+  // NOTE: the assistant/tool message history is NOT rebuilt here. runTurn
+  // returns the canonical ModelMessage[] as its generator return value (it
+  // comes from the AI SDK's own responseMessages), which is what feeds
+  // cleanHistoryForNextTurn below. An earlier version reconstructed a
+  // parallel `loggedHistory` from the event stream purely to mark round
+  // boundaries in the debug log — ~120 lines re-deriving something the SDK
+  // already hands over, and a second thing to keep correct.
   const turn = runTurn({
     history,
     model,
@@ -258,105 +256,50 @@ export async function executeStep(
     maxOutputTokens: context.maxOutputTokens,
   });
 
+  /** Renders one labelled block for the session log, matching the existing format. */
+  const logBlock = (title: string, fields: Record<string, string>): void => {
+    const body = Object.entries(fields)
+      .map(([label, value]) => `    ${label.padEnd(9)}: ${value}`)
+      .join("\n");
+    SessionLogger.logExecutorStreamEvent(`\n  [${title}]\n${body}\n`);
+  };
+
+  /** Indents a JSON payload under its label, truncating very large outputs. */
+  const indentPayload = (value: unknown, maxChars = Infinity): string => {
+    let text = JSON.stringify(value, null, 2) ?? String(value);
+    if (text.length > maxChars) {
+      text = text.slice(0, maxChars) + "\n... (truncated)";
+    }
+    return "\n" + text.split("\n").map((l) => `      ${l}`).join("\n");
+  };
+
   let result = await turn.next();
   while (!result.done) {
     const event = result.value;
 
-    // Forward the event to the UI so the user sees real-time progress
-    if (onEvent) {
-      onEvent(event);
-    }
+    // Stream the event to the caller immediately. This is the whole point of
+    // the generator: the UI renders as the model works, not after it stops.
+    yield event;
 
-    // ── Round Transition Detection ───────────────────────────────────
-    // If we receive a new text chunk or tool-call but we have already
-    // executed tools in the previous round, we are transitioning to a
-    // new LLM request.
-    if ((event.kind === "text-delta" || event.kind === "tool-call") && currentToolParts.length > 0) {
-      loggedHistory.push({ role: "assistant", content: [...currentAssistantParts] });
-      loggedHistory.push({ role: "tool", content: [...currentToolParts] });
-      currentAssistantParts = [];
-      currentToolParts = [];
-      roundIndex++;
-      SessionLogger.logLLMRoundStart(roundIndex, systemPrompt, loggedHistory);
-    }
-
-    // ── Log high-level events to session log (silencing text-deltas) ──
+    // ── Capture what the verifier and checkpointer need ──────────────────
     if (event.kind === "text-delta") {
       fullResponseText += event.text;
-
-      // Accumulate text part for history tracking
-      let textPart = currentAssistantParts.find(p => p.type === "text");
-      if (!textPart) {
-        textPart = { type: "text", text: "" };
-        currentAssistantParts.unshift(textPart); // Keep text at the beginning
-      }
-      textPart.text += event.text;
+      sawTextDelta = true;
     } else if (event.kind === "tool-call") {
-      const argsStr = JSON.stringify(event.input, null, 2);
-      SessionLogger.logExecutorStreamEvent(
-        `\n  [TOOL CALL INITIATED]\n` +
-        `    Tool Name: ${event.toolName}\n` +
-        `    ID       : ${event.toolCallId}\n` +
-        `    How Sent : Sent via native JSON tool-calling protocol (function calling) in LLM API payload\n` +
-        `    Arguments:\n` +
-        argsStr.split("\n").map(l => `      ${l}`).join("\n") + "\n"
-      );
-
-      // Accumulate tool-call part for history tracking
-      currentAssistantParts.push({
-        type: "tool-call",
-        toolCallId: event.toolCallId,
-        toolName: event.toolName,
-        args: event.input
+      logBlock("TOOL CALL INITIATED", {
+        "Tool Name": event.toolName,
+        "ID": event.toolCallId,
+        "How Sent": "Sent via native JSON tool-calling protocol (function calling) in LLM API payload",
+        "Arguments": indentPayload(event.input),
       });
-    } else if (event.kind === "tool-result") {
-      const outputStr = JSON.stringify(event.output, null, 2);
-      const outputPreview = outputStr.length > 2000 ? outputStr.slice(0, 2000) + "\n      ... (truncated)" : outputStr;
-      SessionLogger.logExecutorStreamEvent(
-        `\n  [TOOL CALL COMPLETED]\n` +
-        `    Tool Name: ${event.toolName}\n` +
-        `    ID       : ${event.toolCallId}\n` +
-        `    Result   :\n` +
-        outputPreview.split("\n").map(l => `      ${l}`).join("\n") + "\n"
-      );
 
-      // Accumulate tool-result part for history tracking
-      currentToolParts.push({
-        type: "tool-result",
-        toolCallId: event.toolCallId,
-        toolName: event.toolName,
-        result: event.output,
-        isError: false
-      });
-    } else if (event.kind === "tool-error") {
-      SessionLogger.logExecutorStreamEvent(
-        `\n  [TOOL CALL ERROR]\n` +
-        `    Tool Name: ${event.toolName}\n` +
-        `    ID       : ${event.toolCallId}\n` +
-        `    Error    : ${String(event.error)}\n`
-      );
-
-      // Accumulate tool-error part as tool-result for history tracking
-      currentToolParts.push({
-        type: "tool-result",
-        toolCallId: event.toolCallId,
-        toolName: event.toolName,
-        result: { error: String(event.error) },
-        isError: true
-      });
-    } else if (event.kind === "finish") {
-      SessionLogger.logExecutorStreamEvent(`\n  [LLM FINISHED GENERATION] usage=${JSON.stringify(event.usage ?? {})}\n`);
-    }
-
-    // ── Capture tool calls ───────────────────────────────────────────
-    if (event.kind === "tool-call") {
-      // Record the pending tool call so we can pair it with its result
+      // Record the pending call so we can pair it with its result.
       pendingToolCalls.set(event.toolCallId, {
         toolName: event.toolName,
         input: event.input,
       });
 
-      // Check if this is a file-modifying tool call and track the file
+      // File-modifying call: remember the path and its pre-change content.
       const filePath = extractFileFromToolCall(event.toolName, event.input);
       if (filePath) {
         claimedFiles.add(filePath);
@@ -364,10 +307,13 @@ export async function executeStep(
           oldFileStates.set(filePath, captureFileState(filePath));
         }
       }
-    }
+    } else if (event.kind === "tool-result") {
+      logBlock("TOOL CALL COMPLETED", {
+        "Tool Name": event.toolName,
+        "ID": event.toolCallId,
+        "Result": indentPayload(event.output, 2000),
+      });
 
-    // ── Capture tool results ─────────────────────────────────────────
-    if (event.kind === "tool-result") {
       const pending = pendingToolCalls.get(event.toolCallId);
       if (pending) {
         toolCallsMade.push({
@@ -378,10 +324,14 @@ export async function executeStep(
         });
         pendingToolCalls.delete(event.toolCallId);
       }
-    }
+    } else if (event.kind === "tool-error") {
+      logBlock("TOOL CALL ERROR", {
+        "Tool Name": event.toolName,
+        "ID": event.toolCallId,
+        "Error": String(event.error),
+      });
 
-    // ── Capture tool errors (still record the call, with error output)
-    if (event.kind === "tool-error") {
+      // Still record the call, with the error as its output.
       const pending = pendingToolCalls.get(event.toolCallId);
       if (pending) {
         toolCallsMade.push({
@@ -392,10 +342,11 @@ export async function executeStep(
         });
         pendingToolCalls.delete(event.toolCallId);
       }
+    } else if (event.kind === "finish") {
+      SessionLogger.logExecutorStreamEvent(
+        `\n  [LLM FINISHED GENERATION] usage=${JSON.stringify(event.usage ?? {})}\n`,
+      );
     }
-
-    // ── Capture all agent events for usage tracking ───────────────────
-    agentEvents.push(event);
 
     result = await turn.next();
   }
@@ -409,32 +360,15 @@ export async function executeStep(
 
   if (toolCallsMade.length === 0 && fullResponseText.trim().length > 0) {
     const fallback = extractRawToolCall(fullResponseText);
-    // Build a local tool map for lookup (mirrors the one in runTurn)
-    const fallbackTools: Record<string, any> = {
-      readFile: createReadFileTool(onConfirm),
-      writeFile: createWriteFileTool(onConfirm),
-      editFile: createEditFileTool(onConfirm),
-      glob,
-      grep,
-      listDir,
-      openFile,
-      addFileToContext,
-      runBash: createRunBashTool(onConfirm),
-      runBackground: createRunBackgroundTool(onConfirm),
-      manageTasks,
-      managePorts,
-      fileOperations: createFileOperationsTool(onConfirm),
-    };
+    // Same map the model was offered in the first place — see tools/index.ts.
+    const fallbackTools = buildToolMap(onConfirm);
 
     if (fallback && fallbackTools[fallback.name]) {
       const tool = fallbackTools[fallback.name];
       if (tool) {
         const toolCallId = `fallback_${Math.random().toString(36).slice(2, 9)}`;
 
-        // Emit tool-call event to the UI
-        if (onEvent) {
-          onEvent({ kind: "tool-call", toolCallId, toolName: fallback.name, input: fallback.arguments });
-        }
+        yield { kind: "tool-call", toolCallId, toolName: fallback.name, input: fallback.arguments };
 
         // Log initiation with FALLBACK marker
         const argsStr = JSON.stringify(fallback.arguments, null, 2);
@@ -460,19 +394,11 @@ export async function executeStep(
         let success = true;
         try {
           output = await tool.execute(fallback.arguments, { toolCallId, messages: history });
-
-          // Emit tool-result event
-          if (onEvent) {
-            onEvent({ kind: "tool-result", toolCallId, toolName: fallback.name, output });
-          }
+          yield { kind: "tool-result", toolCallId, toolName: fallback.name, output };
         } catch (e) {
           success = false;
           output = { error: String(e) };
-
-          // Emit tool-error event
-          if (onEvent) {
-            onEvent({ kind: "tool-error", toolCallId, toolName: fallback.name, error: e });
-          }
+          yield { kind: "tool-error", toolCallId, toolName: fallback.name, error: e };
         }
 
         // Log the full fallback interception via SessionLogger
@@ -491,20 +417,14 @@ export async function executeStep(
           output,
         });
 
-        agentEvents.push(
-          { kind: "tool-call", toolCallId, toolName: fallback.name, input: fallback.arguments },
-          success
-            ? { kind: "tool-result", toolCallId, toolName: fallback.name, output }
-            : { kind: "tool-error", toolCallId, toolName: fallback.name, error: output },
-        );
       }
     } else {
       // Model replied with text only — no tool call, no parseable pseudo-call.
       // This is a legitimate response: a question, clarification, or explanation.
-      // Ensure the text is in agentEvents so the UI renders it and the user
-      // can reply. Without this, the text was silently swallowed.
-      if (!agentEvents.some((e) => e.kind === "text-delta")) {
-        agentEvents.push({ kind: "text-delta", text: fullResponseText });
+      // If the text never arrived as deltas, emit it once so the UI renders it
+      // and the user can reply. Without this the text is silently swallowed.
+      if (!sawTextDelta) {
+        yield { kind: "text-delta", text: fullResponseText };
       }
       SessionLogger.logExecutorStreamEvent(
         `\n  [LLM TEXT-ONLY RESPONSE — no tool call made]\n` +
@@ -513,16 +433,19 @@ export async function executeStep(
     }
   }
 
-  const updatedHistory = cleanHistoryForNextTurn(result.value || []);
+  // Log the canonical exchange once, before we strip payloads for the next turn.
+  const rawHistory = result.value || [];
+  SessionLogger.logLLMConversation(systemPrompt, rawHistory);
+
+  const updatedHistory = cleanHistoryForNextTurn(rawHistory);
 
   // Determine model tier based on provider
   const modelTier: "hosted" | "local" = provider === "ollama" ? "local" : "hosted";
 
-  const finalResult = {
+  const finalResult: StepResult = {
     stepIndex: step.index,
     claimedFiles: Array.from(claimedFiles),
     toolCallsMade,
-    agentEvents,
     oldFileStates,
     conversationHistory: updatedHistory,
     modelTier,
