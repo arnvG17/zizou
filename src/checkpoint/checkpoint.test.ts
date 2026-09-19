@@ -2,30 +2,25 @@
 //
 // Regression tests for the checkpoint data-loss bugs (plan Phase 0).
 //
-// WHY THE DYNAMIC IMPORTS: checkpoint/storage.ts and checkpoint/patcher.ts
-// capture `const CWD = process.cwd()` at module-evaluation time, and the
-// history file path is derived from a hash of the cwd. To exercise the real
-// code against a throwaway project we must chdir BEFORE the modules are first
-// imported, which rules out a static top-level import.
-//
-// Phase 3 removes the module-level CWD capture; these tests should be
-// simplified to plain imports at that point.
+// These run against a throwaway project directory: both the history file path
+// and every file operation resolve against the CURRENT cwd, so chdir-ing is
+// enough to isolate them. (That was not always true — storage.ts and
+// patcher.ts used to cache `const CWD = process.cwd()` at module load, which
+// forced these tests to chdir before a dynamic import.)
 
 import { test, expect, afterAll, beforeEach } from "bun:test";
 import { mkdtempSync, writeFileSync, existsSync, rmSync, mkdirSync } from "fs";
-import { tmpdir, homedir } from "os";
+import { tmpdir } from "os";
 import { join } from "path";
+
+import * as manager from "./manager.js";
+import * as storage from "./storage.js";
 
 const originalCwd = process.cwd();
 const workspace = mkdtempSync(join(tmpdir(), "zizou-cp-test-"));
-process.chdir(workspace);
 
-// Imported only after the chdir above, so their CWD constants point at `workspace`.
-const manager = await import("./manager.js");
-const storage = await import("./storage.js");
-
-// See the matching note in checkpoints/step-snapshot.test.ts: test files share
-// a process, and more than one of them chdirs.
+// See the matching note in undo-redo.test.ts: test files share a process,
+// and more than one of them chdirs.
 beforeEach(() => {
   process.chdir(workspace);
 });

@@ -1,40 +1,31 @@
 // src/context/build-system-prompt.ts
 //
-// LAYER: context/. This is the bridge between the repo-map generator
-// (repo-map.ts) and the agent loop (src/agent/run-turn.ts) — it produces
-// the actual TEXT that gets injected as the system prompt, combining:
-//   1. General instructions about how to behave as a coding agent
-//   2. The pre-computed repo map (Level 1 context — see repo-map.ts)
-//   3. A pointer telling the model it ALSO has glob/grep/readFile tools
-//      for Level 0 exploration when the map isn't enough (e.g. the map
-//      missed a symbol due to its known regex limitations, or the model
-//      needs to see actual file CONTENTS, which the map deliberately
-//      excludes to keep it small)
+// LAYER: context/. This produces the TEXT injected as the system prompt:
+//   1. Behaviour rules for the requesting role
+//   2. Session facts (workspace root, OS, shell)
+//   3. Project conventions from ZIZOU.md
+//   4. Any files the user pinned with /add
 //
-// WHY THIS IS ITS OWN FILE rather than inlined into Chat.tsx: per
-// HOUSE_RULES, agent/ and ui/ should not need to know HOW context gets
-// built, only that they can ask for "the system prompt" and get a
-// string back. If context-building later grows more steps (e.g. an
-// importance-ranking pass, tree-sitter extraction, embedding-based
-// retrieval of specific files relevant to the user's actual question),
-// every one of those changes is isolated to this file and repo-map.ts —
-// neither Chat.tsx nor run-turn.ts need to change at all.
+// THERE IS NO REPO MAP HERE ANY MORE.
 //
-// ROLE-AWARE REPO MAP (new):
-//   The repo-map inclusion decision is now gated by WHICH AGENT ROLE is
-//   requesting context, not just by the budget level alone:
-//     - "clarifier" / "planner": ALWAYS include the repo map, even under
-//       "light" budget. Taking the repo map away from planning causes the
-//       write-before-scaffold ordering bug — the planner needs a project
-//       overview to know what files already exist.
-//     - "executor": follows the existing budget-scaled behavior. Under
-//       "light", the executor works from an explicit target file supplied
-//       by the plan step, so it doesn't need the repo overview.
-//     - undefined (backward compat): treated as executor, so existing
-//       call sites (Chat.tsx) continue to work without changes.
+// It used to inject a pre-computed symbol summary ("Level 1" context, the
+// Aider technique) into every prompt. Measured on this project it cost ~5.7k
+// tokens, and it was wrong in both directions: about a quarter of its 86
+// files came from an unrelated Next.js app under docs/, it listed private
+// helpers and local variables as if they were API, and it silently omitted
+// every tool declared as `export const x = tool({...})` because the extractor
+// is regex-based and cannot tell that from `const x = 5`.
+//
+// Both roles now FIND things instead of being told them:
+//   - executor: has glob, grep, listDir, readFile alongside its write tools
+//   - planner:  has the read-only subset (see tools/buildReadOnlyToolMap)
+//
+// A search returns what is actually on disk right now. That is strictly
+// better than a summary that is stale, partial, and paid for on every turn.
+//
+// repo-map.ts still exists and is still used — by the TUI sidebar, where a
+// rough outline is useful to a human and costs no tokens.
 
-import { buildRepoMap } from "./repo-map.js";
-import { getContextMode } from "../config/api-keys.js";
 import { existsSync, readFileSync } from "fs";
 import { resolve } from "path";
 import { platform } from "os";
@@ -52,6 +43,13 @@ import { loadProjectConventions } from "./load-project-conventions.js";
 //                  so the repo map is optional (follows budget setting).
 
 export type AgentRole = "clarifier" | "planner" | "executor";
+
+/**
+ * How many characters of pinned file content may enter the prompt.
+ * ~8k characters is roughly 2k tokens — enough for a couple of reference
+ * files without letting /add quietly consume the context window.
+ */
+const PINNED_CHAR_BUDGET = 8000;
 
 export const pinnedContextFiles = new Set<string>();
 
@@ -78,7 +76,7 @@ function getOSInfo(): { os: string; shell: string } {
   return { os: "Linux", shell: "bash" };
 }
 
-const BASE_INSTRUCTIONS = `You are Zizou, an AI coding agent with direct filesystem access through tools.
+const EXECUTOR_INSTRUCTIONS = `You are Zizou, an AI coding agent with direct filesystem access through tools.
 
 Rules:
 - Use native function-calling protocol only. Never emit raw JSON blocks or pseudo-calls as plain text.
@@ -99,77 +97,50 @@ editFile recovery strategy:
   editFile({ path: "app.html", old_string: "...", new_string: "...", near_line: 42 })
 - If editFile fails twice on the same file, you will be told to fall back to writeFile with the complete corrected contents. Do this immediately — do not keep retrying editFile with cosmetic variations of old_string.`;
 
-// ─── Role-Aware Repo Map Decision ────────────────────────────────────────────
-//
-// This is the core fix for the "Light budget strips repo map from
-// planner" bug. The decision tree is:
-//
-//   role = clarifier or planner?
-//     → YES: always include repo map, regardless of budget.
-//            These roles NEED the project overview to do their job.
-//     → NO (executor or undefined):
-//            Follow the existing budget-scaled behavior:
-//            - "light"   → no repo map
-//            - "default" → include repo map
-//            - "max"     → include repo map
-//
-// This function is pure — no side effects, no LLM call.
+const PLANNER_INSTRUCTIONS_BASE = `You are Zizou, an AI coding agent, currently planning rather than building.
 
-function shouldIncludeRepoMap(
-  role: AgentRole | undefined,
-  budget: string,
-  targetFiles?: string[],
-): boolean {
-  // Clarifier and planner always need the repo map to understand project
-  // structure. Without it, the planner generates plans that reference
-  // files that don't exist or miss existing scaffolding.
-  if (role === "clarifier" || role === "planner") return true;
+You have READ-ONLY tools: glob, grep, listDir, readFile. You cannot write
+files, edit files, or run commands — those belong to the execution phase.
 
-  // Executor with an empty targetFiles list (e.g. build-mode conversational
-  // input or direct build execution) has nothing to orient a map around — skip it entirely.
-  if (role === "executor" && targetFiles !== undefined && targetFiles.length === 0) {
-    return false;
-  }
-
-  // Executor (or undefined for backward compat): existing budget behavior.
-  // Under "light", the executor has explicit targetFiles from the plan step
-  // and doesn't need the full repo overview.
-  return budget !== "light";
-}
+Rules:
+- Use the native function-calling protocol only. Never emit raw JSON blocks
+  or pseudo-calls as plain text.
+- Search before you assert. Never reference a file path you have not seen in
+  a glob, grep or listDir result.
+- Prefer grep for "does X exist and where", glob for "what files match",
+  listDir for "what is in this folder", readFile when you need the contents.
+- Stop exploring once you can write the plan. You are not reviewing the
+  codebase, you are gathering just enough to order the work correctly.`;
 
 /**
- * Builds the complete system prompt for a session: base instructions +
- * the project's repo map. Called once per session (not per turn) since
- * walking the filesystem and re-running extraction on every message
- * would be wasteful — see src/ui/Chat.tsx for where this gets cached.
+ * Builds the system prompt for one role.
+ *
+ * Cheap and deterministic: no filesystem walk, no symbol extraction. It is
+ * cached per session in Chat.tsx anyway, but it no longer needs to be — the
+ * expensive part (the repo map) is gone, and both roles discover the codebase
+ * with tools instead.
  *
  * @param projectRoot - Absolute path to the workspace root.
- * @param role - Which agent role is requesting context. Determines whether
- *               the repo map is included. Defaults to undefined (treated
- *               as executor for backward compatibility with existing call
- *               sites in Chat.tsx that don't pass a role).
+ * @param role - Which role is asking. Selects the behaviour rules; defaults
+ *               to executor, which is what the UI's display copy wants.
  */
 export async function buildSystemPrompt(
   projectRoot: string,
-  role?: AgentRole,
-  targetFiles?: string[],
+  role: AgentRole = "executor",
 ): Promise<string> {
-  const mode = getContextMode();
-  let repoMap = "";
-  
-  // Use the role-aware decision function instead of the old blanket
-  // `mode !== "light"` check. This ensures clarifier and planner always
-  // get the repo map even when the user has set --context light.
-  // Also gates executor on targetFiles — empty list means no map needed.
-  if (shouldIncludeRepoMap(role, mode, targetFiles)) {
-    repoMap = buildRepoMap(projectRoot);
-  }
+  const instructions =
+    role === "planner" ? PLANNER_INSTRUCTIONS_BASE : EXECUTOR_INSTRUCTIONS;
 
-  // Load project conventions from ZIZOU.md if present
+  // Project conventions from ZIZOU.md, minus its "## Agent" settings block.
+  // Those lines are configuration for Zizou, not guidance for the model, and
+  // reading "provider: anthropic" as a project convention is pure noise.
   let projectConventions = "";
   const conventions = await loadProjectConventions(projectRoot);
   if (conventions) {
-    projectConventions = `\n\n--- PROJECT CONVENTIONS (from ZIZOU.md) ---\n${conventions}\n--- END PROJECT CONVENTIONS ---`;
+    const prose = stripAgentSection(conventions).trim();
+    if (prose) {
+      projectConventions = `\n\n--- PROJECT CONVENTIONS (from ZIZOU.md) ---\n${prose}\n--- END PROJECT CONVENTIONS ---`;
+    }
   }
 
   const { os, shell } = getOSInfo();
@@ -187,26 +158,87 @@ When creating or writing a file, you can use either:
 Both will work — relative paths are resolved to the workspace root automatically.
 --- END SESSION CONTEXT ---`;
 
-  let pinnedText = "";
-  if (pinnedContextFiles.size > 0) {
-    pinnedText = "\n\n--- PINNED FILES ---\nThe user has pinned the following files to your permanent context:\n";
-    for (const file of pinnedContextFiles) {
-      try {
-        const contents = readFileSync(file, "utf8");
-        pinnedText += `\nFile: ${file}\n\`\`\`\n${contents}\n\`\`\`\n`;
-      } catch (err) {
-        pinnedText += `\nFile: ${file} (Failed to read)\n`;
+  const pinnedText = buildPinnedSection();
+
+  const exploreHint =
+    role === "planner"
+      ? "\n\nYou have not been given a summary of this codebase. Use glob, grep and listDir to find what you need."
+      : "\n\nYou have not been given a summary of this codebase. Use glob, grep, listDir and readFile to find what you need before editing.";
+
+  return `${instructions}${SESSION_CONTEXT}${projectConventions}${pinnedText}${exploreHint}`;
+}
+
+/**
+ * Renders pinned files, newest cap first.
+ *
+ * PINNED FILES ARE CAPPED. They are injected verbatim into every prompt for
+ * the life of the session, so a single `/add` on a large file used to sit in
+ * the context window forever, uncapped, silently crowding out conversation.
+ * Over the limit we include the head of the file and say so, which is honest
+ * about what the model can actually see.
+ */
+function buildPinnedSection(): string {
+  if (pinnedContextFiles.size === 0) return "";
+
+  let out = "\n\n--- PINNED FILES ---\nThe user has pinned the following files to your permanent context:\n";
+  let remaining = PINNED_CHAR_BUDGET;
+
+  for (const file of pinnedContextFiles) {
+    let contents: string;
+    try {
+      contents = readFileSync(file, "utf8");
+    } catch {
+      out += `\nFile: ${file} (Failed to read)\n`;
+      continue;
+    }
+
+    if (remaining <= 0) {
+      out += `\nFile: ${file} (omitted — pinned-file budget exhausted)\n`;
+      continue;
+    }
+
+    if (contents.length > remaining) {
+      const kept = contents.slice(0, remaining);
+      out += `\nFile: ${file} (truncated — showing the first ${remaining} of ${contents.length} characters)\n\`\`\`\n${kept}\n\`\`\`\n`;
+      remaining = 0;
+    } else {
+      out += `\nFile: ${file}\n\`\`\`\n${contents}\n\`\`\`\n`;
+      remaining -= contents.length;
+    }
+  }
+
+  out += "--- END PINNED FILES ---";
+  return out;
+}
+
+/**
+ * Removes the `## Agent` settings block from ZIZOU.md, leaving the prose.
+ * Mirrors the section-finding in config/zizou-md.ts, which reads the same
+ * block for the opposite purpose.
+ */
+function stripAgentSection(content: string): string {
+  const lines = content.split("\n");
+  const out: string[] = [];
+
+  let skipping = false;
+  let headingLevel = 0;
+
+  for (const line of lines) {
+    const heading = line.match(/^(#{1,6})\s+(.*)$/);
+
+    if (heading) {
+      if (skipping && heading[1].length <= headingLevel) {
+        skipping = false;
+      }
+      if (!skipping && /^agent\b/i.test(heading[2].trim())) {
+        skipping = true;
+        headingLevel = heading[1].length;
+        continue;
       }
     }
-    pinnedText += "--- END PINNED FILES ---";
+
+    if (!skipping) out.push(line);
   }
 
-  // If we didn't build a repo map (either because the role-aware check
-  // said "no" or because scanRepo found no source files), tell the model
-  // to use tools for exploration instead.
-  if (!repoMap) {
-    return `${BASE_INSTRUCTIONS}${SESSION_CONTEXT}${projectConventions}${pinnedText}\n\n(Repo map is disabled for this context configuration, or no source files were found. Use tools like listDir to explore.)`;
-  }
-
-  return `${BASE_INSTRUCTIONS}${SESSION_CONTEXT}${projectConventions}${pinnedText}\n\n--- REPO MAP ---\n${repoMap}\n--- END REPO MAP ---`;
+  return out.join("\n");
 }

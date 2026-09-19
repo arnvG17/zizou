@@ -15,15 +15,19 @@
 //             and pin is worth more than a hidden branch.
 //
 //   "build" — The default. Synthesizes a single PlanStep from the raw user
-//             prompt and hands it straight to the executor. No clarifier,
-//             no planner. This is how every `zizou "<prompt>"` invocation
+//             prompt and hands it straight to the executor. No planner.
+//             This is how every `zizou "<prompt>"` invocation
 //             works: fast, low-overhead, one-shot execution with a
 //             verification pass at the end.
 //
 //   "plan"  — Activated by `zizou plan "<prompt>"` or `--plan`. Runs the
-//             full loop: clarifier → planner → plan-confirmation gate →
-//             per-step execute+verify. Designed for multi-file feature
-//             work where you want to review the plan before execution.
+//             full loop: planner → plan-confirmation gate → per-step
+//             execute+verify. Designed for multi-file feature work where you
+//             want to review the plan before execution.
+//
+//             The planner never asks questions. It decides anything the
+//             request left open and declares those decisions as assumptions
+//             at the top of the plan, which you accept or reject at the gate.
 //
 // WHY NOT AN LLM CLASSIFICATION CALL:
 //   The naive approach — ask the LLM upfront whether this prompt is
@@ -31,17 +35,18 @@
 //   1. It adds latency and cost to EVERY request, even trivial ones.
 //   2. It just relocates the ambiguity (the LLM's classification can be
 //      wrong) rather than resolving it.
-//   Instead: the user picks the mode explicitly, and if a build-mode
-//   request turns out to be more complex than expected mid-execution,
-//   the orchestrator detects this DETERMINISTICALLY (by counting touched
-//   files or catching verification failures) and offers to escalate to
-//   plan mode — never silently, always with a user prompt.
 //
-// The `reason` field in ModeContext tracks HOW we ended up in this mode:
-//   "user-flag"  — the user explicitly chose it (CLI flag or command)
-//   "escalated"  — the orchestrator switched from build to plan because
-//                  deterministic escalation logic triggered (e.g., too
-//                  many files touched, verification failure)
+// WHY NOTHING SWITCHES MODE BUT THE USER:
+//   Build mode used to escalate itself to plan mode mid-turn: on a
+//   verification failure or a high file count it stopped and asked, via a
+//   modal y/n, whether to restart the whole request as a plan. That was a
+//   mistake. Verification failure is a routine, noisy signal, so the prompt
+//   interrupted ordinary successful turns; and accepting discarded the work
+//   already written to disk to start over.
+//
+//   Now a large build step emits an advisory ScopeHint that the UI prints as
+//   one line, and the turn finishes normally. Switching to plan mode is the
+//   user's call, via /plan.
 
 // ─── Types ───────────────────────────────────────────────────────────────────
 
@@ -53,14 +58,16 @@
 export type Mode = "chat" | "build" | "plan";
 
 /**
- * Captures both the active mode AND how we got there — important because
- * escalation from build → plan needs to be distinguishable from the user
- * originally choosing plan mode (e.g., for logging, or to decide whether
- * to show "escalated from build" messaging in the UI).
+ * The active mode and how we got there.
+ *
+ * `reason` is always "user-flag" today: the mode is whatever the user chose,
+ * and nothing else can change it. The field is kept because the orchestrator
+ * threads a ModeContext through and a future non-user source (a project
+ * config default, say) would belong here rather than as a second parameter.
  */
 export interface ModeContext {
   mode: Mode;
-  reason: "user-flag" | "escalated";
+  reason: "user-flag";
 }
 
 // ─── Resolver ────────────────────────────────────────────────────────────────
@@ -69,13 +76,11 @@ export interface ModeContext {
  * Deterministically resolves which mode to run in based on CLI flags.
  *
  * This is intentionally trivial — a pure function with no side effects,
- * no LLM call, no heuristics. The complexity lives in the orchestrator's
- * escalation logic (see orchestrator.ts), not here.
+ * no LLM call, no heuristics.
  *
  * @param args.planFlag - true if the user passed `--plan` or used
  *                        `zizou plan "<prompt>"` as a positional command.
- * @returns A ModeContext with reason "user-flag" — escalation is handled
- *          separately by the orchestrator after execution begins.
+ * @returns A ModeContext with reason "user-flag".
  */
 export function resolveMode(args: { planFlag: boolean }): ModeContext {
   return {

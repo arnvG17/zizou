@@ -1,6 +1,7 @@
 // src/ui/orchestrator-flow.test.ts
 //
-// Covers the four stale-closure bugs the reducer replaces (plan Phase 2b).
+// Covers the stale-closure bugs the reducer replaces, and the invariant that
+// the orchestrator never changes mode on its own.
 
 import { test, expect } from "bun:test";
 import { flowReducer, initialFlowState, type OrchestratorFlowState } from "./orchestrator-flow.js";
@@ -9,29 +10,7 @@ function reduce(state: OrchestratorFlowState, ...actions: Parameters<typeof flow
   return actions.reduce(flowReducer, state);
 }
 
-test("accepting escalation switches to plan mode and records the reason", () => {
-  // Bug: setCurrentMode("plan") followed by an immediate re-invoke read the
-  // pre-update mode from the render closure, re-ran build mode, escalated
-  // again for the same reason, and ping-ponged.
-  const state = reduce(initialFlowState,
-    { type: "prompt-submitted", prompt: "refactor everything" },
-    { type: "escalation-accepted" },
-  );
-
-  expect(state.mode).toBe("plan");
-  expect(state.modeReason).toBe("escalated");
-});
-
-test("escalation clears any half-applied build-mode progress", () => {
-  const state = reduce(initialFlowState,
-    { type: "prompt-submitted", prompt: "big change" },
-    { type: "step-verified", stepIndex: 0, verified: true },
-    { type: "escalation-accepted" },
-  );
-
-  expect(state.completedStepIndices).toEqual([]);
-  expect(state.clarificationAnswers).toEqual({});
-});
+const oneStep = [{ index: 0, description: "do a thing", targetFiles: [], dependsOn: [] }];
 
 test("a new prompt resets completedStepIndices", () => {
   // Bug: indices were only ever appended, so plan A's completed steps caused
@@ -46,6 +25,16 @@ test("a new prompt resets completedStepIndices", () => {
   const afterPlanB = flowReducer(afterPlanA, { type: "prompt-submitted", prompt: "plan B" });
   expect(afterPlanB.completedStepIndices).toEqual([]);
   expect(afterPlanB.originalPrompt).toBe("plan B");
+});
+
+test("a new prompt clears any plan left at the approval gate", () => {
+  const state = reduce(initialFlowState,
+    { type: "plan-received", steps: oneStep, assumptions: ["React"] },
+    { type: "prompt-submitted", prompt: "something else" },
+  );
+  expect(state.pendingPlan).toBeNull();
+  expect(state.pendingAssumptions).toEqual([]);
+  expect(state.isAwaitingPlanApproval).toBe(false);
 });
 
 test("a new prompt keeps the mode the user pinned", () => {
@@ -71,70 +60,39 @@ test("a failed step is not recorded as completed", () => {
   expect(state.completedStepIndices).toEqual([]);
 });
 
-test("skipping clarifications keeps the answers already given", () => {
-  // Bug: the skip path passed the stale answers object, dropping everything
-  // the user had typed so far.
-  const state = reduce(initialFlowState,
-    { type: "clarifications-received", questions: [
-      { question: "Which framework?", required: true },
-      { question: "Which directory?", required: false },
-    ] },
-    { type: "clarification-answered", question: "Which framework?", answer: "React" },
-    { type: "clarifications-skipped" },
-  );
+test("a plan carries its assumptions to the approval gate", () => {
+  const state = flowReducer(initialFlowState, {
+    type: "plan-received",
+    steps: oneStep,
+    assumptions: ["React + Vite", "No backend"],
+  });
 
-  expect(state.clarificationAnswers).toEqual({ "Which framework?": "React" });
-  expect(state.isInClarificationFlow).toBe(false);
+  expect(state.isAwaitingPlanApproval).toBe(true);
+  expect(state.pendingAssumptions).toEqual(["React + Vite", "No backend"]);
 });
 
-test("answering the last question ends the clarification flow", () => {
+test("rejecting a plan clears it and its assumptions", () => {
   const state = reduce(initialFlowState,
-    { type: "clarifications-received", questions: [{ question: "Only one?", required: true }] },
-    { type: "clarification-answered", question: "Only one?", answer: "yes" },
-  );
-
-  expect(state.isInClarificationFlow).toBe(false);
-  expect(state.currentClarificationIndex).toBe(1);
-  expect(state.clarificationAnswers).toEqual({ "Only one?": "yes" });
-});
-
-test("answers accumulate across questions", () => {
-  const state = reduce(initialFlowState,
-    { type: "clarifications-received", questions: [
-      { question: "A?", required: true },
-      { question: "B?", required: true },
-    ] },
-    { type: "clarification-answered", question: "A?", answer: "1" },
-    { type: "clarification-answered", question: "B?", answer: "2" },
-  );
-
-  expect(state.clarificationAnswers).toEqual({ "A?": "1", "B?": "2" });
-  expect(state.isInClarificationFlow).toBe(false);
-});
-
-test("rejecting a plan clears it", () => {
-  const steps = [{ index: 0, description: "do a thing", targetFiles: [], dependsOn: [] }];
-  const state = reduce(initialFlowState,
-    { type: "plan-received", steps },
+    { type: "plan-received", steps: oneStep, assumptions: ["React"] },
     { type: "plan-rejected" },
   );
 
   expect(state.pendingPlan).toBeNull();
+  expect(state.pendingAssumptions).toEqual([]);
   expect(state.isAwaitingPlanApproval).toBe(false);
 });
 
 test("approving a plan keeps the steps but closes the gate", () => {
-  const steps = [{ index: 0, description: "do a thing", targetFiles: [], dependsOn: [] }];
   const state = reduce(initialFlowState,
-    { type: "plan-received", steps },
+    { type: "plan-received", steps: oneStep, assumptions: [] },
     { type: "plan-approved" },
   );
 
-  expect(state.pendingPlan).toEqual(steps);
+  expect(state.pendingPlan).toEqual(oneStep);
   expect(state.isAwaitingPlanApproval).toBe(false);
 });
 
-test("mode-reported reflects an auto-detected chat turn without claiming the user chose it", () => {
+test("mode-reported reflects an auto-detected chat turn", () => {
   const state = reduce(initialFlowState,
     { type: "set-mode", mode: "build" },
     { type: "prompt-submitted", prompt: "hi" },
@@ -142,7 +100,22 @@ test("mode-reported reflects an auto-detected chat turn without claiming the use
   );
 
   expect(state.mode).toBe("chat");
-  expect(state.modeReason).toBe("user-flag");
+});
+
+test("nothing in the reducer can switch a build flow into plan mode", () => {
+  // The orchestrator used to escalate build -> plan mid-turn behind the
+  // user's back. Mode is now the user's decision alone: no action other than
+  // an explicit set-mode (or the orchestrator reporting what it ran) moves it.
+  const build = flowReducer(initialFlowState, { type: "set-mode", mode: "build" });
+
+  const afterEverything = reduce(build,
+    { type: "prompt-submitted", prompt: "refactor the entire app" },
+    { type: "step-verified", stepIndex: 0, verified: false },
+    { type: "plan-received", steps: oneStep, assumptions: [] },
+    { type: "plan-rejected" },
+  );
+
+  expect(afterEverything.mode).toBe("build");
 });
 
 test("restore fills in defaults for anything the persisted state omits", () => {
@@ -155,4 +128,5 @@ test("restore fills in defaults for anything the persisted state omits", () => {
   expect(state.originalPrompt).toBe("resume me");
   expect(state.completedStepIndices).toEqual([]);
   expect(state.pendingPlan).toBeNull();
+  expect(state.pendingAssumptions).toEqual([]);
 });

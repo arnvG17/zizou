@@ -25,10 +25,13 @@
 //      from raw prompt) and plan mode (one step at a time from the plan).
 //
 // CONTEXT:
-//   Calls buildSystemPrompt({ role: "executor" }) — repo map follows
-//   existing budget scaling (excluded under "light" budget). The executor
-//   works from explicit targetFiles, so it doesn't need the full repo
-//   overview when running lean.
+//   Calls buildSystemPrompt({ role: "executor" }). There is no repo map:
+//   the executor FINDS what it needs with glob, grep, listDir and readFile,
+//   which return what is on disk right now rather than a stale summary.
+//   In build mode targetFiles is empty and the step description IS the
+//   user'''s prompt, so searching is the only way it locates anything —
+//   that is deliberate, not an oversight to be "fixed" by pre-loading
+//   context it may not need.
 //
 // DEPENDENCY DIRECTION: imports from agent/run-turn.ts, agent/types.ts,
 // context/. Must NOT import from ui/, config/, or provider/.
@@ -38,7 +41,7 @@ import { buildSystemPrompt, type AgentRole } from "../context/build-system-promp
 import { runTurn, type AgentEvent } from "./run-turn.js";
 import { extractRawToolCall } from "./fallback-tool-parse.js";
 import type { ConfirmFn } from "../tools/types.js";
-import type { PlanStep, StepResult, ToolCall, ProjectContext } from "./types.js";
+import type { PlanStep, StepResult, StepDigest, ToolCall, ProjectContext } from "./types.js";
 import { SessionLogger } from "./debug/index.js";
 import { captureFileState } from "../checkpoint/patcher.js";
 import { buildToolMap } from "../tools/index.js";
@@ -96,8 +99,25 @@ function extractRecentFileReferences(history?: ModelMessage[]): string[] {
  * referenced files so deictic references ("that file", "edit it") resolve
  * correctly even though the executor gets a fresh prompt.
  */
-function buildStepPrompt(step: PlanStep, conversationHistory?: ModelMessage[]): string {
+export function buildStepPrompt(
+  step: PlanStep,
+  conversationHistory?: ModelMessage[],
+  priorSteps?: StepDigest[],
+): string {
   let prompt = `Task: ${step.description}\n\nCall a tool to begin immediately. Do not ask clarifying questions.\nIMPORTANT: You MUST use the writeFile or editFile tools to write changes to disk. Printing file contents or code blocks as plain text in chat does NOT write files.`;
+
+  // What earlier steps of THIS plan already did. A few lines, not a
+  // transcript: enough that the step does not recreate a file a previous
+  // step wrote, or search for something already known to exist.
+  if (priorSteps && priorSteps.length > 0) {
+    prompt += `\n\nEarlier in this plan:\n`;
+    for (const prior of priorSteps) {
+      const files = prior.filesTouched.length > 0 ? prior.filesTouched.join(", ") : "no files changed";
+      const flag = prior.verified ? "" : " (verification reported problems)";
+      prompt += `  - Step ${prior.index + 1}: ${prior.description} → ${files}${flag}\n`;
+    }
+    prompt += `\nThose files already exist. Read one before editing it; do not recreate it from scratch.`;
+  }
 
   if (step.targetFiles.length > 0) {
     prompt += `\n\nTarget files to create or modify:\n`;
@@ -164,6 +184,8 @@ export interface ExecuteStepOptions {
   provider?: string;
   /** Prior conversation, so the step prompt can resolve "that file" / "it". */
   conversationHistory?: ModelMessage[];
+  /** Digests of earlier steps in the same plan. Empty/absent in build mode. */
+  priorSteps?: StepDigest[];
 }
 
 /**
@@ -186,22 +208,22 @@ export interface ExecuteStepOptions {
 export async function* executeStep(
   options: ExecuteStepOptions,
 ): AsyncGenerator<AgentEvent, StepResult> {
-  const { step, context, model, onConfirm, provider, conversationHistory } = options;
+  const { step, context, model, onConfirm, provider, conversationHistory, priorSteps } = options;
 
-  // Build a system prompt with the executor role — repo map follows
-  // existing budget scaling (excluded under "light").
+  // The executor discovers the codebase with its own glob/grep/readFile
+  // tools rather than being handed a pre-computed summary. targetFiles is
+  // no longer passed here: it used to gate a repo map that no longer exists.
   const systemPrompt = await buildSystemPrompt(
     context.projectRoot,
     "executor" as AgentRole,
-    step.targetFiles,
   );
 
 
   // Build the step-specific user message, passing conversation history
   // so it can resolve deictic references ("that file", "it") from prior turns.
-  const stepPrompt = buildStepPrompt(step, conversationHistory);
+  const stepPrompt = buildStepPrompt(step, conversationHistory, priorSteps);
 
-  SessionLogger.logExecutorStepStart(step, context.budget);
+  SessionLogger.logExecutorStepStart(step, `maxSteps=${context.maxSteps}`);
   SessionLogger.logExecutorStepLLM(systemPrompt, stepPrompt);
 
   // Initialize the conversation history. If conversationHistory is provided (e.g. build mode),
@@ -251,7 +273,7 @@ export async function* executeStep(
     provider,
     onConfirm,
     systemPrompt,
-    maxSteps: 15,
+    maxSteps: context.maxSteps,
     temperature: context.temperature,
     maxOutputTokens: context.maxOutputTokens,
   });
@@ -461,95 +483,151 @@ export async function* executeStep(
 }
 
 /**
- * Cleans the conversation history for subsequent turns by stripping large payloads
- * (like full file contents from readFile or search matches from grep) and leaving only
- * the tool names, file paths referenced, and whether they succeeded/failed.
+ * Number of recent assistant rounds whose tool results survive intact.
+ *
+ * The model needs full fidelity for what it is working on right now, and only
+ * a receipt for what it already acted on three rounds ago. Collapsing
+ * everything (the original intent) threw away detail still in use; collapsing
+ * nothing let a single session grow to 144KB of state.json.
  */
-function cleanHistoryForNextTurn(messages: ModelMessage[]): ModelMessage[] {
-  const filePaths = new Map<string, string>();
+export const FULL_DETAIL_ROUNDS = 3;
 
-  // First pass: extract file paths from tool calls
+/** Placeholder left where a large payload used to be, so elision is visible. */
+const ELIDED = "<elided from history — see the file on disk>";
+
+/**
+ * Trims large tool payloads out of older turns before the next request.
+ *
+ * WHY THIS WAS DOING NOTHING: it used to read `part.result` and
+ * `part.args`. AI SDK v7 names those fields `output` and `input`. Every
+ * lookup returned undefined, so the function stringified `undefined` into a
+ * `result` field the SDK does not read, while the real `output` passed
+ * through untouched by the spread. Net effect: nothing was ever trimmed, and
+ * every readFile's full contents, every grep's full match list and every
+ * bash command's entire stdout stayed in the context window for the rest of
+ * the session — plus a junk `{success: true, message: "undefined"}` on every
+ * tool result.
+ *
+ * Recent rounds are returned unchanged. Older ones keep the shape of what
+ * happened (which tool, which file, did it work) and drop the payload.
+ */
+export function cleanHistoryForNextTurn(messages: ModelMessage[]): ModelMessage[] {
+  const cutoff = findRecentCutoff(messages, FULL_DETAIL_ROUNDS);
+
+  // Tool calls carry the path; the matching result does not. Pair them up so
+  // a collapsed result can still say WHICH file it was about.
+  const pathByCallId = new Map<string, string>();
   for (const msg of messages) {
-    if (Array.isArray(msg.content)) {
-      for (const part of msg.content) {
-        const anyPart = part as any;
-        if (anyPart.type === "tool-call") {
-          const path = anyPart.args?.path || anyPart.args?.filePath || anyPart.args?.file;
-          if (typeof path === "string") {
-            filePaths.set(anyPart.toolCallId, path);
-          }
-        }
-      }
+    if (!Array.isArray(msg.content)) continue;
+    for (const part of msg.content as any[]) {
+      if (part.type !== "tool-call") continue;
+      const input = part.input ?? part.args;
+      const path = input?.path ?? input?.filePath ?? input?.file;
+      if (typeof path === "string") pathByCallId.set(part.toolCallId, path);
     }
   }
 
-  // Second pass: clean up content
-  return messages.map((msg) => {
-    if (!Array.isArray(msg.content)) {
-      return msg;
-    }
+  return messages.map((msg, index) => {
+    if (!Array.isArray(msg.content) || index >= cutoff) return msg;
 
-    const cleanedContent = msg.content.map((part: any) => {
-      if (part.type === "tool-call") {
-        // Keep all file-writing/editing arguments intact (including contents)
-        // so the model has the code in history.
-        return part;
-      }
-
+    const content = (msg.content as any[]).map((part) => {
+      if (part.type === "tool-call") return collapseToolCall(part);
       if (part.type === "tool-result") {
-        const toolName = part.toolName;
-        const res = part.result;
-        let cleanedResult: any = { success: true };
-
-        if (res && typeof res === "object") {
-          cleanedResult.success = res.success !== false;
-          if (res.error) {
-            cleanedResult.error = String(res.error);
-          }
-
-          const file = filePaths.get(part.toolCallId) || "unknown";
-
-          if (toolName === "readFile") {
-            cleanedResult.file = file;
-            cleanedResult.success = res.success !== false;
-            // Preserve the code contents so the LLM doesn't need to re-read
-            cleanedResult.contents = res.contents; 
-            cleanedResult.message = res.success ? "Successfully read file" : "Failed to read file";
-          } else if (toolName === "writeFile") {
-            cleanedResult.file = file;
-            cleanedResult.message = res.success ? "Successfully wrote file" : "Failed to write file";
-          } else if (toolName === "editFile") {
-            cleanedResult.file = file;
-            cleanedResult.message = res.success ? "Successfully edited file" : "Failed to edit file";
-          } else if (toolName === "glob") {
-            cleanedResult.matches = Array.isArray(res.files) ? res.files : [];
-          } else if (toolName === "grep") {
-            cleanedResult.matches = Array.isArray(res.matches) 
-              ? res.matches.map((m: string) => m.split(":")[0]).filter((v: string, idx: number, self: string[]) => self.indexOf(v) === idx) 
-              : [];
-          } else if (toolName === "runBash" || toolName === "runBackground") {
-            cleanedResult.message = res.success ? "Command completed successfully" : "Command failed";
-            if (res.taskId) cleanedResult.taskId = res.taskId;
-          } else {
-            cleanedResult.message = res.message || (res.success ? "Success" : "Failed");
-          }
-        } else {
-          cleanedResult = { success: !part.isError, message: String(res) };
-        }
-
-        return {
-          ...part,
-          result: cleanedResult,
-        };
+        return { ...part, output: collapseToolOutput(part, pathByCallId) };
       }
-
       return part;
     });
 
-    return {
-      ...msg,
-      content: cleanedContent,
-    };
-  }) as ModelMessage[];
+    return { ...msg, content } as ModelMessage;
+  });
 }
 
+/**
+ * Index of the first message belonging to the last `keepRounds` assistant
+ * rounds. Messages at or after it are left alone.
+ */
+function findRecentCutoff(messages: ModelMessage[], keepRounds: number): number {
+  let seen = 0;
+  for (let i = messages.length - 1; i >= 0; i--) {
+    if (messages[i].role !== "assistant") continue;
+    seen++;
+    if (seen > keepRounds) return i + 1;
+  }
+  return 0;
+}
+
+/**
+ * Drops the bulky argument from an old tool call.
+ *
+ * writeFile's input holds the ENTIRE new file contents. Left in place it is
+ * re-sent on every subsequent request for the rest of the session, which is
+ * the single largest contributor to history growth. The path and the fact of
+ * the write are what later turns actually need.
+ */
+function collapseToolCall(part: any): any {
+  if (part.toolName !== "writeFile") return part;
+
+  const input = part.input ?? part.args;
+  if (!input || typeof input !== "object" || typeof input.contents !== "string") {
+    return part;
+  }
+  if (input.contents.length < 400) return part; // small enough to keep
+
+  return {
+    ...part,
+    input: { ...input, contents: `${ELIDED} (${input.contents.length} chars written)` },
+  };
+}
+
+/** Reduces an old tool result to what it accomplished, not what it returned. */
+function collapseToolOutput(part: any, pathByCallId: Map<string, string>): any {
+  const output = part.output ?? part.result;
+  const file = pathByCallId.get(part.toolCallId) ?? "unknown";
+
+  if (!output || typeof output !== "object") {
+    return { success: !part.isError, message: String(output ?? "") };
+  }
+
+  const success = output.success !== false;
+  const base: Record<string, unknown> = { success };
+  if (output.error) base.error = String(output.error);
+
+  switch (part.toolName) {
+    case "readFile":
+      // The contents ARE dropped here, unlike in recent rounds. An old read
+      // the model has already acted on is a receipt, not a reference; if it
+      // needs the file again it can read it again, and will get the current
+      // version rather than a stale copy.
+      return { ...base, file, message: success ? "Read file" : "Failed to read file" };
+
+    case "writeFile":
+      return { ...base, file, message: success ? "Wrote file" : "Failed to write file" };
+
+    case "editFile":
+      return { ...base, file, message: success ? "Edited file" : "Failed to edit file" };
+
+    case "glob":
+      return { ...base, matches: Array.isArray(output.files) ? output.files : [] };
+
+    case "grep": {
+      // Keep which files matched, drop the matching lines.
+      const matches = Array.isArray(output.matches)
+        ? [...new Set(output.matches.map((m: string) => String(m).split(":")[0]))]
+        : [];
+      return { ...base, matches };
+    }
+
+    case "runBash":
+    case "runBackground": {
+      const collapsed: Record<string, unknown> = {
+        ...base,
+        message: success ? "Command completed successfully" : "Command failed",
+      };
+      if (output.taskId) collapsed.taskId = output.taskId;
+      return collapsed;
+    }
+
+    default:
+      return { ...base, message: output.message ?? (success ? "Success" : "Failed") };
+  }
+}

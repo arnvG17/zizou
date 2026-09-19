@@ -136,6 +136,26 @@ export interface Plan {
   steps: PlanStep[];
 }
 
+// ─── Step Digest ──────────────────────────────────────────────────────
+
+/**
+ * A one-line record of a finished plan step, carried forward to later steps.
+ *
+ * Plan steps each get a fresh prompt — that isolation is deliberate, it stops
+ * the model wandering between steps. But full isolation meant step 3 could not
+ * see that step 2 had already created the helper it was about to write again,
+ * and had to rediscover by searching. This is the minimum that prevents
+ * duplicated work: what ran, and which files it touched. Not the transcript.
+ */
+export interface StepDigest {
+  index: number;
+  description: string;
+  /** Files the step actually created or modified. */
+  filesTouched: string[];
+  /** False when the verifier found mismatches — later steps should know. */
+  verified: boolean;
+}
+
 // ─── Verification Result ─────────────────────────────────────────────────────
 //
 // Output of the verifier. Tells the orchestrator whether the executor's
@@ -185,11 +205,13 @@ export interface ProjectContext {
   systemPrompt: string;
 
   /**
-   * Context budget level. Affects how much information is included
-   * in the system prompt. "light" excludes repo map for executor
-   * (but NOT for clarifier/planner — see build-system-prompt.ts).
+   * Cap on tool-call rounds per turn, from the effort level.
+   *
+   * Replaced a `budget` field that chose how much repo map to paste in.
+   * There is no repo map any more — both roles search instead — so the
+   * lever is how many searches they get.
    */
-  budget: "light" | "default" | "max";
+  maxSteps: number;
 
   /**
    * Sampling temperature for inference. From AIConfig.
@@ -204,51 +226,30 @@ export interface ProjectContext {
   maxOutputTokens?: number;
 }
 
-// ─── Clarifying Question ─────────────────────────────────────────────────────
+// ─── Scope hint ─────────────────────────────────────────────────────────────
 //
-// Produced by the clarifier in plan mode. The orchestrator presents these
-// to the user before invoking the planner.
+// A deterministic (non-LLM) observation that a finished build-mode step was
+// larger than a single step usually is.
+//
+// ADVISORY ONLY. The orchestrator prints one line and the turn completes.
+//
+// This replaces EscalationTrigger, which paused execution with a modal y/n
+// offering to restart the request in plan mode. That was wrong twice over:
+// one of its two triggers (verification failure) fires on plenty of perfectly
+// good turns, so users were interrupted routinely; and saying yes discarded
+// the work the build step had already written to disk and started over.
+// Nothing now changes the mode except the user.
 
 /**
- * A question the clarifier wants to ask before planning begins.
- *
- * `required` questions block planning until answered. Optional questions
- * can be skipped — the planner will make reasonable assumptions.
- */
-export interface ClarifyingQuestion {
-  /** The question text to display to the user. */
-  question: string;
-
-  /**
-   * If true, the planner cannot proceed without an answer.
-   * If false, the user can skip and the planner will assume defaults.
-   */
-  required: boolean;
-}
-
-// ─── Escalation ──────────────────────────────────────────────────────────────
-//
-// Deterministic (non-LLM) triggers that cause the orchestrator to pause
-// build-mode execution and ask the user whether to switch to plan mode.
-//
-// This is the alternative to the rejected "upfront LLM classification"
-// approach: instead of guessing complexity before execution, we detect
-// it DURING execution based on concrete signals.
-
-/**
- * A deterministic signal that a build-mode step exceeded the expected
- * scope of a "simple" one-shot fix. The orchestrator surfaces this to
- * the user as a prompt to switch to plan mode.
+ * A signal that a build-mode step looked oversized.
  *
  * `reason` values:
- *   "verification-failed"      — the verifier found mismatches between
- *                                 claimed and actual filesystem state
- *   "touched-too-many-files"   — the executor's claimed file count
- *                                 exceeded FILE_THRESHOLD (default 3)
- *   "step-implies-dependency"  — reserved for future use: the step's
- *                                 tool calls suggest it needs to create
- *                                 files that don't exist yet (scaffolding)
+ *   "touched-many-files"    — claimed file count exceeded FILE_THRESHOLD
+ *   "verification-failed"   — the verifier found mismatches between claimed
+ *                             and actual filesystem state
  */
-export interface EscalationTrigger {
-  reason: "verification-failed" | "touched-too-many-files" | "step-implies-dependency";
+export interface ScopeHint {
+  reason: "touched-many-files" | "verification-failed";
+  /** How many files the step claimed to touch, for the message. */
+  fileCount: number;
 }

@@ -3,40 +3,45 @@
 // LAYER: agent/
 //
 // The orchestration harness — owns plan state, drives the execution loop
-// differently per mode, and handles deterministic escalation.
+// differently per mode.
 //
 // THIS IS THE INTEGRATION POINT where all the other agent/ modules
-// (clarifier, planner, executor, verifier) get composed into a working
+// (planner, executor, verifier) get composed into a working
 // pipeline. No other module should drive the full loop — the orchestrator
 // is the single owner of execution flow.
 //
-// TWO MODES:
+// THREE MODES:
+//   Chat mode:
+//     Conversation only, tools disabled. Nothing on disk can change.
+//
 //   Build mode (default):
 //     1. Synthesize a single PlanStep from the raw user prompt
 //     2. Execute it via executeStep()
 //     3. Verify it via verifyStep()
-//     4. Check shouldEscalate() — if triggered, surface a prompt to the
-//        user asking whether to switch to plan mode. NEVER auto-switch.
+//     4. Emit a scope hint if the step looked oversized. Advisory only.
 //
-//   Plan mode (--plan flag):
-//     1. Run the clarifier to gather questions
-//     2. Present questions to user, collect answers
-//     3. Run the planner to generate a structured plan
-//     4. Display the full plan for user review (Y/n gate)
-//     5. For each step in dependsOn order:
+//   Plan mode (--plan flag or /plan):
+//     1. Run the planner to generate a structured plan plus the assumptions
+//        it had to make
+//     2. Display the plan for user review (Y/n gate)
+//     3. For each step in dependsOn order:
 //        a. capturePreSnapshot()
 //        b. executeStep()
 //        c. verifyStep()
 //        d. Record result
-//     6. Report completion
+//     4. Report completion
 //
-// ESCALATION LOGIC (build mode only):
-//   Deterministic, not LLM-judged. Two triggers:
-//     - Verification failed → the executor's claims don't match reality
-//     - Too many files touched → FILE_THRESHOLD exceeded
-//   On trigger: STOP immediately, ask the user. If they say yes,
-//   re-enter as plan mode FROM SCRATCH (fresh clarifier run, do NOT
-//   reuse partial build-mode state — that state may be corrupted).
+// WHAT IS DELIBERATELY ABSENT:
+//   - No clarifier. Plan mode does not interrogate the user before it has
+//     anything to show. The planner decides, states its assumptions, and the
+//     y/n gate on a concrete plan IS the clarification step.
+//   - No mode switching. The mode is whatever the user chose; the
+//     orchestrator never changes it mid-turn. A build step that looks too
+//     big emits an advisory hint and finishes — it does not interrupt with a
+//     modal prompt, and it does not discard work already on disk.
+//     This previously escalated on verification failure, which the verifier
+//     reports routinely, so ordinary turns were interrupted by a modal
+//     asking whether to restart the entire request.
 //
 // EVENT STREAMING:
 //   The orchestrator is an async generator that yields OrchestratorEvents.
@@ -52,12 +57,11 @@ import type { Mode, ModeContext } from "./mode.js";
 import type {
   PlanStep,
   StepResult,
+  StepDigest,
   VerificationResult,
   ProjectContext,
-  ClarifyingQuestion,
-  EscalationTrigger,
+  ScopeHint,
 } from "./types.js";
-import { clarify } from "./clarifier.js";
 import { plan } from "./planner.js";
 import { executeStep } from "./executor.js";
 import { capturePreSnapshot, verifyStep } from "./verifier.js";
@@ -70,13 +74,10 @@ import { resolve } from "path";
 // ─── Constants ───────────────────────────────────────────────────────────────
 
 /**
- * Maximum number of files a build-mode step can touch before escalation
- * is triggered. Set conservatively — a "simple" one-file fix should touch
- * 1-2 files. If it touches 4+, it's probably a multi-file feature that
- * deserves a plan.
+ * Number of files a build-mode step can touch before we mention that plan
+ * mode exists. Advisory only — nothing is blocked or restarted.
  *
- * This is a tuning parameter, not a hard architectural constant. Adjust
- * based on observed behavior in real usage.
+ * This is a tuning parameter, not a hard architectural constant.
  */
 const FILE_THRESHOLD = 3;
 
@@ -84,7 +85,7 @@ const FILE_THRESHOLD = 3;
 //
 // The event types the orchestrator yields to the UI. These are a superset
 // of AgentEvent — the orchestrator wraps raw agent events and adds its
-// own control-flow events (plan display, escalation prompts, etc.).
+// own control-flow events (plan display, scope hints, etc.).
 
 export type OrchestratorEvent =
   // Wraps a raw AgentEvent from the executor (text-delta, tool-call, etc.)
@@ -95,13 +96,9 @@ export type OrchestratorEvent =
   // this to update the mode badge in the input footer.
   | { kind: "mode-info"; mode: Mode; reason: string }
 
-  // Plan mode: the clarifier generated questions for the user.
-  // The UI presents these one at a time and collects answers.
-  | { kind: "clarification-needed"; questions: ClarifyingQuestion[] }
-
   // Plan mode: the planner generated a structured plan.
-  // The UI displays it for user review before execution begins.
-  | { kind: "plan-ready"; steps: PlanStep[] }
+  // The UI displays the assumptions and steps for review before execution.
+  | { kind: "plan-ready"; steps: PlanStep[]; assumptions: string[] }
 
   // Both modes: a step is about to begin execution.
   // The UI shows progress like "Step 2/5: Create component file".
@@ -114,12 +111,12 @@ export type OrchestratorEvent =
   // Emitted when the conversation history is updated (e.g. at the end of a build-mode step)
   | { kind: "history-updated"; history: ModelMessage[] }
 
-  // Build mode only: escalation triggered — the executor exceeded
-  // expected scope. The UI shows a Y/n prompt.
-  | { kind: "escalation-prompt"; trigger: EscalationTrigger }
+  // Build mode only: the step looked larger than a single step should be.
+  // ADVISORY — the UI prints a line and moves on. It does not prompt, does
+  // not block, and the turn still completes normally.
+  | { kind: "scope-hint"; hint: ScopeHint }
 
-  // The orchestration loop has finished (all steps complete, or
-  // escalation was offered and declined).
+  // The orchestration loop has finished.
   | { kind: "complete" };
 
 // ─── Step helpers ────────────────────────────────────────────────────────────
@@ -166,38 +163,38 @@ function recordStepCheckpoint(step: PlanStep, stepResult: StepResult): void {
   }
 }
 
-// ─── Escalation Logic ────────────────────────────────────────────────────────
+// ─── Scope assessment ────────────────────────────────────────────────────────
 //
-// Deterministic (non-LLM) check for whether a build-mode step exceeded
-// the expected scope of a "simple" one-shot fix.
+// Deterministic (non-LLM) check for whether a build-mode step turned out
+// bigger than a single step usually is.
+//
+// This was shouldEscalate(), and a hit interrupted the user with a modal y/n
+// offering to restart the whole request in plan mode. Two problems with that:
+// verification failure is a routine, noisy signal, so ordinary turns got
+// interrupted; and accepting discarded work already written to disk.
+// It is now advisory.
 
 /**
- * Checks if a build-mode execution result should trigger escalation.
+ * Returns a hint when a build-mode step looked oversized, or null.
  *
- * Returns null if no escalation is needed (the step looks simple enough).
- * Returns an EscalationTrigger if the step exceeded expected scope.
- *
- * IMPORTANT: This is called ONLY in build mode. Plan mode steps are
- * already scoped by the plan — escalation doesn't apply.
+ * Build mode only — plan mode steps are already scoped by the plan.
  */
-function shouldEscalate(
+function assessStepScope(
   result: StepResult,
   verification: VerificationResult,
-): EscalationTrigger | null {
-  // Trigger 1: Verification failed — the executor's claims don't match
-  // filesystem reality. Something went wrong during execution.
-  if (!verification.verified) {
-    return { reason: "verification-failed" };
-  }
-
-  // Trigger 2: Too many files touched — a "simple" fix shouldn't need
-  // to modify 4+ files. If it does, this is probably a multi-file
-  // feature that would benefit from a structured plan.
+): ScopeHint | null {
+  // Note the ORDER: file count is checked first. It is the more meaningful
+  // signal — verification failure says the verifier was unhappy, which on
+  // its own says little about how large the change was.
   if (result.claimedFiles.length > FILE_THRESHOLD) {
-    return { reason: "touched-too-many-files" };
+    return { reason: "touched-many-files", fileCount: result.claimedFiles.length };
   }
 
-  // No escalation needed — the step looks appropriately scoped.
+  if (!verification.verified) {
+    return { reason: "verification-failed", fileCount: result.claimedFiles.length };
+  }
+
+  // Appropriately scoped — say nothing.
   return null;
 }
 
@@ -255,7 +252,7 @@ function topologicalSort(steps: PlanStep[]): PlanStep[] {
 // ─── Build Mode Orchestration ────────────────────────────────────────────────
 //
 // The simple path: synthesize a single step from the user's prompt,
-// execute it, verify it, check for escalation.
+// execute it, verify it, and note if it looked oversized.
 
 /**
  * Runs the build-mode orchestration: single step, execute, verify.
@@ -275,8 +272,8 @@ async function* runBuildMode(
   yield { kind: "mode-info", mode: "build", reason: "Direct execution — single step" };
 
   // Synthesize a single PlanStep from the raw user prompt.
-  // In build mode, there's no clarifier or planner — we go straight
-  // to execution. The step description IS the user's prompt.
+  // In build mode there's no planner — we go straight to execution.
+  // The step description IS the user's prompt.
   const syntheticStep: PlanStep = {
     index: 0,
     description: userPrompt,
@@ -333,18 +330,15 @@ async function* runBuildMode(
     recordStepCheckpoint(syntheticStep, stepResult);
   }
 
-  // ── Escalation check ─────────────────────────────────────────────────
+  // ── Scope hint ────────────────────────────────────────────
   //
-  // The key build-mode safety net: if the step touched too many files
-  // or verification failed, we don't silently continue — we surface
-  // a prompt asking the user to switch to plan mode.
-  const escalation = shouldEscalate(stepResult, verification);
-  if (escalation) {
-    SessionLogger.logEscalation(escalation.reason);
-    yield { kind: "escalation-prompt", trigger: escalation };
-    // The UI will handle the Y/n prompt and potentially re-invoke
-    // the orchestrator in plan mode. We stop here.
-    return;
+  // Advisory only. The turn is finished and its work is on disk either way;
+  // this just mentions that plan mode exists. It does NOT prompt, block, or
+  // switch modes — that is the user's call and only the user's.
+  const hint = assessStepScope(stepResult, verification);
+  if (hint) {
+    SessionLogger.logScopeHint(hint.reason);
+    yield { kind: "scope-hint", hint };
   }
 
   SessionLogger.logSessionComplete();
@@ -353,25 +347,18 @@ async function* runBuildMode(
 
 // ─── Plan Mode Orchestration ─────────────────────────────────────────────────
 //
-// The full path: clarify → plan → confirm → execute each step → verify each.
+// The full path: plan → confirm → execute each step → verify each.
 
 /**
- * Runs the plan-mode orchestration: clarify → plan → execute → verify.
+ * Runs the plan-mode orchestration: plan → confirm → execute → verify.
  *
- * Yields OrchestratorEvents for the UI to render. The UI must handle
- * specific events interactively:
- *   - "clarification-needed": present questions and collect answers
- *   - "plan-ready": display the plan and get Y/n confirmation
- *   - "escalation-prompt": not used in plan mode (plan steps are pre-scoped)
+ * Yields OrchestratorEvents for the UI to render. Exactly one of them is
+ * interactive:
+ *   - "plan-ready": display the assumptions and plan, and get Y/n. The
+ *     generator STOPS here; the UI re-invokes with approvedPlan on yes.
  *
- * @param clarificationAnswers - Pre-collected answers to clarifying questions.
- *                               Pass empty record on first invocation; the
- *                               orchestrator will yield "clarification-needed"
- *                               if questions are generated.
- * @param approvedPlan - If provided, skip clarification and planning phases
- *                       and go straight to execution. Used when the user
- *                       has already approved a plan (e.g., after answering
- *                       clarifications and reviewing the plan).
+ * @param approvedPlan - If provided, skip planning and go straight to
+ *                       execution. Used when the user has approved a plan.
  * @param completedStepIndices - Indices of steps that have already been
  *                               completed and verified. These steps will be
  *                               skipped during execution.
@@ -381,46 +368,33 @@ async function* runPlanMode(
   context: ProjectContext,
   model: LanguageModel,
   onConfirm: ConfirmFn,
-  clarificationAnswers: Record<string, string> = {},
   approvedPlan?: PlanStep[],
   completedStepIndices: number[] = [],
   provider?: string,
 ): AsyncGenerator<OrchestratorEvent> {
   // Emit mode info
-  yield { kind: "mode-info", mode: "plan", reason: "Full planning pipeline" };
+  yield { kind: "mode-info", mode: "plan", reason: "Plan, review, then execute" };
 
   let steps: PlanStep[];
 
   if (approvedPlan) {
-    // Skip clarification and planning — use the pre-approved plan
     steps = approvedPlan;
   } else {
-    // ── Phase 1: Clarification ───────────────────────────────────────────
+    // ── Phase 1: Planning ────────────────────────────────────────────────
     //
-    // Ask the clarifier to generate questions. If it returns any,
-    // yield them to the UI and STOP — the UI collects answers and
-    // re-invokes the orchestrator with the answers.
-    if (Object.keys(clarificationAnswers).length === 0) {
-      const questions = await clarify(userPrompt, context, model);
-
-      if (questions.length > 0) {
-        yield { kind: "clarification-needed", questions };
-        // STOP HERE — the UI will collect answers and call runOrchestrator
-        // again with the answers. We don't continue to planning until
-        // all required questions are answered.
-        return;
-      }
-    }
-
-    // ── Phase 2: Planning ────────────────────────────────────────────────
+    // Generate the structured plan. The planner sees the repo map (always,
+    // regardless of budget) and DECIDES anything the request left open,
+    // declaring those decisions as assumptions.
     //
-    // Generate the structured plan. The planner sees the repo map
-    // (always, regardless of budget) and the clarification answers.
-    steps = await plan(userPrompt, clarificationAnswers, context, model);
+    // There is no clarifier stage. Asking a list of abstract questions and
+    // THEN showing a plan for approval was two gates for one decision, and
+    // the questions came before the user had anything concrete to react to.
+    const generated = await plan(userPrompt, context, model);
+    steps = generated.steps;
 
-    // Yield the plan for user review. The UI displays it as a
-    // structured list and presents a Y/n confirmation gate.
-    yield { kind: "plan-ready", steps };
+    // Yield the plan for user review. The UI displays the assumptions and
+    // steps, then presents a Y/n confirmation gate.
+    yield { kind: "plan-ready", steps, assumptions: generated.assumptions };
     // STOP HERE — the UI will show the plan and collect Y/n.
     // If the user approves, they re-invoke with approvedPlan = steps.
     return;
@@ -433,6 +407,10 @@ async function* runPlanMode(
   const sortedSteps = topologicalSort(steps);
   const totalSteps = sortedSteps.length;
 
+  // Each step still gets a fresh prompt; this carries forward only what the
+  // next step needs to avoid redoing earlier work. See StepDigest.
+  const priorSteps: StepDigest[] = [];
+
   for (const step of sortedSteps) {
     // Skip steps that have already been completed and verified
     if (completedStepIndices.includes(step.index)) {
@@ -443,6 +421,14 @@ async function* runPlanMode(
         verification: { verified: true, mismatches: [] },
         modelTier: "hosted" // Default for skipped steps
       };
+      // A skipped step still produced files in an earlier run, so later steps
+      // must be told about it or they will recreate its work.
+      priorSteps.push({
+        index: step.index,
+        description: step.description,
+        filesTouched: step.targetFiles,
+        verified: true,
+      });
       continue;
     }
 
@@ -455,7 +441,7 @@ async function* runPlanMode(
 
     // Execute the step, streaming its events to the UI as they happen.
     const stepResult = yield* streamStep(
-      executeStep({ step, context, model, onConfirm, provider }),
+      executeStep({ step, context, model, onConfirm, provider, priorSteps }),
     );
 
     // Verify the step's execution
@@ -479,6 +465,16 @@ async function* runPlanMode(
     if (verification.verified) {
       recordStepCheckpoint(step, stepResult);
     }
+
+    // Record what this step did, for the steps that follow. claimedFiles is
+    // what the executor actually touched, which is more honest than the
+    // plan's targetFiles guess.
+    priorSteps.push({
+      index: step.index,
+      description: step.description,
+      filesTouched: stepResult.claimedFiles,
+      verified: verification.verified,
+    });
   }
 
   SessionLogger.logSessionComplete();
@@ -621,19 +617,18 @@ export async function* runOrchestrator(
   }
 
   if (modeContext.mode === "plan") {
-    // Plan mode: full clarify → plan → execute → verify pipeline
+    // Plan mode: plan → review → execute → verify
     yield* runPlanMode(
       userPrompt,
       context,
       model,
       onConfirm,
-      clarificationAnswers || {},
       approvedPlan,
       completedStepIndices || [],
       provider,
     );
   } else {
-    // Build mode: single step → execute → verify → escalation check
+    // Build mode: single step → execute → verify → optional scope hint
     yield* runBuildMode(
       userPrompt,
       context,

@@ -7,7 +7,7 @@
 // verification (file claimed-changed-but-missing or verification failed)
 // and either:
 //   - Emit step-verified with verified: false
-//   - Emit an escalation-prompt
+//   - Emit a scope-hint
 //
 // This validates that the system catches failures instead of silently
 // reporting success. Tests FIX_PLAN_MODE_STOP_ON_FAILURE behavior.
@@ -49,7 +49,7 @@ export const planModeDeliberateFailure: GoldenTask = {
     try {
       const events = JSON.parse(readFileSync(eventsPath, "utf-8"));
 
-      // Look for verification failure or escalation
+      // Look for a verification failure or an advisory scope hint
       const hasVerificationFailure = events.some(
         (e: any) =>
           e.kind === "step-verified" &&
@@ -57,16 +57,14 @@ export const planModeDeliberateFailure: GoldenTask = {
           e.verification.verified === false,
       );
 
-      const hasEscalation = events.some(
-        (e: any) => e.kind === "escalation-prompt",
-      );
+      const hasScopeHint = events.some((e: any) => e.kind === "scope-hint");
 
-      if (hasVerificationFailure || hasEscalation) {
+      if (hasVerificationFailure || hasScopeHint) {
         return {
           passed: true,
           detail: hasVerificationFailure
             ? "Verification correctly detected failure"
-            : "Escalation correctly triggered on failure",
+            : "Scope hint correctly emitted on failure",
         };
       }
 

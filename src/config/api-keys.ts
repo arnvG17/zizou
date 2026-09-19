@@ -10,8 +10,6 @@ import Conf from "conf";
 
 export type ProviderChoice = "anthropic" | "openai" | "openrouter" | "google" | "groq" | "ollama";
 
-export type ContextMode = "light" | "default" | "max";
-
 interface ConfigSchema {
   apiKeys: {
     anthropic?: string;
@@ -27,7 +25,6 @@ interface ConfigSchema {
   providerModels?: Partial<Record<ProviderChoice, string>>;
   /** Ollama base URL — defaults to http://localhost:11434 */
   ollamaBaseUrl?: string;
-  contextMode?: ContextMode;
 }
 
 const config = new Conf<ConfigSchema>({
@@ -35,7 +32,6 @@ const config = new Conf<ConfigSchema>({
   defaults: {
     apiKeys: {},
     providerModels: {},
-    contextMode: "default",
   },
 });
 
@@ -163,16 +159,3 @@ export function clearApiKeys(): void {
   config.clear();
 }
 
-/**
- * Retrieves the current context mode. Defaults to "default" if not set.
- */
-export function getContextMode(): ContextMode {
-  return config.get("contextMode") || "default";
-}
-
-/**
- * Saves the current context mode.
- */
-export function setContextMode(mode: ContextMode): void {
-  config.set("contextMode", mode);
-}

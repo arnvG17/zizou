@@ -9,7 +9,7 @@
 // Contains:
 //   - Verbatim LLM inputs (system prompt, user prompt, chat history)
 //   - Verbatim LLM outputs
-//   - Orchestrator mode & role transitions (Clarifier, Planner, Executor, Verifier)
+//   - Orchestrator mode & role transitions (Planner, Executor, Verifier)
 //   - Input and Output parameters for each tool call
 //   - Verifier comparison data
 
@@ -90,73 +90,13 @@ export class SessionLogger {
   }
 
   /**
-   * Log the start of the Clarification phase.
-   */
-  static logClarifierStart(prompt: string, budget: string): void {
-    this.append(
-      titleBlock("ROLE: CLARIFIER (Pre-planning Phase)") +
-      `  Starting pre-planning analysis.\n` +
-      `  Original Prompt: "${prompt}"\n` +
-      `  Context Budget : ${budget}\n`
-    );
-  }
-
-  /**
-   * Log the verbatim prompt and response from the clarifier LLM call.
-   */
-  static logClarifierLLM(system: string, user: string, response: string): void {
-    this.append(
-      subTitleBlock("CLARIFIER LLM CALL (VERBATIM)") +
-      `[SYSTEM PROMPT]\n` +
-      `----------------------------------------\n` +
-      `${system}\n` +
-      `----------------------------------------\n\n` +
-      `[USER MESSAGE]\n` +
-      `----------------------------------------\n` +
-      `${user}\n` +
-      `----------------------------------------\n\n` +
-      `[LLM RESPONSE]\n` +
-      `----------------------------------------\n` +
-      `${response}\n` +
-      `----------------------------------------\n`
-    );
-  }
-
-  /**
-   * Log the output of the Clarifier phase.
-   */
-  static logClarifierEnd(questions: any[]): void {
-    const qList = questions.length > 0
-      ? questions.map((q, i) => `    ${i + 1}. [${q.required ? "REQUIRED" : "OPTIONAL"}] ${q.question}`).join("\n")
-      : "    (none - prompt is clear)";
-
-    this.append(
-      `\n  [Clarification Output]\n` +
-      `  Questions Generated:\n` +
-      `${qList}\n` +
-      divider("─") + "\n"
-    );
-  }
-
-  /**
    * Log the start of the Planning phase.
    */
-  static logPlannerStart(prompt: string, clarifications: Record<string, string>): void {
-    let clarText = "";
-    if (Object.keys(clarifications).length > 0) {
-      clarText = Object.entries(clarifications)
-        .map(([q, a]) => `    Q: ${q}\n    A: ${a}`)
-        .join("\n\n");
-    } else {
-      clarText = "    (none)";
-    }
-
+  static logPlannerStart(prompt: string): void {
     this.append(
       titleBlock("ROLE: PLANNER (Plan Generation Phase)") +
       `  Starting structured plan generation.\n` +
-      `  Prompt: "${prompt}"\n` +
-      `  User Clarifications:\n` +
-      `${clarText}\n`
+      `  Prompt: "${prompt}"\n`
     );
   }
 
@@ -331,13 +271,14 @@ export class SessionLogger {
   }
 
   /**
-   * Log an escalation event in build mode.
+   * Log an advisory scope hint in build mode.
+   *
+   * Was logEscalation. Nothing is "triggered" any more — the turn has already
+   * finished successfully and this only records that it looked large.
    */
-  static logEscalation(reason: string): void {
+  static logScopeHint(reason: string): void {
     this.append(
-      `\n================================================================================\n` +
-      `  ⚠️  ESCALATION TRIGGERED: ${reason.toUpperCase()}\n` +
-      `================================================================================\n\n`
+      `\n  [SCOPE HINT] ${reason} — build step looked larger than one step.\n`
     );
   }
 

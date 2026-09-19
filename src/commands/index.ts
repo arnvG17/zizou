@@ -6,23 +6,10 @@ import {
   setProviderModel,
   setOllamaBaseUrl,
   getOllamaBaseUrl,
-  ContextMode,
-  getContextMode,
-  setContextMode,
 } from "../config/api-keys.js";
 import { addPinnedFile, clearPinnedFiles } from "../context/build-system-prompt.js";
 import { getActiveModelId } from "../sdk/resolve-model.js";
-import {
-  getAIConfig,
-  setAIConfig,
-  applyPreset,
-  writeModelConfigMd,
-  PROVIDER_PRESETS,
-  PRESET_DEFAULTS,
-  type PresetName,
-  type ReasoningLevel,
-} from "../config/ai-config.js";
-import { existsSync, readdirSync } from "fs";
+import { existsSync, readdirSync, writeFileSync } from "fs";
 import { join } from "path";
 import {
   createSession,
@@ -48,14 +35,25 @@ import {
   revertSessionChanges,
   hasSessionBaseline,
   formatColoredDiff,
+  undoCheckpoint,
+  redoCheckpoint,
+  getUndoDepth,
+  getRedoDepth,
 } from "../checkpoint/manager.js";
-import { performUndo, performRedo, getUndoStackSize, getRedoStackSize, clearStacks } from "../checkpoints/undo-redo-stack.js";
 import { exportTranscript } from "./export-transcript.js";
 import type { ConfirmFn } from "../tools/index.js";
 import { sessionPermissions } from "../tools/index.js";
 import type { FilePatch } from "../checkpoint/types.js";
-import type { PlanStep, ClarifyingQuestion } from "../agent/types.js";
+import type { PlanStep } from "../agent/types.js";
 import type { Mode } from "../agent/mode.js";
+import {
+  EFFORT_LEVELS,
+  EFFORT_PROFILES,
+  parseEffort,
+  type Effort,
+} from "../config/effort.js";
+import { resolveAgentConfig, setSessionEffort } from "../config/agent-config.js";
+import { ZIZOU_MD_TEMPLATE, getZizouMdPath } from "../config/zizou-md.js";
 
 export interface SlashCommandInfo {
   command: string;
@@ -65,15 +63,14 @@ export interface SlashCommandInfo {
 export const SLASH_COMMANDS: SlashCommandInfo[] = [
   { command: "/settings", description: "Modify agent configuration (aliases: /keys)" },
   { command: "/chat", description: "Switch to chat mode (conversation only, tools disabled)" },
-  { command: "/plan", description: "Switch to plan mode (clarify → plan → execute → verify)" },
+  { command: "/plan", description: "Switch to plan mode (plan → review → execute → verify)" },
   { command: "/build", description: "Switch to build mode (single-step execution)" },
   { command: "/model", description: "Switch provider and/or set custom model name" },
   { command: "/models", description: "List all available model options for all providers" },
   { command: "/modelid", description: "Set custom model ID for the active provider" },
   { command: "/ollama", description: "Set the Ollama base URL" },
-  { command: "/context", description: "Set context mode (light, default, max)" },
-  { command: "/expert", description: "Configure AI model presets and inference params" },
-  { command: "/reasoning", description: "Set reasoning level (low, medium, high) for any model" },
+  { command: "/effort", description: "Set effort: fast, balanced or max (model + context + limits)" },
+  { command: "/init", description: "Create ZIZOU.md for project settings and conventions" },
   { command: "/add", description: "Pin a file's contents permanently to context" },
   { command: "/file", description: "Pin a file's contents permanently to context (alias: /add)" },
   { command: "/prompt", description: "Dump the full system prompt sent to LLM" },
@@ -121,12 +118,11 @@ export type LogEntry =
     }
   | { kind: "error"; text: string }
   // ── Orchestrator log entry kinds, rendered by Chat.tsx's LogLine ──────
-  | { kind: "plan-display"; steps: PlanStep[] }
+  | { kind: "plan-display"; steps: PlanStep[]; assumptions: string[] }
   | { kind: "step-progress"; stepIndex: number; totalSteps: number; description: string; modelTier?: "hosted" | "local" }
   | { kind: "verification"; stepIndex: number; verified: boolean; mismatches: string[]; verboseFeedback?: string; modelTier?: "hosted" | "local" | undefined }
-  | { kind: "escalation"; reason: string }
-  | { kind: "mode-switch"; mode: Mode; reason: string }
-  | { kind: "clarification"; questions: ClarifyingQuestion[] };
+  | { kind: "scope-hint"; text: string }
+  | { kind: "mode-switch"; mode: Mode; reason: string };
 
 const SHORT_LABELS: Record<ProviderChoice, string> = {
   groq: "Groq",
@@ -186,13 +182,6 @@ export interface CommandContext {
   ) => any;
 }
 
-function resolveReasoningLevel(input: string | undefined): ReasoningLevel | undefined {
-  const normalized = input?.toLowerCase();
-  if (normalized === "low" || normalized === "lo") return "low";
-  if (normalized === "high" || normalized === "hig") return "high";
-  if (normalized === "medium" || normalized === "med" || normalized === "mid" || normalized === "midoue") return "medium";
-  return undefined;
-}
 
 /**
  * Intercepts user input and executes a slash command if one is detected.
@@ -212,7 +201,7 @@ export async function handleSlashCommand(ctx: CommandContext): Promise<boolean> 
 
   // ── /chat, /plan and /build — switch orchestrator mode ─────────────────
   // /chat  → conversation only, tools disabled
-  // /plan  → full pipeline: clarifier → planner → execute → verify
+  // /plan  → full pipeline: planner → y/n review → execute → verify
   // /build → single-step execution (default)
   if (command === "chat") {
     if (ctx.onModeChange) {
@@ -238,7 +227,7 @@ export async function handleSlashCommand(ctx: CommandContext): Promise<boolean> 
       { kind: "user", text },
       {
         kind: "assistant",
-        text: `Switched to ◆ Plan mode.\nYour next prompt will run: clarify → plan → confirm → execute → verify.\nUse /build to switch back to single-step mode.`,
+        text: `Switched to ◆ Plan mode.\nYour next prompt will produce a plan with its assumptions for you to approve, then execute step by step.\nUse /build to switch back to single-step mode.`,
       },
     ]);
     return true;
@@ -270,7 +259,8 @@ export async function handleSlashCommand(ctx: CommandContext): Promise<boolean> 
         kind: "assistant",
         text: `Available slash commands:
 
-  /plan                     Switch to plan mode (clarify → plan → execute → verify)
+  /chat                     Switch to chat mode (conversation only, tools disabled)
+  /plan                     Switch to plan mode (plan → review → execute → verify)
   /build                    Switch to build mode (single-step execution)
   /model <provider>         Switch active provider
                             Providers: groq, google, openrouter, anthropic, openai, ollama
@@ -280,18 +270,19 @@ export async function handleSlashCommand(ctx: CommandContext): Promise<boolean> 
   /models                   List all available model options for all providers
   /modelid <name>           Set a custom model ID for the current provider
                             e.g. /modelid llama3:70b
-  /expert                   Show AI config (model, preset, temperature, max tokens)
-  /expert <preset>          Apply a preset: fast | balanced | high | testing
-  /expert provider <name>   Switch provider and apply balanced preset
-  /expert model <id>        Override model ID for current provider
-  /expert reasoning <lvl>   Set reasoning: low | medium | high
-  /expert temperature <n>   Set temperature (0.0–1.0)
-  /expert maxtokens <n>     Set max output tokens
-  /reasoning <lvl>          Shortcut: set reasoning level (low | medium | high)
   /ollama <url>             Set the Ollama base URL
                             e.g. /ollama http://localhost:11434
-  /context <mode>           Set context mode (light, default, max)
   /add <filepath>           Pin a file's contents permanently to the system prompt
+
+  Effort — one dial for speed vs quality:
+  /effort                   Show the current level and what each one does
+  /effort <level>           fast | balanced | max (for this session)
+  /fast  /balanced  /max    Shorthands for the above
+                            Effort sets the model, the context budget and the
+                            token limits together. /model pins a model and
+                            overrides the model effort would pick.
+  /init                     Create ZIZOU.md — project settings & conventions
+                            Put "effort: max" under "## Agent" to make it stick
   /keys                     Change API keys / select provider
   /prompt                   Dump the full system prompt sent to the LLM
   /skills                   List available custom agent skills
@@ -301,10 +292,9 @@ export async function handleSlashCommand(ctx: CommandContext): Promise<boolean> 
   /export                   Export conversation transcript to markdown
   /exit                     Close Zizou
 
-  Mode:    ${currentMode === "plan" ? "◆ Plan" : "● Build"}
-  Active:  ${SHORT_LABELS[provider]} › ${modelId}
-  Context: ${getContextMode()}
-  Expert:  preset=${getAIConfig().preset}, temp=${getAIConfig().temperature}, maxTokens=${getAIConfig().maxOutputTokens}, reasoning=${getAIConfig().reasoning}`,
+  Mode:    ${currentMode === "chat" ? "○ Chat" : currentMode === "plan" ? "◆ Plan" : "● Build"}
+  Effort:  ${resolveAgentConfig().effort}${resolveAgentConfig().effortSource === "project" ? " (ZIZOU.md)" : resolveAgentConfig().effortSource === "session" ? " (this session)" : ""}
+  Active:  ${SHORT_LABELS[provider]} › ${modelId}${resolveAgentConfig().modelPinned ? " (pinned)" : ""}`,
       },
     ]);
     return true;
@@ -515,31 +505,116 @@ ${cmdList}
     return true;
   }
 
-  if (command === "context") {
-    const mode = args[0]?.toLowerCase() as ContextMode | undefined;
-    const validModes: ContextMode[] = ["light", "default", "max"];
+  // ── /init — create ZIZOU.md for this project ─────────────────────────
+  //
+  // ZIZOU.md is one file holding both the project's agent settings and its
+  // conventions, committed so the team shares them.
+  if (command === "init") {
+    const path = getZizouMdPath();
 
-    if (!mode || !validModes.includes(mode)) {
-      const current = getContextMode();
+    if (existsSync(path)) {
+      // Never clobber a file that may hold hand-written conventions.
       ctx.setLog((l: LogEntry[]) => [
         ...l,
         { kind: "user", text },
         {
           kind: "assistant",
-          text: `Current context mode: ${current}\nUsage: /context <mode>\nModes: ${validModes.join(", ")}\n\n  light   - Minimal prompt, no repo map (best for 3B/4B models)\n  default - Standard repo map\n  max     - Expanded repo map`,
+          text: `ZIZOU.md already exists at ${path}.\nEdit it directly — /init will not overwrite it.`,
         },
       ]);
       return true;
     }
 
-    setContextMode(mode);
-    if (ctx.onContextChange) {
-      ctx.onContextChange();
+    try {
+      writeFileSync(path, ZIZOU_MD_TEMPLATE, "utf-8");
+      ctx.setLog((l: LogEntry[]) => [
+        ...l,
+        { kind: "user", text },
+        {
+          kind: "assistant",
+          text:
+            `Created ZIZOU.md.\n\n` +
+            `  "## Agent" holds provider and effort for this project.\n` +
+            `  Everything below it is injected into the agent's context.\n\n` +
+            `Commit it so the whole team shares the same settings.`,
+        },
+      ]);
+    } catch (error) {
+      ctx.setLog((l: LogEntry[]) => [
+        ...l,
+        { kind: "user", text },
+        {
+          kind: "error",
+          text: `Failed to write ZIZOU.md: ${error instanceof Error ? error.message : "Unknown error"}`,
+        },
+      ]);
     }
+    return true;
+  }
+
+  // ── /effort — the one speed/quality dial ───────────────────────────
+  //
+  // Replaces three commands that were really one decision split three ways:
+  //   /expert    picked a model + temperature + maxOutputTokens
+  //   /context   picked how much repo context to assemble
+  //   /reasoning set a value nothing ever read
+  //
+  // Effort sets all of them together, so they can no longer contradict each
+  // other ("fast" with "max" context was previously expressible).
+  if (command === "effort" || EFFORT_LEVELS.includes(command as Effort)) {
+    // `/fast` and `/max` are shorthands for `/effort fast` and `/effort max`.
+    const requested = EFFORT_LEVELS.includes(command as Effort)
+      ? (command as Effort)
+      : parseEffort(args[0]);
+
+    const active = resolveAgentConfig();
+
+    if (!requested) {
+      const rows = EFFORT_LEVELS.map((level) => {
+        const marker = level === active.effort ? "→" : " ";
+        return `  ${marker} ${level.padEnd(9)} ${EFFORT_PROFILES[level].description}`;
+      }).join("\n");
+
+      const sourceNote =
+        active.effortSource === "project"
+          ? " (from ZIZOU.md)"
+          : active.effortSource === "session"
+          ? " (set this session)"
+          : "";
+
+      ctx.setLog((l: LogEntry[]) => [
+        ...l,
+        { kind: "user", text },
+        {
+          kind: "assistant",
+          text:
+            `Effort: ${active.effort}${sourceNote}\n\n${rows}\n\n` +
+            `Model: ${active.modelId}${active.modelPinned ? " (pinned by /model or ZIZOU.md)" : ""}\n` +
+            `Usage: /effort <fast|balanced|max>\n` +
+            `Set it permanently for this project in ZIZOU.md under "## Agent".`,
+        },
+      ]);
+      return true;
+    }
+
+    setSessionEffort(requested);
+    const next = resolveAgentConfig();
+    const profile = EFFORT_PROFILES[requested];
+
     ctx.setLog((l: LogEntry[]) => [
       ...l,
       { kind: "user", text },
-      { kind: "assistant", text: `Context mode set to: ${mode}. System prompt will be regenerated.` },
+      {
+        kind: "assistant",
+        text:
+          `Effort set to ${requested} for this session.\n` +
+          `${profile.description}\n\n` +
+          `  Model    : ${next.modelId}${next.modelPinned ? " (pinned — effort did not change it)" : ""}\n` +
+          `  Searches : up to ${profile.maxSteps} tool rounds per turn\n` +
+          `  Max out  : ${profile.maxOutputTokens} tokens\n` +
+          `  Temp     : ${profile.temperature}\n\n` +
+          `To make it stick, add "effort: ${requested}" under "## Agent" in ZIZOU.md.`,
+      },
     ]);
     return true;
   }
@@ -639,8 +714,13 @@ ${cmdList}
 
       try {
         const session = createSession(sessionArg);
-        // Clear undo/redo stacks when creating a new session
-        clearStacks();
+        // NOTE: undo history is deliberately NOT cleared here.
+        //
+        // It used to be, because the undo stack was a separate store that
+        // knew nothing about the checkpoint history and could desync from it.
+        // Undo is now a head pointer on the project's checkpoint chain, and
+        // creating a session changes nothing on disk — so the previous step
+        // is still there and still correctly undoable.
         ctx.onSessionChange?.(session.name);
         ctx.setLog((l: LogEntry[]) => [
           ...l,
@@ -692,8 +772,9 @@ ${cmdList}
 
       try {
         const session = switchSession(sessionArg);
-        // Clear undo/redo stacks when switching sessions
-        clearStacks();
+        // Undo history is per-project, not per-session, and the working tree
+        // does not change when you switch sessions — see the note in
+        // `/session new` above.
         ctx.onSessionChange?.(session.name);
         ctx.setLog((l: LogEntry[]) => [
           ...l,
@@ -1115,26 +1196,34 @@ ${cmdList}
 
   // ── /undo — undo the last step's file changes ───────────────────────────────
   if (command === "undo") {
-    const undoSize = getUndoStackSize();
-    
-    if (undoSize === 0) {
+    // Undo is a POINTER MOVE along the checkpoint chain, not a separate stack.
+    // There used to be a parallel undo/redo store that knew nothing about the
+    // checkpoint history, so /undo left history.json claiming the undone
+    // content was still current and /checkpoint revert would re-apply it.
+    if (getUndoDepth() === 0) {
       ctx.setLog((l: LogEntry[]) => [
         ...l,
         { kind: "user", text },
-        { kind: "assistant", text: "Nothing to undo — no steps have been executed yet." },
+        { kind: "assistant", text: "Nothing to undo — no checkpoints have been recorded yet." },
       ]);
       return true;
     }
 
     try {
-      const snapshot = performUndo();
-      if (snapshot) {
-        const fileCount = snapshot.fileDiffs.length;
-        const fileNames = snapshot.fileDiffs.map(d => d.path).join(", ");
+      const undone = undoCheckpoint();
+      if (undone) {
+        const files = undone.patches.map((patch) => patch.filePath);
+        const fileList = files.length > 0 ? files.join(", ") : "(no file changes)";
         ctx.setLog((l: LogEntry[]) => [
           ...l,
           { kind: "user", text },
-          { kind: "assistant", text: `Undid step ${snapshot.stepId}.\nReverted ${fileCount} file(s): ${fileNames}` },
+          {
+            kind: "assistant",
+            text:
+              `Undid "${undone.description}".\n` +
+              `Reverted ${files.length} file(s): ${fileList}\n` +
+              `${getRedoDepth()} step(s) can be redone.`,
+          },
         ]);
       }
     } catch (error) {
@@ -1147,11 +1236,9 @@ ${cmdList}
     return true;
   }
 
-  // ── /redo — redo the last undone step ───────────────────────────────────────
+  // ── /redo — move the head forward again ──────────────────────────────
   if (command === "redo") {
-    const redoSize = getRedoStackSize();
-    
-    if (redoSize === 0) {
+    if (getRedoDepth() === 0) {
       ctx.setLog((l: LogEntry[]) => [
         ...l,
         { kind: "user", text },
@@ -1161,14 +1248,19 @@ ${cmdList}
     }
 
     try {
-      const snapshot = performRedo();
-      if (snapshot) {
-        const fileCount = snapshot.fileDiffs.length;
-        const fileNames = snapshot.fileDiffs.map(d => d.path).join(", ");
+      const redone = redoCheckpoint();
+      if (redone) {
+        const files = redone.patches.map((patch) => patch.filePath);
+        const fileList = files.length > 0 ? files.join(", ") : "(no file changes)";
         ctx.setLog((l: LogEntry[]) => [
           ...l,
           { kind: "user", text },
-          { kind: "assistant", text: `Redid step ${snapshot.stepId}.\nReapplied ${fileCount} file(s): ${fileNames}` },
+          {
+            kind: "assistant",
+            text:
+              `Redid "${redone.description}".\n` +
+              `Reapplied ${files.length} file(s): ${fileList}`,
+          },
         ]);
       }
     } catch (error) {
@@ -1199,248 +1291,6 @@ ${cmdList}
         { kind: "error", text: `Failed to export: ${error instanceof Error ? error.message : "Unknown error"}` },
       ]);
     }
-    return true;
-  }
-
-  // ── /reasoning — standalone reasoning level command ───────────────────────
-  if (command === "reasoning") {
-    const level = resolveReasoningLevel(args[0]);
-
-    if (!level) {
-      const current = getAIConfig();
-      ctx.setLog((l: LogEntry[]) => [
-        ...l,
-        { kind: "user", text },
-        {
-          kind: "assistant",
-          text: `Reasoning level: ${current.reasoning}\n\nUsage: /reasoning <level>\nLevels:\n  low    – Fast, less deliberate (good for simple tasks)\n  medium – Balanced (default)\n  high   – Slow, more thorough (best for complex problems)\n\nThis setting persists in model_config.md and applies to all providers.`,
-        },
-      ]);
-      return true;
-    }
-
-    const config = getAIConfig();
-    const updated = { ...config, reasoning: level };
-    setAIConfig(updated);
-
-    ctx.setLog((l: LogEntry[]) => [
-      ...l,
-      { kind: "user", text },
-      { kind: "assistant", text: `Reasoning set to: ${level}\nSaved to model_config.md` },
-    ]);
-    return true;
-  }
-
-  // ── /expert — advanced AI model configuration ─────────────────────────────
-  if (command === "expert") {
-    const sub = args[0]?.toLowerCase();
-    const validPresets: PresetName[] = ["fast", "balanced", "high", "testing"];
-    const validProviders: ProviderChoice[] = ["groq", "google", "openrouter", "anthropic", "openai", "ollama"];
-
-    // /expert — show current config
-    if (!sub) {
-      const cfg = getAIConfig();
-      const providerPresets = PROVIDER_PRESETS[cfg.provider] ?? PROVIDER_PRESETS["openai"];
-      const presetLines = Object.entries(providerPresets)
-        .map(([name, p]) => {
-          const def = PRESET_DEFAULTS[name as PresetName];
-          const marker = name === cfg.preset ? " ◄ active" : "";
-          return `  ${name.padEnd(8)} model: ${p.model}, reasoning: ${p.reasoning}, temp: ${def.temperature}, maxTokens: ${def.maxOutputTokens}${marker}`;
-        })
-        .join("\n");
-
-      ctx.setLog((l: LogEntry[]) => [
-        ...l,
-        { kind: "user", text },
-        {
-          kind: "assistant",
-          text:
-            `Expert AI Config\n` +
-            `${"-".repeat(40)}\n` +
-            `  Provider:    ${cfg.provider}\n` +
-            `  Model:       ${cfg.model}\n` +
-            `  Preset:      ${cfg.preset}\n` +
-            `  Reasoning:   ${cfg.reasoning}\n` +
-            `  Temperature: ${cfg.temperature}\n` +
-            `  Max Tokens:  ${cfg.maxOutputTokens}\n\n` +
-            `Presets for ${cfg.provider}:\n${presetLines}\n\n` +
-            `Commands:\n` +
-            `  /expert fast|balanced|high|testing\n` +
-            `  /expert provider <name>         (groq/google/anthropic/openai/openrouter/ollama)\n` +
-            `  /expert model <id>              (override model for current provider)\n` +
-            `  /expert reasoning low|medium|high\n` +
-            `  /expert temperature <0.0-1.0>\n` +
-            `  /expert maxtokens <number>\n\n` +
-            `Config persists in model_config.md (edit directly for instant effect).`,
-        },
-      ]);
-      return true;
-    }
-
-    // /expert fast|balanced|high|testing — apply preset
-    if (validPresets.includes(sub as PresetName)) {
-      const preset = sub as PresetName;
-      const provider = getDefaultProvider() || "openai";
-      const newConfig = applyPreset(provider, preset);
-      setAIConfig(newConfig);
-      // Also update the active provider model so /model and the status bar reflect it
-      setProviderModel(provider as ProviderChoice, newConfig.model);
-
-      const def = PRESET_DEFAULTS[preset];
-      ctx.setLog((l: LogEntry[]) => [
-        ...l,
-        { kind: "user", text },
-        {
-          kind: "assistant",
-          text:
-            `Applied preset: ${preset}\n` +
-            `  Model:       ${newConfig.model}\n` +
-            `  Reasoning:   ${newConfig.reasoning}\n` +
-            `  Temperature: ${def.temperature}\n` +
-            `  Max Tokens:  ${def.maxOutputTokens}\n` +
-            `Saved to model_config.md`,
-        },
-      ]);
-      return true;
-    }
-
-    // /expert provider <name>
-    if (sub === "provider") {
-      const providerArg = args[1]?.toLowerCase() as ProviderChoice | undefined;
-      if (!providerArg || !validProviders.includes(providerArg)) {
-        ctx.setLog((l: LogEntry[]) => [
-          ...l,
-          { kind: "user", text },
-          { kind: "error", text: `Usage: /expert provider <name>\nProviders: ${validProviders.join(", ")}` },
-        ]);
-        return true;
-      }
-      // Switch provider + apply balanced preset for the new provider
-      setDefaultProvider(providerArg);
-      const newConfig = applyPreset(providerArg, "balanced");
-      setAIConfig(newConfig);
-      setProviderModel(providerArg, newConfig.model);
-
-      ctx.setLog((l: LogEntry[]) => [
-        ...l,
-        { kind: "user", text },
-        {
-          kind: "assistant",
-          text:
-            `Switched to provider: ${providerArg}\n` +
-            `Applied balanced preset: model=${newConfig.model}, reasoning=${newConfig.reasoning}\n` +
-            `Saved to model_config.md`,
-        },
-      ]);
-      ctx.setTokenStats(
-        ctx.calculateTokenStats(ctx.history.current, ctx.systemPrompt, undefined, providerArg)
-      );
-      return true;
-    }
-
-    // /expert model <id>
-    if (sub === "model") {
-      const modelId = args.slice(1).join(" ");
-      if (!modelId) {
-        ctx.setLog((l: LogEntry[]) => [
-          ...l,
-          { kind: "user", text },
-          { kind: "error", text: "Usage: /expert model <model-id>" },
-        ]);
-        return true;
-      }
-      const cfg = getAIConfig();
-      const updated = { ...cfg, model: modelId };
-      setAIConfig(updated);
-      const provider = getDefaultProvider() || "openai";
-      setProviderModel(provider as ProviderChoice, modelId);
-
-      ctx.setLog((l: LogEntry[]) => [
-        ...l,
-        { kind: "user", text },
-        { kind: "assistant", text: `Model set to: ${modelId}\nSaved to model_config.md` },
-      ]);
-      return true;
-    }
-
-    // /expert reasoning low|medium|high
-    if (sub === "reasoning") {
-      const level = resolveReasoningLevel(args[1]);
-      if (!level) {
-        ctx.setLog((l: LogEntry[]) => [
-          ...l,
-          { kind: "user", text },
-          { kind: "error", text: "Usage: /expert reasoning low|medium|high" },
-        ]);
-        return true;
-      }
-      const cfg = getAIConfig();
-      const updated = { ...cfg, reasoning: level };
-      setAIConfig(updated);
-
-      ctx.setLog((l: LogEntry[]) => [
-        ...l,
-        { kind: "user", text },
-        { kind: "assistant", text: `Reasoning set to: ${level}\nSaved to model_config.md` },
-      ]);
-      return true;
-    }
-
-    // /expert temperature <float>
-    if (sub === "temperature") {
-      const val = parseFloat(args[1] ?? "");
-      if (isNaN(val) || val < 0 || val > 1) {
-        ctx.setLog((l: LogEntry[]) => [
-          ...l,
-          { kind: "user", text },
-          { kind: "error", text: "Usage: /expert temperature <0.0-1.0>" },
-        ]);
-        return true;
-      }
-      const cfg = getAIConfig();
-      const updated = { ...cfg, temperature: val };
-      setAIConfig(updated);
-
-      ctx.setLog((l: LogEntry[]) => [
-        ...l,
-        { kind: "user", text },
-        { kind: "assistant", text: `Temperature set to: ${val}\nSaved to model_config.md` },
-      ]);
-      return true;
-    }
-
-    // /expert maxtokens <int>
-    if (sub === "maxtokens" || sub === "maxoutputtokens" || sub === "max_tokens") {
-      const val = parseInt(args[1] ?? "", 10);
-      if (isNaN(val) || val < 1) {
-        ctx.setLog((l: LogEntry[]) => [
-          ...l,
-          { kind: "user", text },
-          { kind: "error", text: "Usage: /expert maxtokens <number>" },
-        ]);
-        return true;
-      }
-      const cfg = getAIConfig();
-      const updated = { ...cfg, maxOutputTokens: val };
-      setAIConfig(updated);
-
-      ctx.setLog((l: LogEntry[]) => [
-        ...l,
-        { kind: "user", text },
-        { kind: "assistant", text: `Max output tokens set to: ${val}\nSaved to model_config.md` },
-      ]);
-      return true;
-    }
-
-    // Unknown /expert subcommand
-    ctx.setLog((l: LogEntry[]) => [
-      ...l,
-      { kind: "user", text },
-      {
-        kind: "error",
-        text: `Unknown /expert option: "${sub}". Run /expert for usage.`,
-      },
-    ]);
     return true;
   }
 

@@ -15,7 +15,8 @@
 import React, { useState, useEffect, useMemo } from "react";
 import { Box, Text, useStdout, useInput } from "ink";
 import { getActiveModelId } from "../sdk/resolve-model.js";
-import { getDefaultProvider, getContextMode } from "../config/api-keys.js";
+import { getDefaultProvider } from "../config/api-keys.js";
+import { resolveAgentConfig } from "../config/agent-config.js";
 
 // ─── Brand colour ────────────────────────────────────────────────────────────
 const BRAND = "#3B5FE0";
@@ -496,7 +497,7 @@ export function Figurine() {
             <Text color="gray">Ask me to edit files, run commands, or design features.</Text>
           </Box>
           <Text color="#3B5FE0">
-            {activeModel} ({getContextMode()} context) · Active Provider: {provider.toUpperCase()}
+            {activeModel} ({resolveAgentConfig().effort} effort) · Active Provider: {provider.toUpperCase()}
           </Text>
           <Text color="gray" dimColor>
             {cwd}

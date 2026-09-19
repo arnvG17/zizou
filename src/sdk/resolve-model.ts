@@ -39,9 +39,21 @@ export function getActiveModelId(provider: ProviderChoice): string {
 
 /**
  * Resolves the requested provider to an active LanguageModel instance.
+ *
+ * @param modelIdOverride - The exact model to call. Callers that have already
+ *   resolved configuration (see config/agent-config.ts) pass it explicitly.
+ *   Without it we fall back to the per-provider stored model.
+ *
+ *   This parameter is why the effort dial works. The old preset system chose
+ *   a model, stored it, and then never passed it here — resolveModel always
+ *   read the value /model had written — so switching preset changed nothing
+ *   about which model was actually called.
  */
-export function resolveModel(provider: ProviderChoice): LanguageModel {
-  const modelId = getActiveModelId(provider);
+export function resolveModel(
+  provider: ProviderChoice,
+  modelIdOverride?: string,
+): LanguageModel {
+  const modelId = modelIdOverride ?? getActiveModelId(provider);
 
   if (provider === "anthropic") {
     const apiKey = getApiKey("anthropic");

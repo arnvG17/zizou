@@ -16,13 +16,9 @@ export const planModeDependencyOrdering: GoldenTask = {
     "Create a utils.ts file that exports a function called greet which takes a name parameter and returns a greeting string. Then create an app.ts file that imports the greet function from utils.ts and calls it with 'World'.",
   mode: "plan",
 
-  // Pre-canned answers so plan mode runs non-interactively.
-  // If the clarifier asks anything, these generic answers should suffice.
-  clarifierAnswers: {
-    "0": "Use simple TypeScript with no frameworks",
-    "1": "No testing required",
-    "2": "Keep it minimal",
-  },
+  // No pre-canned answers are needed: plan mode never asks questions. The
+  // planner decides and declares its assumptions, and the runner
+  // auto-approves at the y/n gate.
 
   async expectedCheck(workspaceDir: string) {
     // Check utils.ts exists and exports greet

@@ -26,12 +26,12 @@ import TextInput from "ink-text-input";
 import pkg from "../../package.json";
 import type { ModelMessage } from "ai";
 import { resolveModel, getActiveModelId } from "../sdk/resolve-model.js";
+import { resolveAgentConfig } from "../config/agent-config.js";
 import {
   getDefaultProvider,
   setDefaultProvider,
   setProviderModel,
   ProviderChoice,
-  getContextMode,
 } from "../config/api-keys.js";
 import type { ConfirmFn } from "../tools/index.js";
 import { sessionPermissions } from "../tools/index.js";
@@ -45,7 +45,6 @@ import { readdirSync, statSync } from "fs";
 import { join, relative } from "path";
 import { loadActiveSessionState, saveActiveSessionState, listSessions, getActiveSession, getActiveSessionId, createSession } from "../session/registry.js";
 import { listCheckpoints, listBranches } from "../checkpoint/manager.js";
-import { getAIConfig, ensureModelConfigMd, applyPreset, setAIConfig } from "../config/ai-config.js";
 import { FileSearchOverlay } from "../tui/file-search-overlay.js";
 import { estimateCost, formatCost, getModelRate } from "../tui/cost-tracker.js";
 
@@ -60,7 +59,7 @@ import {
   type OrchestratorFlowState,
 } from "./orchestrator-flow.js";
 import { runOrchestrator, type OrchestratorEvent } from "../agent/orchestrator.js";
-import type { PlanStep, ClarifyingQuestion } from "../agent/types.js";
+import type { PlanStep } from "../agent/types.js";
 
 const PROVIDERS: ProviderChoice[] = ["groq", "google", "openrouter", "anthropic", "openai", "ollama"];
 
@@ -300,7 +299,6 @@ export interface ChatProps {
 
 export function Chat({ onChangeKeys, mode: initialMode = "build", initialPrompt }: ChatProps) {
   // Ensure model_config.md exists on first startup so users can find and edit it
-  React.useEffect(() => { ensureModelConfigMd(); }, []);
 
   const [log, setLog] = useState<LogEntry[]>([]);
   const [input, setInput] = useState("");
@@ -444,10 +442,7 @@ export function Chat({ onChangeKeys, mode: initialMode = "build", initialPrompt 
         state: {
           mode: sessionState.currentMode ?? "build",
           pendingPlan: orchState?.pendingPlan ?? null,
-          pendingClarifications: orchState?.pendingClarifications ?? [],
-          clarificationAnswers: orchState?.clarificationAnswers ?? {},
-          currentClarificationIndex: orchState?.currentClarificationIndex ?? 0,
-          isInClarificationFlow: orchState?.isInClarificationFlow ?? false,
+          pendingAssumptions: orchState?.pendingAssumptions ?? [],
           originalPrompt: orchState?.originalPrompt ?? "",
           completedStepIndices: orchState?.completedStepIndices ?? [],
           isAwaitingPlanApproval: orchState?.isAwaitingPlanApproval ?? false,
@@ -460,7 +455,11 @@ export function Chat({ onChangeKeys, mode: initialMode = "build", initialPrompt 
       if (orchState?.pendingPlan && orchState.originalPrompt) {
         setLog((l) => [
           ...l,
-          { kind: "plan-display", steps: orchState.pendingPlan! },
+          {
+            kind: "plan-display",
+            steps: orchState.pendingPlan!,
+            assumptions: orchState.pendingAssumptions ?? [],
+          },
           {
             kind: "assistant",
             text: "This plan was left pending in this session. Execute it? (y/n)",
@@ -947,7 +946,7 @@ export function Chat({ onChangeKeys, mode: initialMode = "build", initialPrompt 
 
       if (suggestionMode === "commands") {
         const executableCommands = [
-          "/settings", "/keys", "/clear", "/reset", "/exit", "/quit", "/prompt", "/skills", "/help", "/model", "/chat", "/plan", "/build"
+          "/settings", "/keys", "/clear", "/reset", "/exit", "/quit", "/prompt", "/skills", "/help", "/model", "/chat", "/plan", "/build", "/effort", "/init"
         ];
         if (executableCommands.includes(selected)) {
           shouldExecute = true;
@@ -1037,50 +1036,13 @@ export function Chat({ onChangeKeys, mode: initialMode = "build", initialPrompt 
 
     if (busy) return; // Only block normal messages, not commands
 
-    // ── Clarification flow: user is answering clarifying questions ────
-    // When the orchestrator has yielded clarification questions, we
-    // intercept user input as answers instead of new prompts.
     const currentFlow = flowRef.current;
-    if (currentFlow.isInClarificationFlow && currentFlow.pendingClarifications.length > 0) {
-      const trimmedInput = userText.trim().toLowerCase();
 
-      // Skip the rest, but KEEP the answers already given.
-      if (trimmedInput === "skip") {
-        setLog((l) => [
-          ...l,
-          { kind: "user", text: userText },
-          { kind: "assistant", text: "Skipping remaining questions..." },
-        ]);
-
-        const next = applyFlow({ type: "clarifications-skipped" });
-        runOrchestratorFlow(next.originalPrompt, next, { answers: next.clarificationAnswers });
-        return;
-      }
-
-      const currentQ = currentFlow.pendingClarifications[currentFlow.currentClarificationIndex];
-      const next = applyFlow({
-        type: "clarification-answered",
-        question: currentQ.question,
-        answer: userText,
-      });
-
-      setLog((l) => [...l, { kind: "user", text: userText }]);
-
-      if (next.isInClarificationFlow) {
-        // More questions to go — show the next one and wait.
-        const nextQ = next.pendingClarifications[next.currentClarificationIndex];
-        setLog((l) => [
-          ...l,
-          { kind: "assistant", text: `${nextQ.required ? "(required) " : ""}${nextQ.question}` },
-        ]);
-      } else {
-        // All answered — re-invoke with the accumulated answers.
-        runOrchestratorFlow(next.originalPrompt, next, { answers: next.clarificationAnswers });
-      }
-      return;
-    }
-
-    // ── Plan approval flow: user is saying Y/n to a displayed plan ────
+    // ── Plan approval: user is saying Y/n to a displayed plan ────────
+    //
+    // This is the ONLY place plan mode asks the user anything. There is no
+    // clarification round beforehand — the planner states its assumptions in
+    // the plan, and rejecting it with a reason is how you correct them.
     if (currentFlow.isAwaitingPlanApproval && currentFlow.pendingPlan) {
       const answer = userText.trim().toLowerCase();
       setLog((l) => [...l, { kind: "user", text: userText }]);
@@ -1088,15 +1050,15 @@ export function Chat({ onChangeKeys, mode: initialMode = "build", initialPrompt 
       if (answer === "y" || answer === "yes" || answer === "continue") {
         const approvedSteps = currentFlow.pendingPlan;
         const next = applyFlow({ type: "plan-approved" });
-        runOrchestratorFlow(next.originalPrompt, next, {
-          answers: next.clarificationAnswers,
-          approvedSteps,
-        });
+        runOrchestratorFlow(next.originalPrompt, next, { approvedSteps });
       } else {
         applyFlow({ type: "plan-rejected" });
         setLog((l) => [
           ...l,
-          { kind: "assistant", text: "Plan cancelled. You can modify your request and try again." },
+          {
+            kind: "assistant",
+            text: "Plan cancelled. Re-prompt with what you'd like changed — e.g. \"same thing but with Svelte, and no betting\".",
+          },
         ]);
         setBusy(false);
       }
@@ -1107,9 +1069,9 @@ export function Chat({ onChangeKeys, mode: initialMode = "build", initialPrompt 
     history.current.push({ role: "user", content: userText });
     setBusy(true);
 
-    // A new prompt starts a fresh flow: clarifications, pending plan and
-    // completed-step indices all reset. Carrying completedStepIndices over
-    // used to make the NEXT plan skip the steps at those indices.
+    // A new prompt starts a fresh flow: any pending plan and the
+    // completed-step indices reset. Carrying completedStepIndices over used
+    // to make the NEXT plan skip the steps at those indices.
     const freshFlow = applyFlow({ type: "prompt-submitted", prompt: userText });
 
     // Update token stats immediately for the user prompt
@@ -1134,7 +1096,7 @@ export function Chat({ onChangeKeys, mode: initialMode = "build", initialPrompt 
   async function runOrchestratorFlow(
     prompt: string,
     flowState: OrchestratorFlowState,
-    opts: { answers?: Record<string, string>; approvedSteps?: PlanStep[] } = {},
+    opts: { approvedSteps?: PlanStep[] } = {},
   ) {
     setBusy(true);
     const submitTime = Date.now();
@@ -1145,27 +1107,26 @@ export function Chat({ onChangeKeys, mode: initialMode = "build", initialPrompt 
     let hasActualUsage = false;
 
     try {
-      const provider = getDefaultProvider() || "groq";
-      const aiConfig = getAIConfig();
-      const model = resolveModel(provider);
-      const budget = getContextMode() as "light" | "default" | "max";
+      // One resolution point for provider, model, and every sampling knob.
+      // Effort drives all of them together, so they cannot contradict.
+      const agentConfig = resolveAgentConfig();
+      const provider = agentConfig.provider;
+      const model = resolveModel(provider, agentConfig.modelId);
 
       // Build the project context for the orchestrator
       const projectContext = {
         projectRoot: process.cwd(),
         systemPrompt: systemPromptRef.current,
-        budget,
-        temperature: aiConfig.temperature,
-        maxOutputTokens: aiConfig.maxOutputTokens,
+        maxSteps: agentConfig.maxSteps,
+        temperature: agentConfig.temperature,
+        maxOutputTokens: agentConfig.maxOutputTokens,
       };
 
-      // Mode comes from the flow state passed in, so an escalation that just
-      // switched to plan mode is honoured on this very call rather than one
-      // render later. `reason` is real now — "escalated" used to be
-      // unreachable because this was hardcoded to "user-flag".
+      // Mode comes from the flow state passed in, not from the render
+      // closure, so a mode the user just set is honoured on this very call.
       const modeContext = {
         mode: flowState.mode,
-        reason: flowState.modeReason,
+        reason: "user-flag" as const,
       };
 
       // ── Drive the orchestrator ──────────────────────────────────────────
@@ -1175,7 +1136,6 @@ export function Chat({ onChangeKeys, mode: initialMode = "build", initialPrompt 
         context: projectContext,
         model,
         onConfirm: confirmFn,
-        clarificationAnswers: opts.answers,
         approvedPlan: opts.approvedSteps,
         completedStepIndices: flowState.completedStepIndices,
         history: history.current,
@@ -1197,29 +1157,17 @@ export function Chat({ onChangeKeys, mode: initialMode = "build", initialPrompt 
             ]);
             break;
 
-          case "clarification-needed":
-            // The clarifier generated questions — enter clarification flow.
-            // Present questions one at a time and collect answers.
-            applyFlow({ type: "clarifications-received", questions: event.questions });
-
-            // Show the clarification UI
-            setLog((l) => [
-              ...l,
-              { kind: "clarification", questions: event.questions },
-              { kind: "assistant", text: `${event.questions[0].required ? "(required) " : ""}${event.questions[0].question}` },
-            ]);
-
-            // STOP processing — we'll re-invoke after answers are collected
-            setBusy(false);
-            return;
-
           case "plan-ready":
             // The planner generated a plan — display it for Y/n approval.
-            applyFlow({ type: "plan-received", steps: event.steps });
+            applyFlow({
+              type: "plan-received",
+              steps: event.steps,
+              assumptions: event.assumptions,
+            });
 
             setLog((l) => [
               ...l,
-              { kind: "plan-display", steps: event.steps },
+              { kind: "plan-display", steps: event.steps, assumptions: event.assumptions },
               { kind: "assistant", text: "Execute this plan? (y/n)" },
             ]);
 
@@ -1267,40 +1215,23 @@ export function Chat({ onChangeKeys, mode: initialMode = "build", initialPrompt 
             history.current = event.history;
             break;
 
-          case "escalation-prompt":
-            // Build mode: the step exceeded expected scope.
-            // Show escalation message and use pendingConfirm for Y/n.
-            setLog((l) => [
-              ...l,
-              { kind: "escalation", reason: event.trigger.reason },
-            ]);
-
-            // Ask the user whether to switch to plan mode
-            const shouldSwitch = await new Promise<boolean>((resolve) => {
-              setPendingConfirm({
-                description: `This touched more than expected (${event.trigger.reason}). Switch to plan mode?`,
-                resolve,
-              });
-            });
-
-            if (shouldSwitch) {
-              // Switch to plan mode and re-enter from scratch. The new state
-              // is passed straight in, so this call really does run plan mode
-              // — it used to re-read "build" from the closure and ping-pong.
-              const escalated = applyFlow({ type: "escalation-accepted" });
-              setLog((l) => [
-                ...l,
-                { kind: "mode-switch", mode: "plan", reason: "Escalated from build mode" },
-              ]);
-              runOrchestratorFlow(escalated.originalPrompt, escalated);
-              return;
-            } else {
-              setLog((l) => [
-                ...l,
-                { kind: "assistant", text: "Continuing in build mode. Results may need manual review." },
-              ]);
-            }
+          case "scope-hint": {
+            // ADVISORY. One line in the log, then the turn carries on.
+            //
+            // This used to be a modal y/n offering to restart the request in
+            // plan mode. It fired on verification failure too, which the
+            // verifier reports routinely, so ordinary turns were interrupted
+            // to ask whether to throw away the work just done. Worse, the
+            // confirm overlay was never cleared when the flow moved on, so
+            // the prompt stayed on screen underneath whatever came next.
+            const { reason, fileCount } = event.hint;
+            const message =
+              reason === "touched-many-files"
+                ? `This touched ${fileCount} files. For changes this size, /plan gives you a reviewable plan before anything runs.`
+                : "Verification found mismatches above. Worth a look before you build on this \u2014 or re-run it in /plan for step-by-step checks.";
+            setLog((l) => [...l, { kind: "scope-hint", text: message }]);
             break;
+          }
 
           case "agent-event": {
             // Forward raw agent events — same rendering as before
@@ -1449,10 +1380,7 @@ export function Chat({ onChangeKeys, mode: initialMode = "build", initialPrompt 
           flowRef.current.mode,
           {
             pendingPlan: flowRef.current.pendingPlan,
-            pendingClarifications: flowRef.current.pendingClarifications,
-            clarificationAnswers: flowRef.current.clarificationAnswers,
-            currentClarificationIndex: flowRef.current.currentClarificationIndex,
-            isInClarificationFlow: flowRef.current.isInClarificationFlow,
+            pendingAssumptions: flowRef.current.pendingAssumptions,
             isAwaitingPlanApproval: flowRef.current.isAwaitingPlanApproval,
             originalPrompt: flowRef.current.originalPrompt,
             completedStepIndices: flowRef.current.completedStepIndices,
@@ -1650,7 +1578,7 @@ export function Chat({ onChangeKeys, mode: initialMode = "build", initialPrompt 
               {/* Input Footer */}
               <Box flexDirection="row" justifyContent="space-between" paddingX={1} marginTop={0}>
                 <Box flexDirection="row" gap={1}>
-                  <Text backgroundColor={MODE_BADGE[flow.mode].color} color="white" bold> {MODE_BADGE[flow.mode].label} ({getContextMode()}) </Text>
+                  <Text backgroundColor={MODE_BADGE[flow.mode].color} color="white" bold> {MODE_BADGE[flow.mode].label} · {resolveAgentConfig().effort} </Text>
                   <Text color="gray">{getActiveModelId(getDefaultProvider() || "groq")}</Text>
                 </Box>
                 <Box flexDirection="row" gap={2}>
@@ -1702,9 +1630,7 @@ export function Chat({ onChangeKeys, mode: initialMode = "build", initialPrompt 
           {/* Section 4: Repo Map live view */}
           <Box flexDirection="column" marginBottom={1}>
             <Text color="#E6E6E6" bold>Repo Map</Text>
-            {getContextMode() === "light" ? (
-              <Text color="gray" dimColor>repo map is disabled in light mode</Text>
-            ) : !contextReady || !repoMap ? (
+            {!contextReady || !repoMap ? (
               <Text color="gray" dimColor>loading…</Text>
             ) : (
               <>
@@ -1859,6 +1785,25 @@ function LogLine({ entry }: { entry: LogEntry }) {
       <Box flexDirection="column" marginBottom={1} borderStyle="round" borderColor="#D08A4E" paddingX={1} paddingY={1} backgroundColor="#15171C">
         <Text color="#D08A4E" bold>📋 Execution Plan</Text>
         <Text color="gray" dimColor>─────────────────────</Text>
+        {/*
+          Assumptions come FIRST, above the steps.
+
+          They are what the planner decided for you, and the whole reason plan
+          mode no longer asks questions up front: you review concrete choices
+          next to the plan they produced, and reject with a correction if one
+          is wrong. Putting them below the steps would bury the part most
+          likely to be wrong.
+        */}
+        {entry.assumptions.length > 0 && (
+          <Box flexDirection="column" marginBottom={1}>
+            <Text color="#5BA37F" bold>Assumptions — reject (n) to change any of these:</Text>
+            {entry.assumptions.map((assumption, ai) => (
+              <Box key={ai} paddingLeft={2}>
+                <Text color="gray">• {assumption}</Text>
+              </Box>
+            ))}
+          </Box>
+        )}
         {entry.steps.map((step) => (
           <Box key={step.index} flexDirection="column" marginTop={step.index > 0 ? 1 : 0}>
             <Box flexDirection="row" gap={1}>
@@ -1928,12 +1873,13 @@ function LogLine({ entry }: { entry: LogEntry }) {
     );
   }
 
-  if (entry.kind === "escalation") {
-    // Shows escalation notification with warning styling
+  if (entry.kind === "scope-hint") {
+    // Advisory only — a dim single line, deliberately quieter than a warning
+    // box. Nothing has gone wrong and nothing is waiting on the user.
     return (
-      <Box marginBottom={1} borderStyle="round" borderColor="yellow" paddingX={1} backgroundColor="#15171C">
-        <Text color="yellow" bold>⚠ Escalation: </Text>
-        <Text color="yellow">{entry.reason === "verification-failed" ? "Verification failed — execution may not have completed correctly." : entry.reason === "touched-too-many-files" ? "This touched more files than expected for a simple fix." : "Step implies additional dependencies."}</Text>
+      <Box marginBottom={1} flexDirection="row" gap={1}>
+        <Text color="gray">ℹ</Text>
+        <Text color="gray" dimColor>{entry.text}</Text>
       </Box>
     );
   }
@@ -1950,21 +1896,6 @@ function LogLine({ entry }: { entry: LogEntry }) {
     );
   }
 
-  if (entry.kind === "clarification") {
-    // Shows the list of clarifying questions from the clarifier
-    return (
-      <Box flexDirection="column" marginBottom={1} borderStyle="round" borderColor="#3B5FE0" paddingX={1} paddingY={1} backgroundColor="#15171C">
-        <Text color="#3B5FE0" bold>❓ Clarifying Questions</Text>
-        <Text color="gray" dimColor>Please answer the following before planning begins:</Text>
-        {entry.questions.map((q, i) => (
-          <Box key={i} flexDirection="row" gap={1} marginTop={1}>
-            <Text color="gray">{i + 1}.</Text>
-            <Text color={q.required ? "#E6E6E6" : "gray"}>{q.required ? "(required) " : ""}{q.question}</Text>
-          </Box>
-        ))}
-      </Box>
-    );
-  }
 
   return null;
 }

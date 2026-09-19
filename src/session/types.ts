@@ -37,8 +37,9 @@ export interface TokenStats {
  * half-understood in-flight plan is not worth a migration; the transcript is.
  *
  * v2: mode gained "chat"; orchestrator flow moved behind a reducer.
+ * v3: clarification state removed; plans carry assumptions instead.
  */
-export const SESSION_SCHEMA_VERSION = 2;
+export const SESSION_SCHEMA_VERSION = 3;
 
 export interface SessionState {
   /** Absent on sessions written before versioning existed (treated as v1). */
@@ -48,11 +49,8 @@ export interface SessionState {
   log: string;  // Full UI log serialized as JSON string to avoid circular dependency
   currentMode: Mode;  // Current operating mode
   orchestratorState?: {
-    pendingPlan?: any[];  // Plan steps
-    pendingClarifications?: any[];  // Clarification questions
-    clarificationAnswers?: Record<string, string>;
-    currentClarificationIndex?: number;
-    isInClarificationFlow?: boolean;
+    pendingPlan?: any[];  // Plan steps awaiting the y/n gate
+    pendingAssumptions?: string[];  // Assumptions declared for that plan
     isAwaitingPlanApproval?: boolean;
     originalPrompt?: string;
     completedStepIndices?: number[];  // Indices of steps that have been executed

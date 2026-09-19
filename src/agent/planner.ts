@@ -15,10 +15,17 @@
 //   with a reason if an assumption is wrong. See the Plan type in types.ts.
 //
 // KEY DESIGN DECISIONS:
-//   1. NO TOOL ACCESS: The planner sees the repo map and clarifications
-//      but cannot call tools (readFile, writeFile, etc.). This is
-//      intentional — the planner's job is to DESCRIBE what should happen,
-//      not to start doing it. Tool access is the executor's domain.
+//   1. READ-ONLY TOOL ACCESS: the planner can glob, grep, listDir and
+//      readFile, but cannot write, edit, or run commands. Its job is to
+//      DESCRIBE what should happen, not to start doing it — so it can look
+//      at anything and change nothing.
+//
+//      It previously had no tools at all and was handed a pre-computed repo
+//      map instead. That map cost ~5.7k tokens on this project, a quarter of
+//      it describing an unrelated app under docs/, and it silently omitted
+//      every tool declared as `export const x = tool({...})` because the
+//      extractor is regex-based. Searching finds what exists; a stale
+//      summary can only report what its regexes happened to match.
 //   2. DEPENDENCY ORDERING: Each PlanStep has a `dependsOn` array
 //      referencing other step indices. This prevents the write-before-
 //      scaffold ordering bug where a step tries to edit a file that
@@ -36,9 +43,10 @@
 // DEPENDENCY DIRECTION: imports from agent/types.ts, context/, sdk/.
 // Must NOT import from ui/, config/, or provider/.
 
-import { generateText, type LanguageModel } from "ai";
+import { generateText, stepCountIs, type LanguageModel } from "ai";
+import { buildReadOnlyToolMap } from "../tools/index.js";
 import { buildSystemPrompt, type AgentRole } from "../context/build-system-prompt.js";
-import type { PlanStep, ProjectContext } from "./types.js";
+import type { Plan, PlanStep, ProjectContext } from "./types.js";
 import { SessionLogger } from "./debug/index.js";
 
 // ─── Planner System Prompt Extension ─────────────────────────────────────────
@@ -50,6 +58,17 @@ const PLANNER_INSTRUCTIONS = `
 You are acting as a PLANNER — your job is to create a structured, ordered
 plan for implementing the user's request. You do NOT execute anything;
 you only describe what should be done.
+
+FIRST, LOOK. You have read-only tools: glob, grep, listDir and readFile.
+Use them before planning. Find the files the request touches, check what
+already exists, and read anything you intend to modify. A plan written
+without looking invents file paths and duplicates code that is already
+there. Do not guess at a path you have not seen.
+
+Keep exploration proportionate: a handful of targeted searches, not a tour
+of the repo. When you know enough, stop and output the plan.
+
+You cannot write, edit, or run commands. Do not try.
 
 NEVER ask the user questions. If the request leaves something open, DECIDE
 using the most conventional choice for this project, and record that decision
@@ -110,58 +129,45 @@ IMPORTANT:
 /**
  * Generates a structured execution plan from the user's prompt.
  *
- * Plan mode only — never called in build mode. The orchestrator calls
- * this after the clarifier has finished, passing in any clarification
- * answers the user provided.
+ * Plan mode only — never called in build mode.
  *
  * @param userPrompt - The user's original request text.
- * @param clarifications - Key-value pairs of clarification answers.
- *                         Keys are the question text, values are the
- *                         user's answers. May be empty if no clarification
- *                         was needed.
  * @param context - Ambient project info (root, prompt, budget).
  * @param model - The resolved LLM to use for generation.
- * @returns Array of PlanStep objects in dependency order.
+ * @returns The assumptions the planner made plus its steps, in dependency order.
  */
 export async function plan(
   userPrompt: string,
-  clarifications: Record<string, string>,
   context: ProjectContext,
   model: LanguageModel,
-): Promise<PlanStep[]> {
-  // Build a system prompt with the planner role — this guarantees the
-  // repo map is included even under "light" budget. The planner MUST
-  // know the project structure to avoid creating duplicate files or
-  // referencing files that don't exist.
+): Promise<Plan> {
   const systemPrompt = await buildSystemPrompt(
     context.projectRoot,
     "planner" as AgentRole,
   );
 
-  // Build the user message with the prompt and any clarifications.
-  // Clarifications are included as a structured section so the model
-  // can incorporate the user's answers into the plan.
-  let userMessage = `Create a detailed implementation plan for the following request:\n\n${userPrompt}`;
+  const userMessage = `Create a detailed implementation plan for the following request:
 
-  if (Object.keys(clarifications).length > 0) {
-    userMessage += "\n\nThe user provided these clarifications:\n";
-    for (const [question, answer] of Object.entries(clarifications)) {
-      userMessage += `\nQ: ${question}\nA: ${answer}\n`;
-    }
-  }
+${userPrompt}`;
 
-  SessionLogger.logPlannerStart(userPrompt, clarifications);
+  SessionLogger.logPlannerStart(userPrompt);
 
-  // Generate the plan. We use generateText (not streamText) because:
-  //   1. The output is a complete JSON array that needs full parsing
-  //   2. Streaming a JSON plan would require incremental JSON parsing
-  //   3. The plan needs to be displayed all-at-once for user review
-  const systemText = `${systemPrompt}\n\n${PLANNER_INSTRUCTIONS}`;
+  // generateText, not streamText: the output is one JSON object that must be
+  // parsed whole, and the plan is displayed all at once for review.
+  //
+  // stopWhen caps the explore loop. The planner calls read-only tools for a
+  // few rounds, then produces the plan as its final text. The cap matters:
+  // without it a model that keeps grepping never emits a plan at all.
+  const systemText = `${systemPrompt}
+
+${PLANNER_INSTRUCTIONS}`;
   const userText = userMessage;
 
   const result = await generateText({
     model,
     system: systemText,
+    tools: buildReadOnlyToolMap(),
+    stopWhen: stepCountIs(context.maxSteps),
     messages: [
       {
         role: "user",
@@ -170,59 +176,84 @@ export async function plan(
     ],
   });
 
-  // Parse the model's response as a JSON array of PlanStep objects.
+  // Parse the model's response into a Plan.
   const responseText = result.text.trim();
+
+  SessionLogger.logExecutorStreamEvent(
+    `\n  [PLANNER] explored in ${result.steps.length} step(s) before planning\n`,
+  );
 
   // Log verbatim prompts and response
   SessionLogger.logPlannerLLM(systemText, userText, responseText);
 
-  const steps = parsePlanSteps(responseText);
+  const parsed = parsePlan(responseText);
 
   // Validate dependency ordering — catch any invalid dependsOn references
   // before the orchestrator tries to execute them.
-  validateDependencies(steps);
+  validateDependencies(parsed.steps);
 
-  SessionLogger.logPlannerEnd(steps);
-  return steps;
+  SessionLogger.logPlannerEnd(parsed.steps);
+  return parsed;
 }
 
 // ─── Parsing ─────────────────────────────────────────────────────────────────
 
 /**
- * Parses the model's text response into PlanStep objects.
- * Handles common LLM output quirks: markdown code blocks, extra text
- * around the JSON, etc.
+ * Parses the model's text response into a Plan.
+ *
+ * Handles common LLM output quirks: markdown code blocks, extra text around
+ * the JSON, and — because weaker models routinely ignore the object shape —
+ * a bare array of steps with no assumptions wrapper.
  */
-function parsePlanSteps(text: string): PlanStep[] {
-  // Try direct JSON parse first (ideal case)
-  try {
-    const parsed = JSON.parse(text);
-    if (Array.isArray(parsed)) {
-      return validateSteps(parsed);
-    }
-  } catch {
-    // Fall through to regex extraction
-  }
+function parsePlan(text: string): Plan {
+  const candidates: string[] = [text];
 
-  // Try extracting JSON array from markdown code blocks or surrounding text
-  const jsonMatch = text.match(/\[[\s\S]*\]/);
-  if (jsonMatch) {
+  // Extract a JSON object or array from inside prose / code fences.
+  const objectMatch = text.match(/\{[\s\S]*\}/);
+  if (objectMatch) candidates.push(objectMatch[0]);
+  const arrayMatch = text.match(/\[[\s\S]*\]/);
+  if (arrayMatch) candidates.push(arrayMatch[0]);
+
+  for (const candidate of candidates) {
+    let parsed: unknown;
     try {
-      const parsed = JSON.parse(jsonMatch[0]);
-      if (Array.isArray(parsed)) {
-        return validateSteps(parsed);
-      }
+      parsed = JSON.parse(candidate);
     } catch {
-      // Fall through to error
+      continue;
+    }
+
+    // The documented shape: { assumptions, steps }.
+    if (parsed && typeof parsed === "object" && !Array.isArray(parsed)) {
+      const obj = parsed as { assumptions?: unknown; steps?: unknown };
+      if (Array.isArray(obj.steps)) {
+        return {
+          assumptions: validateAssumptions(obj.assumptions),
+          steps: validateSteps(obj.steps),
+        };
+      }
+      continue;
+    }
+
+    // Tolerated fallback: a bare step array. Small models drop the wrapper.
+    if (Array.isArray(parsed)) {
+      return { assumptions: [], steps: validateSteps(parsed) };
     }
   }
 
-  // If we can't parse the plan at all, throw rather than returning an
-  // empty array — unlike the clarifier (where empty = "no questions"),
-  // an empty plan means "do nothing", which is never what the user wants.
+  // If we can't parse the plan at all, throw rather than returning an empty
+  // plan — an empty plan means "do nothing", which is never what was wanted.
   throw new Error(
-    "Failed to parse plan from model response. The model did not return a valid JSON plan array.",
+    "Failed to parse plan from model response. The model did not return a valid JSON plan.",
   );
+}
+
+/** Keeps only non-empty strings, so a malformed assumptions field is harmless. */
+function validateAssumptions(raw: unknown): string[] {
+  if (!Array.isArray(raw)) return [];
+  return raw
+    .filter((a): a is string => typeof a === "string")
+    .map((a) => a.trim())
+    .filter((a) => a.length > 0);
 }
 
 // ─── Validation ──────────────────────────────────────────────────────────────

@@ -26,6 +26,7 @@ import type { ModeContext } from "../src/agent/mode.js";
 import type { ProjectContext, PlanStep } from "../src/agent/types.js";
 import { runOrchestrator } from "../src/agent/orchestrator.js";
 import { buildSystemPrompt } from "../src/context/build-system-prompt.js";
+import { EFFORT_PROFILES } from "../src/config/effort.js";
 import { resolveModel } from "../src/sdk/resolve-model.js";
 import { getDefaultProvider, type ProviderChoice } from "../src/config/api-keys.js";
 
@@ -113,16 +114,19 @@ function verifyProjectIntegrity(before: ProjectSnapshot): boolean {
 
 const autoConfirm = async (_description: string): Promise<boolean> => true;
 
-// ─── Orchestrator Event Draining ─────────────────────────────────────────────
+// ─── Orchestrator Event Draining ───────────────────────────────────────
 //
 // The orchestrator is an async generator that yields events. In the TUI,
 // Chat.tsx consumes these to render progress. Here, we drain them silently
 // and capture them for inspection by golden task checks.
 //
-// For plan-mode tasks, the orchestrator yields multi-phase events:
-//   1. "clarification-needed" → we re-invoke with pre-canned answers
-//   2. "plan-ready" → we re-invoke with approvedPlan (auto-approve)
-//   3. Then the execution phase yields step events until "complete"
+// Plan mode stops once, at "plan-ready", waiting for the user's y/n. The
+// runner auto-approves and re-invokes with the plan to execute it.
+//
+// This used to have a third phase for "clarification-needed", nested two
+// levels deeper, which fabricated answers like "Use sensible defaults" for
+// whatever the clarifier happened to ask. The clarifier is gone: the planner
+// now states its assumptions and the y/n gate is the only stop.
 
 async function drainOrchestrator(
   task: GoldenTask,
@@ -135,119 +139,41 @@ async function drainOrchestrator(
     reason: "user-flag",
   };
 
-  // Build system prompt with the temp workspace as project root
-  const systemPrompt = await buildSystemPrompt(workspaceDir, "executor");
-  const context: ProjectContext = {
+  /** Fresh context per invocation — the workspace changes as steps run. */
+  const makeContext = async (): Promise<ProjectContext> => ({
     projectRoot: workspaceDir,
-    systemPrompt,
-    budget: "default",
-  };
-
-  const allEvents: OrchestratorEvent[] = [];
-
-  // Phase 1: Initial invocation
-  const gen = runOrchestrator({
-    userPrompt: task.prompt,
-    modeContext,
-    context,
-    model,
-    onConfirm: autoConfirm,
+    systemPrompt: await buildSystemPrompt(workspaceDir, "executor"),
+    maxSteps: EFFORT_PROFILES.balanced.maxSteps,
   });
 
-  for await (const event of gen) {
+  const allEvents: OrchestratorEvent[] = [];
+  let approvedPlan: PlanStep[] | undefined;
+
+  // Phase 1: plan (or, in build mode, run straight through).
+  for await (const event of runOrchestrator({
+    userPrompt: task.prompt,
+    modeContext,
+    context: await makeContext(),
+    model,
+    onConfirm: autoConfirm,
+  })) {
     allEvents.push(event);
-
-    // ── Handle plan-mode multi-phase flow ──────────────────────────────
-    if (event.kind === "clarification-needed") {
-      // Re-invoke with pre-canned answers (or empty if none provided)
-      const answers = task.clarifierAnswers ?? {};
-
-      // Map pre-canned answers to the actual questions
-      const mappedAnswers: Record<string, string> = {};
-      for (const [key, value] of Object.entries(answers)) {
-        mappedAnswers[key] = value;
-      }
-
-      // If no answers provided, auto-generate generic ones
-      if (Object.keys(mappedAnswers).length === 0 && event.questions) {
-        for (let i = 0; i < event.questions.length; i++) {
-          mappedAnswers[String(i)] = "Use sensible defaults";
-        }
-      }
-
-      // Re-invoke with answers — this will proceed to planning phase
-      const systemPrompt2 = await buildSystemPrompt(workspaceDir, "executor");
-      const context2: ProjectContext = {
-        projectRoot: workspaceDir,
-        systemPrompt: systemPrompt2,
-        budget: "default",
-      };
-
-      const gen2 = runOrchestrator({
-        userPrompt: task.prompt,
-        modeContext,
-        context: context2,
-        model,
-        onConfirm: autoConfirm,
-        clarificationAnswers: mappedAnswers,
-      });
-
-      for await (const event2 of gen2) {
-        allEvents.push(event2);
-
-        if (event2.kind === "plan-ready") {
-          // Auto-approve the plan and re-invoke for execution
-          const steps = (event2 as any).steps as PlanStep[];
-          const systemPrompt3 = await buildSystemPrompt(workspaceDir, "executor");
-          const context3: ProjectContext = {
-            projectRoot: workspaceDir,
-            systemPrompt: systemPrompt3,
-            budget: "default",
-          };
-
-          const gen3 = runOrchestrator({
-            userPrompt: task.prompt,
-            modeContext,
-            context: context3,
-            model,
-            onConfirm: autoConfirm,
-            clarificationAnswers: task.clarifierAnswers ?? {},
-            approvedPlan: steps,
-          });
-
-          for await (const event3 of gen3) {
-            allEvents.push(event3);
-          }
-          break; // plan-ready handled, execution complete
-        }
-      }
-      break; // clarification-needed handled
-    }
-
     if (event.kind === "plan-ready") {
-      // Direct plan-ready (no clarification phase) — auto-approve
-      const steps = (event as any).steps as PlanStep[];
-      const systemPrompt2 = await buildSystemPrompt(workspaceDir, "executor");
-      const context2: ProjectContext = {
-        projectRoot: workspaceDir,
-        systemPrompt: systemPrompt2,
-        budget: "default",
-      };
+      approvedPlan = event.steps;
+    }
+  }
 
-      const gen2 = runOrchestrator({
-        userPrompt: task.prompt,
-        modeContext,
-        context: context2,
-        model,
-        onConfirm: autoConfirm,
-        clarificationAnswers: task.clarifierAnswers ?? {},
-        approvedPlan: steps,
-      });
-
-      for await (const event2 of gen2) {
-        allEvents.push(event2);
-      }
-      break; // plan-ready handled
+  // Phase 2: execute the auto-approved plan.
+  if (approvedPlan) {
+    for await (const event of runOrchestrator({
+      userPrompt: task.prompt,
+      modeContext,
+      context: await makeContext(),
+      model,
+      onConfirm: autoConfirm,
+      approvedPlan,
+    })) {
+      allEvents.push(event);
     }
   }
 
@@ -349,8 +275,8 @@ async function runTask(
             e.kind === "step-verified" &&
             e.verification?.verified === false,
         );
-        const escalations = serializableEvents.filter(
-          (e: any) => e.kind === "escalation-prompt",
+        const scopeHints = serializableEvents.filter(
+          (e: any) => e.kind === "scope-hint",
         );
 
         if (verificationFailures.length > 0) {
@@ -359,9 +285,9 @@ async function runTask(
             console.log(`    Category: verification-failed → ${mismatches.join(", ") || "no details"}`);
           }
         }
-        if (escalations.length > 0) {
-          for (const esc of escalations) {
-            console.log(`    Category: escalation → ${(esc as any).trigger?.reason ?? "unknown"}`);
+        if (scopeHints.length > 0) {
+          for (const sh of scopeHints) {
+            console.log(`    Category: scope-hint → ${(sh as any).hint?.reason ?? "unknown"}`);
           }
         }
       }

@@ -11,7 +11,7 @@
  * requires touching agent code — just create the file and add one line here.
  */
 
-import { createReadFileTool } from "./read-file.js";
+import { createReadFileTool, readFile } from "./read-file.js";
 import { createWriteFileTool } from "./write-file.js";
 import { createEditFileTool } from "./edit-file.js";
 import { glob } from "./glob.js";
@@ -25,6 +25,30 @@ import { manageTasks } from "./manage-tasks.js";
 import { managePorts } from "./manage-ports.js";
 import { createFileOperationsTool } from "./file-operations.js";
 import type { ConfirmFn } from "./types.js";
+
+/**
+ * The read-only subset: look, never touch.
+ *
+ * Used by the planner, which must be able to find out what exists without
+ * being able to change anything. It takes no ConfirmFn because nothing here
+ * can modify the filesystem or run a command, so there is nothing to approve
+ * — `readFile` is the unconfirmed variant for exactly this reason.
+ *
+ * WHY THE PLANNER GOT TOOLS: it previously had none, and was handed a
+ * pre-computed repo map instead. That map cost ~5.7k tokens on this repo, a
+ * quarter of which described a separate project under docs/, while missing
+ * every tool defined as `export const x = tool({...})` — a pattern the
+ * regex-based extractor cannot see. Grepping for a symbol finds it; a map
+ * that never listed it cannot.
+ */
+export function buildReadOnlyToolMap(): Record<string, any> {
+  return {
+    readFile,
+    glob,
+    grep,
+    listDir,
+  };
+}
 
 /**
  * Builds the complete map of tools exposed to the model.

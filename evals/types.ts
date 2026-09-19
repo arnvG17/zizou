@@ -12,7 +12,6 @@
  * Each task defines:
  *   - A prompt to send to the orchestrator
  *   - Which mode to run in (build or plan)
- *   - Optional pre-canned clarifier answers (for non-interactive plan-mode runs)
  *   - A check function that inspects the workspace after execution
  *   - An optional repeat count for flaky/probabilistic tasks
  */
@@ -25,13 +24,6 @@ export interface GoldenTask {
 
   /** Which orchestrator mode to run in. */
   mode: "build" | "plan";
-
-  /**
-   * Pre-canned answers to clarifying questions. If provided, the runner
-   * will supply these when the orchestrator emits "clarification-needed"
-   * instead of prompting a user. Keys are question indices (as strings).
-   */
-  clarifierAnswers?: Record<string, string>;
 
   /**
    * Deterministic check function run against the workspace after the
