@@ -34,3 +34,10 @@ yarn-error.log*
 # typescript
 *.tsbuildinfo
 next-env.d.ts
+
+# eval harness: disposable run artifacts (workspaces + journals).
+# Reports are NOT ignored — a benchmark claim should be reviewable in a diff.
+evals/.artifacts/
+
+# interactive debug journals (ZIZOU_DEBUG=1)
+.zizou/

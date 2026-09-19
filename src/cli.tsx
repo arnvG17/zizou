@@ -83,6 +83,29 @@ const initialPrompt = initialPromptParts.join(" ").trim() || undefined;
 
 import { getDefaultProvider, getOllamaBaseUrl } from "./config/api-keys.js";
 import { getActiveModelId } from "./sdk/resolve-model.js";
+import { join } from "node:path";
+import { RunJournal, setActiveJournal } from "./agent/debug/index.js";
+
+// ─── Debug journal ───────────────────────────────────────────────────────────
+//
+// One journal per process, registered as the active one so runTurn records into
+// it without every layer having to pass it down. Writes to .zizou/journal/ in
+// the project rather than a file at the repo root — a debug log dropped beside
+// the user's source is a file they then have to gitignore.
+//
+// Off unless asked for: the journal records file contents and diffs, and a tool
+// that silently writes the user's source into a log file on every run is not
+// something to enable by default. ZIZOU_DEBUG=1 turns it on.
+if (process.env.ZIZOU_DEBUG === "1" || process.env.ZIZOU_DEBUG === "true") {
+  const journal = new RunJournal({
+    dir: join(process.cwd(), ".zizou", "journal"),
+    runId: `session-${new Date().toISOString().replace(/[:.]/g, "-")}`,
+    label: "interactive",
+    root: process.cwd(),
+  });
+  setActiveJournal(journal);
+  console.log(`zizou: debug journal -> ${journal.logPath}`);
+}
 
 const instance = render(
   <App

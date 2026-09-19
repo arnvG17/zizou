@@ -21,7 +21,7 @@
 import { streamText, stepCountIs, type ModelMessage, type LanguageModel } from "ai";
 import { buildToolMap, type ConfirmFn } from "../tools/index.js";
 import { extractRawToolCall, auditResponse } from "./fallback-tool-parse.js";
-import { TurnLogger } from "./debug/index.js";
+import { getActiveJournal, type RunJournal, type UsageRecord } from "./debug/index.js";
 
 // ─── Event types emitted to whatever UI is listening ─────────────────────────
 //
@@ -58,6 +58,25 @@ export interface RunTurnOptions {
   temperature?: number;
   /** Maximum number of output tokens per response. From AIConfig. */
   maxOutputTokens?: number;
+  /**
+   * Where to record what this turn did. Defaults to the process-wide active
+   * journal (set by the CLI at startup), so interactive runs are logged with
+   * no plumbing. The eval harness passes one per task run instead.
+   */
+  journal?: RunJournal;
+  /** Label for this turn in the journal, e.g. "executor" or "chat". */
+  journalRole?: string;
+}
+
+/** Normalizes the AI SDK's usage object into the journal's shape. */
+function toUsageRecord(raw: any): UsageRecord {
+  return {
+    inputTokens: raw?.inputTokens ?? 0,
+    outputTokens: raw?.outputTokens ?? 0,
+    cachedInputTokens: raw?.cachedInputTokens ?? 0,
+    reasoningTokens: raw?.reasoningTokens ?? 0,
+    totalTokens: raw?.totalTokens,
+  };
 }
 
 // ─── Text extraction helper ──────────────────────────────────────────────────
@@ -81,9 +100,11 @@ export async function* runTurn(
 ): AsyncGenerator<AgentEvent, ModelMessage[]> {
   const { history, model, provider, onConfirm, systemPrompt, maxSteps = 15, disableTools, temperature, maxOutputTokens } = options;
 
-  // Debug logger — writes verbose diagnostics to zizou-debug.log.
-  const log = new TurnLogger();
-  log.writePreTurn({ model, history, systemPrompt, maxSteps });
+  // Where this turn gets recorded. See debug/run-journal.ts — the journal is
+  // write-only, so an absent one degrades to a no-op rather than a branch.
+  const journal = options.journal ?? getActiveJournal();
+  const journalRole = options.journalRole ?? "turn";
+  const modelId = typeof model === "string" ? model : (model as any)?.modelId;
 
   // ── Duplicate tool call tracker within this turn loop ────────────────
   const callHashes = new Map<string, { attempts: number; failed: boolean }>();
@@ -97,6 +118,7 @@ export async function* runTurn(
         const existing = callHashes.get(hash);
         if (existing && existing.failed && existing.attempts >= 1) {
           existing.attempts++;
+          journal.duplicateBlocked(toolName, args);
           return {
             success: false,
             error:
@@ -118,12 +140,17 @@ export async function* runTurn(
 
   const rawTools = disableTools ? undefined : buildToolMap(onConfirm);
 
+  // Order matters. The journal wraps the OUTSIDE, so it records what the model
+  // actually got back — including a duplicate-block refusal, which is a real
+  // event the log should show rather than an invisible substitution.
   const tools = rawTools
-    ? Object.fromEntries(
-        Object.entries(rawTools).map(([name, toolInstance]) => [
-          name,
-          wrapToolForDuplicateDetection(name, toolInstance),
-        ])
+    ? journal.wrapTools(
+        Object.fromEntries(
+          Object.entries(rawTools).map(([name, toolInstance]) => [
+            name,
+            wrapToolForDuplicateDetection(name, toolInstance),
+          ])
+        )
       )
     : undefined;
 
@@ -176,6 +203,9 @@ export async function* runTurn(
 
   let stepIndex = 0;
 
+  /** Accumulated so the journal records the reply once, not per delta. */
+  let assistantText = "";
+
   let rateLimitCaught = false;
 
   try {
@@ -184,36 +214,40 @@ export async function* runTurn(
       switch (part.type) {
         case "step-start":
           stepIndex++;
-          log.logStepStart(stepIndex);
           break;
 
+        // One LLM round trip. Usage is journaled PER STEP and never again at
+        // the end: result.usage is the sum over steps, so recording both would
+        // double every token count in the totals.
         case "step-finish":
-          log.logStepFinish(stepIndex, (part as any).finishReason ?? "unknown", (part as any).usage);
+          journal.llmCall({
+            role: journalRole,
+            modelId,
+            finishReason: part.finishReason ?? "unknown",
+            usage: toUsageRecord(part.usage),
+            steps: stepIndex,
+          });
           break;
 
         case "text-delta":
-          log.logTextDelta(part.text);
+          assistantText += part.text;
           yield { kind: "text-delta", text: part.text };
           break;
 
+        // Tool calls are NOT journaled here. journal.wrapTools() records them
+        // around execute() instead, which is the only place a before/after
+        // filesystem snapshot is possible — see debug/run-journal.ts.
         case "tool-call":
-          log.logToolCall(part.toolName, part.toolCallId, part.input);
           yield { kind: "tool-call", toolCallId: part.toolCallId, toolName: part.toolName, input: part.input };
           break;
 
         case "tool-result":
-          log.logToolResult(part.toolName, part.toolCallId, part.output);
           yield { kind: "tool-result", toolCallId: part.toolCallId, toolName: part.toolName, output: part.output };
           break;
 
         case "tool-error":
           // Fires when execute() itself THREW — not a controlled { success: false } return.
-          log.logToolError(part.toolName, part.toolCallId, part.error);
           yield { kind: "tool-error", toolCallId: part.toolCallId, toolName: part.toolName, error: part.error };
-          break;
-
-        case "finish":
-          log.logFinish((part as any).finishReason ?? "unknown", (part as any).usage);
           break;
 
         // Other part types (reasoning-*, source, file, start, abort, raw)
@@ -298,10 +332,11 @@ export async function* runTurn(
 
     const audit = auditResponse(nativeCallsCount > 0, textContent);
 
+    // A pseudo-call sitting next to real native calls. Not recovered — the
+    // native path already ran — but worth recording, because it means the model
+    // is half-trusting the tool protocol.
     if (audit.nativeCalls > 0 && audit.pseudoCallDetected) {
-      log.logFallbackIntercept(
-        `[AUDIT: pseudo_call_alongside_native] nativeCalls=${nativeCallsCount}`
-      );
+      journal.fallbackParse("(alongside native)", textContent, false);
     }
 
     const rawToolCall = textContent ? extractRawToolCall(textContent) : null;
@@ -310,26 +345,23 @@ export async function* runTurn(
     if (rawToolCall && toolDef) {
       didFallback = true;
       const toolCallId = `call_${Math.random().toString(36).slice(2, 9)}`;
-      log.logFallbackIntercept(
-        `[AUDIT: pseudo_call_recovered] toolName=${rawToolCall.name}`
-      );
+      journal.fallbackParse(rawToolCall.name, textContent, true);
 
       // Emit the tool-call event
       yield { kind: "tool-call", toolCallId, toolName: rawToolCall.name, input: rawToolCall.arguments };
 
-      // Execute the tool
+      // Execute the tool. toolDef came from the journal-wrapped map, so the
+      // call and its file diffs are recorded by the same code path as a native
+      // call — the only difference in the log is the viaFallback marker.
       let output: any;
       let isError = false;
-      const execStart = Date.now();
 
       try {
         output = await toolDef.execute(rawToolCall.arguments, { toolCallId, messages: history });
-        log.logFallbackExecTime(Date.now() - execStart);
         yield { kind: "tool-result", toolCallId, toolName: rawToolCall.name, output };
       } catch (e) {
         isError = true;
         output = String(e);
-        log.logFallbackExecError(output);
         yield { kind: "tool-error", toolCallId, toolName: rawToolCall.name, error: e };
       }
 
@@ -353,8 +385,6 @@ export async function* runTurn(
       // Recursively continue with remaining step budget
       const remainingSteps = maxSteps - stepIndex;
       if (remainingSteps > 0) {
-        log.logFallbackRecurse(remainingSteps);
-
         let stepUsage = { inputTokens: 0, outputTokens: 0 };
         try {
           const rawUsage = await result.usage;
@@ -382,7 +412,6 @@ export async function* runTurn(
               inputTokens: stepUsage.inputTokens + childUsage.inputTokens,
               outputTokens: stepUsage.outputTokens + childUsage.outputTokens,
             };
-            log.logFallbackCombinedUsage(combined.inputTokens, combined.outputTokens);
             yield { kind: "finish", usage: combined };
           } else {
             yield event;
@@ -399,14 +428,13 @@ export async function* runTurn(
   // ── Emit turn-complete + usage (only when no fallback recursion) ───────
 
   if (!didFallback) {
-    log.logTurnEnd();
+    journal.assistantText(assistantText);
     yield { kind: "turn-complete" };
 
     let usage: { inputTokens: number; outputTokens: number } | undefined;
     try {
       const raw = await result.usage;
       usage = { inputTokens: raw.inputTokens ?? 0, outputTokens: raw.outputTokens ?? 0 };
-      log.logFinalUsage(usage.inputTokens, usage.outputTokens);
     } catch {
       // ignore
     }
