@@ -9,11 +9,80 @@
  * existing ones so the user can approve or deny the operation.
  */
 
-import { writeFileSync, mkdirSync, existsSync } from "node:fs";
-import { dirname, resolve } from "node:path";
+import { writeFileSync, mkdirSync, existsSync, readdirSync } from "node:fs";
+import { dirname, resolve, basename, extname, relative, join } from "node:path";
 import { z } from "zod";
 import { tool } from "ai";
 import type { ConfirmFn } from "./types.js";
+
+
+/** How deep to walk looking for a same-named file, and how many to report. */
+const SIMILAR_SEARCH_DEPTH = 4;
+const SIMILAR_MAX_RESULTS = 3;
+
+const SKIP_DIRS = new Set([
+  "node_modules",
+  ".git",
+  "dist",
+  "build",
+  ".next",
+  ".zizou",
+  "coverage",
+  "vendor",
+]);
+
+/**
+ * Finds existing files that look like the one about to be created.
+ *
+ * "Looks like" is deliberately narrow: the same basename, or the same stem
+ * with a different extension. A looser match would fire on every new .ts file
+ * in a TypeScript project, and a hint that fires always is a hint nobody
+ * reads.
+ *
+ * Returns paths relative to the search root, capped and depth-limited so this
+ * stays cheap enough to run inline before a confirmation prompt.
+ */
+function findSimilarFiles(targetPath: string): string[] {
+  const root = process.cwd();
+  const name = basename(targetPath);
+  const stem = basename(targetPath, extname(targetPath));
+  const found: string[] = [];
+
+  const walk = (dir: string, depth: number): void => {
+    if (depth > SIMILAR_SEARCH_DEPTH || found.length >= SIMILAR_MAX_RESULTS) return;
+
+    let entries;
+    try {
+      entries = readdirSync(dir, { withFileTypes: true });
+    } catch {
+      return; // unreadable directory is not worth failing a write over
+    }
+
+    for (const entry of entries) {
+      if (found.length >= SIMILAR_MAX_RESULTS) return;
+      if (entry.name.startsWith(".") || SKIP_DIRS.has(entry.name)) continue;
+
+      const full = join(dir, entry.name);
+      if (entry.isDirectory()) {
+        walk(full, depth + 1);
+        continue;
+      }
+
+      if (full === targetPath) continue;
+      if (entry.name === name || basename(entry.name, extname(entry.name)) === stem) {
+        found.push(relative(root, full));
+      }
+    }
+  };
+
+  try {
+    walk(root, 0);
+  } catch {
+    return [];
+  }
+
+  return found;
+}
 
 export const createWriteFileTool = (confirm: ConfirmFn) => {
   return tool({
@@ -37,9 +106,24 @@ export const createWriteFileTool = (confirm: ConfirmFn) => {
         const fileExists = existsSync(absPath);
         const action = fileExists ? "Overwrite existing file" : "Create new file";
 
+        // For a NEW file, say whether something like it already exists
+        // elsewhere. The repeated failure this catches is the agent writing
+        // chess.html at the root next to an existing chess-app/, or a second
+        // poker.tsx beside src/components/Poker/poker.tsx — two files that
+        // disagree, where one edit was wanted.
+        //
+        // ADVISORY, like the scope hint: it informs the confirmation the user
+        // is already being shown. It does not block the write, because a
+        // similarly-named file is evidence, not proof.
+        const siblings = fileExists ? [] : findSimilarFiles(absPath);
+        const siblingNote = siblings.length
+          ? "\n  Similar files already exist — edit one of these instead?\n" +
+            siblings.map((f) => `    ${f}`).join("\n")
+          : "";
+
         // Ask the user for permission
         const isApproved = await confirm(
-          `${action}: ${absPath}`
+          `${action}: ${absPath}${siblingNote}`
         );
 
         if (!isApproved) {

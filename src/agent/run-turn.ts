@@ -19,7 +19,7 @@
 //   prevent infinite loops.
 
 import { streamText, stepCountIs, type ModelMessage, type LanguageModel } from "ai";
-import { buildToolMap, type ConfirmFn } from "../tools/index.js";
+import { buildToolMap, buildReadOnlyToolMap, type ConfirmFn } from "../tools/index.js";
 import { extractRawToolCall, auditResponse } from "./fallback-tool-parse.js";
 import { getActiveJournal, type RunJournal, type UsageRecord } from "./debug/index.js";
 
@@ -52,8 +52,21 @@ export interface RunTurnOptions {
   systemPrompt?: string;
   /** Safety cap on internal tool-call rounds per turn. */
   maxSteps?: number;
-  /** Optional flag to disable tools. */
-  disableTools?: boolean;
+  /**
+   * Which tools this turn may call.
+   *
+   *   "full"     — every tool, including writes and shell. The default.
+   *   "readonly" — readFile, glob, grep, listDir. The agent can look at
+   *                anything and change nothing. Used by the ask route and by
+   *                the chat route when auto mode picked it.
+   *   "none"     — no tools at all. Pinned /chat, where the user asked to
+   *                just talk.
+   *
+   * This replaced a `disableTools` boolean, which could only express "full"
+   * and "none" — and a two-state flag is exactly why a question about the
+   * codebase had to choose between guessing and full write access.
+   */
+  toolMode?: "full" | "readonly" | "none";
   /** Sampling temperature (0 = deterministic, 1 = max creative). From AIConfig. */
   temperature?: number;
   /** Maximum number of output tokens per response. From AIConfig. */
@@ -98,7 +111,7 @@ function extractAssistantText(msg: ModelMessage): string {
 export async function* runTurn(
   options: RunTurnOptions,
 ): AsyncGenerator<AgentEvent, ModelMessage[]> {
-  const { history, model, provider, onConfirm, systemPrompt, maxSteps = 15, disableTools, temperature, maxOutputTokens } = options;
+  const { history, model, provider, onConfirm, systemPrompt, maxSteps = 15, toolMode = "full", temperature, maxOutputTokens } = options;
 
   // Where this turn gets recorded. See debug/run-journal.ts — the journal is
   // write-only, so an absent one degrades to a no-op rather than a branch.
@@ -138,7 +151,14 @@ export async function* runTurn(
 
   // ── Build the tool map ─────────────────────────────────────────────────
 
-  const rawTools = disableTools ? undefined : buildToolMap(onConfirm);
+  // "none" passes `tools: undefined` to the SDK, which is genuinely different
+  // from an empty map: the model is never told tools exist at all.
+  const rawTools =
+    toolMode === "none"
+      ? undefined
+      : toolMode === "readonly"
+        ? buildReadOnlyToolMap()
+        : buildToolMap(onConfirm);
 
   // Order matters. The journal wraps the OUTSIDE, so it records what the model
   // actually got back — including a duplicate-block refusal, which is a real

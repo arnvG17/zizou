@@ -89,7 +89,10 @@ test("a ZIZOU.md with only settings adds no conventions section", async () => {
   writeFileSync(join(workspace, "ZIZOU.md"), "## Agent\nprovider: groq\n", "utf-8");
 
   const prompt = await buildSystemPrompt(workspace, "executor");
-  expect(prompt).not.toContain("PROJECT CONVENTIONS");
+  // The SECTION, not the phrase: the file-placement rules refer to project
+  // conventions by name ("if PROJECT CONVENTIONS below name a layout..."),
+  // so a bare substring check here would fail on that reference alone.
+  expect(prompt).not.toContain("--- PROJECT CONVENTIONS (from ZIZOU.md) ---");
 });
 
 test("a large pinned file is truncated rather than swallowing the context window", async () => {
@@ -126,4 +129,65 @@ test("pinning several files still respects one shared budget", async () => {
 
   const prompt = await buildSystemPrompt(workspace, "executor");
   expect(prompt.length).toBeLessThan(20_000);
+});
+
+// ─── Roles and file placement ────────────────────────────────────────────────
+
+test("the ask role gets read-only instructions and no write tools", async () => {
+  const prompt = await buildSystemPrompt(workspace, "ask");
+
+  expect(prompt).toContain("READ-ONLY tools");
+  expect(prompt).toContain("You cannot write");
+  // The executor's write instructions must not leak into a role that has no
+  // write tools — being told to "ALWAYS invoke the writeFile tool" while
+  // holding no such tool is how a model ends up describing an edit it never
+  // made.
+  expect(prompt).not.toContain("ALWAYS invoke the writeFile tool");
+});
+
+test("the ask role gets no file-placement rules", async () => {
+  // It cannot create a file, so where files go is noise in its context.
+  const prompt = await buildSystemPrompt(workspace, "ask");
+  expect(prompt).not.toContain("FILE PLACEMENT");
+});
+
+test("the executor and planner both get the file-placement rules", async () => {
+  // The planner's targetFiles become the executor's destinations AND what the
+  // user sees at the gate, so both need the same rules or they disagree.
+  for (const role of ["executor", "planner"] as const) {
+    const prompt = await buildSystemPrompt(workspace, role);
+    expect(prompt).toContain("FILE PLACEMENT");
+    expect(prompt).toContain("does NOT\n  belong at the root");
+  }
+});
+
+test("the session context no longer offers a root file as its example", async () => {
+  // It used to illustrate relative paths with `index.html`, so the one
+  // concrete placement example the model saw was a write to the repo root.
+  const prompt = await buildSystemPrompt(workspace, "executor");
+  expect(prompt).toContain("src/components/Foo.tsx");
+  expect(prompt).not.toContain("e.g. index.html");
+});
+
+test("project conventions land after the placement rules that defer to them", async () => {
+  // The rules end with "if PROJECT CONVENTIONS below name a layout, that
+  // layout wins" — which is a lie if the conventions are above them.
+  writeFileSync(
+    join(workspace, "ZIZOU.md"),
+    "## Layout\n\n- apps go in apps/<name>/\n",
+    "utf-8",
+  );
+
+  const prompt = await buildSystemPrompt(workspace, "executor");
+
+  expect(prompt.indexOf("FILE PLACEMENT")).toBeGreaterThan(-1);
+  expect(prompt.indexOf("--- PROJECT CONVENTIONS (from ZIZOU.md) ---")).toBeGreaterThan(
+    prompt.indexOf("FILE PLACEMENT"),
+  );
+  expect(prompt).toContain("apps go in apps/<name>/");
+});
+
+test("the executor is told to look for an existing file before creating one", async () => {
+  const prompt = await buildSystemPrompt(workspace, "executor");
+  expect(prompt).toContain("EDIT, DON'T RECREATE");
 });

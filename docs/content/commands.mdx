@@ -4,22 +4,58 @@ Everything you need to run, extend, and understand Zizou — the AI coding agent
 
 <div id="commands" className="pt-8" />
 
-Zizou comes with several built-in slash commands you can use in the chat bar to configure your agent on the fly:
+Zizou comes with several built-in slash commands you can use in the chat bar to configure your agent on the fly.
 
-- `/plan` — Switch to Plan Mode (clarify → plan → confirm → execute → verify).
-- `/build` — Switch to Build Mode (fast single-step execution).
-- `/permissions` — View active session-cached file/command permissions or clear them (`/permissions clear`).
-- `/context <light|default|max>` — Set context mode budget.
-- `/reasoning <low|medium|high>` — Set reasoning level & inference parameters.
-- `/expert` — Configure preset models, temperature, and token parameters.
-- `/keys` — Opens an interactive setup screen allowing you to switch AI providers and update API keys.
-- `/models` — Select or override active models for the selected provider.
-- `/add <filepath>` — Pin a file's contents permanently to context.
-- `/checkpoint` — Manage checkpoints (list, diff, restore, branch, revert).
+### Modes
+
+Auto is the default. Pinning any other mode skips the routing call entirely,
+so a pinned mode costs exactly what it always did.
+
+- `/auto` — Classify each prompt and route it (the default).
+- `/chat` — Conversation only. No tools at all.
+- `/ask` — Read-only. Answers questions about your code, never writes.
+- `/build` — Fast single-step execution.
+- `/plan` — Plan → review at the gate → execute → verify.
+
+Each also has a CLI flag: `--auto`, `--chat`, `--ask`, `--build`, `--plan`.
+`zizou plan "…"` still works as a positional subcommand.
+
+### Effort
+
+- `/effort` — Show the current level and what each one does.
+- `/effort <fast|balanced|max>` — Set it for this session.
+- `/fast`, `/balanced`, `/max` — Shorthands for the above.
+
+One dial: it sets the model, the sampling parameters and the tool-round cap
+together. A `/model` pin overrides the model effort would choose.
+
+### Models & providers
+
+- `/keys` — Interactive setup: switch AI providers and update API keys.
+- `/model <provider> [name]` — Switch the active provider, optionally pinning a model.
+- `/models` — List every available model option for all providers.
+- `/modelid <name>` — Set a custom model ID for the current provider.
+- `/ollama <url>` — Set the Ollama base URL.
+
+### Context
+
+- `/add <filepath>` — Pin a file's contents permanently to context (alias: `/file`).
+- `@` — Type `@` in the input for fuzzy file search, then Enter to insert the path.
+- `/init` — Create a `ZIZOU.md` for project settings, layout and conventions.
+- `/prompt` — Dump the full system prompt sent to the LLM.
+- `/skills` — List available custom agent skills.
+
+### History & safety
+
+- `/permissions` — View session-cached file/command permissions, or clear them (`/permissions clear`).
+- `/checkpoint` — Manage checkpoints (list, diff, restore, branch, switch, delete, revert).
 - `/undo` — Undo the last step's file changes.
 - `/redo` — Redo the last undone step.
-- `/export` — Export conversation transcript to markdown file.
+- `/session` — Manage parallel sessions (`list`, `switch <name>`, `new`, `delete`).
+- `/export` — Export the conversation transcript to markdown.
 - `/clear` — Reset conversation history & session permissions.
+- `/help` — Show available commands, the active mode, effort and model.
+- `/exit` — Close Zizou.
 
 <div id="new-features" className="pt-16" />
 

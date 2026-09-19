@@ -32,6 +32,7 @@
 // whether the agent regressed or the grader drifted.
 
 import type { RunTotals } from "../src/agent/debug/index.js";
+import type { Mode } from "../src/agent/mode.js";
 
 // ─── Assertions ──────────────────────────────────────────────────────────────
 
@@ -83,8 +84,14 @@ export interface GoldenTask {
   /** The prompt sent to the orchestrator. */
   prompt: string;
 
-  /** Which orchestrator mode to run in. */
-  mode: "build" | "plan";
+  /**
+   * Which mode to PIN for this run.
+   *
+   * "auto" lets the router choose, which is the only way to eval the router
+   * itself — pair it with routedTo() to assert what it picked. Every other
+   * value pins that route and skips the classification call entirely.
+   */
+  mode: Mode;
 
   /**
    * Files seeded into the fresh workspace before the run, keyed by relative

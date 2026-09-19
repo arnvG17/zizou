@@ -27,8 +27,8 @@ import { resolveMode, type Mode } from "./agent/mode.js";
 // ─── Parse CLI Arguments ─────────────────────────────────────────────────────
 //
 // We parse manually (no yargs/commander dependency) because the argument
-// surface is small: --reset, --setup, --plan, and the positional "plan"
-// subcommand. Adding a full arg parser for 3 flags isn't worth the dep.
+// surface is small: --reset, --setup, the mode flags, and the positional
+// "plan" subcommand. Adding a full arg parser isn't worth the dep.
 
 const args = process.argv.slice(2);
 
@@ -40,12 +40,16 @@ if (forceSetup) {
 
 // ─── Mode Detection ──────────────────────────────────────────────────────────
 //
-// Detect plan mode from either:
+// Plan mode is detectable two ways, both kept for compatibility:
 //   1. `zizou plan "prompt"` — "plan" as a positional subcommand
 //   2. `zizou --plan "prompt"` — --plan as a flag
 //
-// Everything else defaults to build mode. The resolveMode function in
-// mode.ts is intentionally trivial — a pure flag check, no heuristics.
+// The other modes have a flag each. WITH NO FLAG AT ALL the mode is "auto":
+// the router reads the prompt and picks, rather than running every request
+// as a single build step regardless of what was asked.
+//
+// resolveMode is still a pure flag check with no heuristics — the classifier
+// runs later, inside the orchestrator, and only when this returns "auto".
 
 const hasPlanFlag = args.includes("--plan");
 
@@ -54,8 +58,13 @@ const hasPlanFlag = args.includes("--plan");
 const nonFlagArgs = args.filter((a) => !a.startsWith("--"));
 const planPositional = nonFlagArgs[0] === "plan";
 
-// Resolve the mode using the pure flag-check function
-const modeContext = resolveMode({ planFlag: hasPlanFlag || planPositional });
+const modeContext = resolveMode({
+  planFlag: hasPlanFlag || planPositional,
+  buildFlag: args.includes("--build"),
+  askFlag: args.includes("--ask"),
+  chatFlag: args.includes("--chat"),
+  autoFlag: args.includes("--auto"),
+});
 
 // ─── Initial Prompt Extraction ───────────────────────────────────────────────
 //
@@ -64,10 +73,19 @@ const modeContext = resolveMode({ planFlag: hasPlanFlag || planPositional });
 //   - `zizou "fix the typo in README"`
 //   - `zizou plan "add authentication system"`
 //
-// We strip out flags (--plan, --reset, --setup) and the "plan" subcommand
-// to get the actual prompt text.
+// We strip out every flag and the "plan" subcommand to get the actual prompt
+// text. A flag left in here would become part of the prompt, and in auto mode
+// it would also become part of what the router classifies.
 
-const flagsToStrip = new Set(["--plan", "--reset", "--setup"]);
+const flagsToStrip = new Set([
+  "--plan",
+  "--build",
+  "--ask",
+  "--chat",
+  "--auto",
+  "--reset",
+  "--setup",
+]);
 const promptArgs = args.filter((a) => !flagsToStrip.has(a));
 
 // If "plan" was used as a positional subcommand, remove it too

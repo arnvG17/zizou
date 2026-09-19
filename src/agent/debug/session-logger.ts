@@ -276,6 +276,24 @@ export class SessionLogger {
    * Was logEscalation. Nothing is "triggered" any more — the turn has already
    * finished successfully and this only records that it looked large.
    */
+  /**
+   * Log the router's decision, in auto mode only.
+   *
+   * This is the audit trail for "why did it do that?" — and equally for "is
+   * auto mode actually costing me a call on every turn?". A pinned mode
+   * produces no line here at all, which is the point.
+   */
+  static logRouteDecision(
+    route: string,
+    reason: string,
+    confidence: number,
+    source: string,
+  ): void {
+    this.append(
+      `\n  [ROUTER] → ${route.toUpperCase()} (${source}, confidence ${confidence.toFixed(2)}) — ${reason}\n`
+    );
+  }
+
   static logScopeHint(reason: string): void {
     this.append(
       `\n  [SCOPE HINT] ${reason} — build step looked larger than one step.\n`

@@ -345,3 +345,66 @@ export function allStepsVerified(): Assertion {
     };
   };
 }
+
+// ─── Routing ─────────────────────────────────────────────────────────────────
+
+/**
+ * Auto mode routed this prompt to the expected route.
+ *
+ * Reads the phase event the runner writes from "mode-info", which carries the
+ * route the orchestrator actually ran. Deterministic: it inspects a recorded
+ * fact about the run, not the quality of the answer.
+ *
+ * Note this does NOT assert the route was a good choice — only that the
+ * classifier and the dispatch agree with the task's expectation. A task that
+ * wants to claim more should also assert on what the run touched.
+ */
+export function routedTo(expected: string): Assertion {
+  return async ({ events }) => {
+    const phases = events.filter(
+      (e) => e.kind === "phase" && typeof e.detail === "string" && e.detail.startsWith("mode="),
+    );
+    const actual = phases[0]?.detail?.match(/^mode=(\w+)/)?.[1];
+
+    return {
+      name: `routed to ${expected}`,
+      passed: actual === expected,
+      detail: actual
+        ? `routed to ${actual}${actual === expected ? "" : ` (${phases[0].detail})`}`
+        : "no route recorded in journal",
+    };
+  };
+}
+
+/**
+ * Nothing was written directly into the workspace root.
+ *
+ * The failure this exists for: asked for an app, the agent drops chess.html,
+ * poker.tsx and notesapp.html at the top level next to package.json. A file
+ * one directory down is fine; a bare filename at the root is not.
+ *
+ * `allowed` names the root files a task legitimately expects (a README, a
+ * package.json), so the assertion stays about misplacement rather than about
+ * writing to the root at all.
+ */
+export function nothingAtRoot(...allowed: string[]): Assertion {
+  return async ({ totals }) => {
+    // Windows journals report backslashes, so a path check that only knows
+    // about "/" would see every nested file as a bare root filename.
+    const toPosix = (f: string) => f.split("\\").join("/");
+
+    const permitted = new Set(allowed.map(toPosix));
+    const offenders = (totals.filesTouched ?? [])
+      .map(toPosix)
+      .filter((f) => !f.includes("/") && !permitted.has(f));
+
+    return {
+      name: "nothing written at the workspace root",
+      passed: offenders.length === 0,
+      detail:
+        offenders.length === 0
+          ? "all new files placed in a directory"
+          : `written at the root: ${offenders.join(", ")}`,
+    };
+  };
+}

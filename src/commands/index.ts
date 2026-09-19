@@ -62,6 +62,8 @@ export interface SlashCommandInfo {
 
 export const SLASH_COMMANDS: SlashCommandInfo[] = [
   { command: "/settings", description: "Modify agent configuration (aliases: /keys)" },
+  { command: "/auto", description: "Let the router pick the mode from your prompt (default)" },
+  { command: "/ask", description: "Switch to ask mode (read-only — answers, never writes)" },
   { command: "/chat", description: "Switch to chat mode (conversation only, tools disabled)" },
   { command: "/plan", description: "Switch to plan mode (plan → review → execute → verify)" },
   { command: "/build", description: "Switch to build mode (single-step execution)" },
@@ -118,11 +120,54 @@ export type LogEntry =
     }
   | { kind: "error"; text: string }
   // ── Orchestrator log entry kinds, rendered by Chat.tsx's LogLine ──────
-  | { kind: "plan-display"; steps: PlanStep[]; assumptions: string[] }
+  | {
+      kind: "plan-display";
+      steps: PlanStep[];
+      assumptions: string[];
+      /**
+       * Why the router chose plan, when it did. Absent for a pinned /plan,
+       * where "you are in plan mode" tells the user nothing they don't know.
+       */
+      routeReason?: string;
+      /**
+       * Needed to mark each targetFile as new or existing in the preview.
+       * Passed in rather than read at render time so the marks reflect the
+       * tree as it was when the plan was made.
+       */
+      projectRoot?: string;
+    }
   | { kind: "step-progress"; stepIndex: number; totalSteps: number; description: string; modelTier?: "hosted" | "local" }
   | { kind: "verification"; stepIndex: number; verified: boolean; mismatches: string[]; verboseFeedback?: string; modelTier?: "hosted" | "local" | undefined }
   | { kind: "scope-hint"; text: string }
   | { kind: "mode-switch"; mode: Mode; reason: string };
+
+/**
+ * The prompt under a displayed plan.
+ *
+ * It used to read "Execute this plan? (y/n)", and y/n was literally all it
+ * accepted — so correcting one wrong assumption meant rejecting the plan and
+ * retyping the whole request. Free text here is a CORRECTION: it goes back to
+ * the planner with the plan it corrects, and the revised plan returns to this
+ * same gate.
+ */
+export const PLAN_GATE_PROMPT =
+  "Execute this plan?  y = run · n = cancel · b = build instead · a = just answer\n" +
+  "Or describe what to change (e.g. \"put it in src/games/, not the root\").";
+
+/**
+ * Mode glyph + name for display.
+ *
+ * A table rather than a nested ternary: /help used to spell the three modes
+ * out inline, which is exactly the shape that silently renders a newly added
+ * mode as whichever one sat in the else branch.
+ */
+const MODE_LABELS: Record<Mode, string> = {
+  auto: "◇ Auto",
+  chat: "○ Chat",
+  ask: "? Ask",
+  build: "● Build",
+  plan: "◆ Plan",
+};
 
 const SHORT_LABELS: Record<ProviderChoice, string> = {
   groq: "Groq",
@@ -199,10 +244,49 @@ export async function handleSlashCommand(ctx: CommandContext): Promise<boolean> 
     process.exit(0);
   }
 
-  // ── /chat, /plan and /build — switch orchestrator mode ─────────────────
-  // /chat  → conversation only, tools disabled
-  // /plan  → full pipeline: planner → y/n review → execute → verify
-  // /build → single-step execution (default)
+  // ── Mode commands ─────────────────────────────────────────
+  // /auto  → the router reads each prompt and picks (the default)
+  // /chat  → conversation only, no tools at all
+  // /ask   → read-only tools: answers questions, writes nothing
+  // /plan  → full pipeline: planner → gate → execute → verify
+  // /build → single-step execution
+  //
+  // Pinning any of the four costs nothing extra: only /auto consults the
+  // router, so a pinned mode makes exactly the calls it always made.
+  if (command === "auto") {
+    if (ctx.onModeChange) {
+      ctx.onModeChange("auto");
+    }
+    ctx.setLog((l: LogEntry[]) => [
+      ...l,
+      { kind: "user", text },
+      {
+        kind: "assistant",
+        text: `Switched to ◇ Auto mode.
+Each prompt is classified first, then routed to chat, ask, build or plan.
+Pin a mode with /chat, /ask, /build or /plan to skip that step.`,
+      },
+    ]);
+    return true;
+  }
+
+  if (command === "ask") {
+    if (ctx.onModeChange) {
+      ctx.onModeChange("ask");
+    }
+    ctx.setLog((l: LogEntry[]) => [
+      ...l,
+      { kind: "user", text },
+      {
+        kind: "assistant",
+        text: `Switched to ? Ask mode.
+I can read your code — glob, grep, listDir, readFile — but cannot write, edit or run anything.
+Use /build when you want changes made.`,
+      },
+    ]);
+    return true;
+  }
+
   if (command === "chat") {
     if (ctx.onModeChange) {
       ctx.onModeChange("chat");
@@ -251,7 +335,7 @@ export async function handleSlashCommand(ctx: CommandContext): Promise<boolean> 
   if (command === "help") {
     const provider = getDefaultProvider() || "groq";
     const modelId = getActiveModelId(provider);
-    const currentMode = ctx.getCurrentMode ? ctx.getCurrentMode() : "build";
+    const currentMode = ctx.getCurrentMode ? ctx.getCurrentMode() : "auto";
     ctx.setLog((l: LogEntry[]) => [
       ...l,
       { kind: "user", text },
@@ -259,9 +343,12 @@ export async function handleSlashCommand(ctx: CommandContext): Promise<boolean> 
         kind: "assistant",
         text: `Available slash commands:
 
-  /chat                     Switch to chat mode (conversation only, tools disabled)
-  /plan                     Switch to plan mode (plan → review → execute → verify)
-  /build                    Switch to build mode (single-step execution)
+  Modes — auto is the default; pinning one skips the routing call:
+  /auto                     Classify each prompt, then route it (default)
+  /chat                     Conversation only, no tools at all
+  /ask                      Read-only — answers questions, never writes
+  /plan                     Plan → review at the gate → execute → verify
+  /build                    Single-step execution
   /model <provider>         Switch active provider
                             Providers: groq, google, openrouter, anthropic, openai, ollama
   /model <provider> <name>  Switch provider AND set a custom model name
@@ -292,7 +379,7 @@ export async function handleSlashCommand(ctx: CommandContext): Promise<boolean> 
   /export                   Export conversation transcript to markdown
   /exit                     Close Zizou
 
-  Mode:    ${currentMode === "chat" ? "○ Chat" : currentMode === "plan" ? "◆ Plan" : "● Build"}
+  Mode:    ${MODE_LABELS[currentMode] ?? currentMode}
   Effort:  ${resolveAgentConfig().effort}${resolveAgentConfig().effortSource === "project" ? " (ZIZOU.md)" : resolveAgentConfig().effortSource === "session" ? " (this session)" : ""}
   Active:  ${SHORT_LABELS[provider]} › ${modelId}${resolveAgentConfig().modelPinned ? " (pinned)" : ""}`,
       },

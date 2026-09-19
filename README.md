@@ -31,6 +31,7 @@ docker run -it arnv17/zizou:latest
 
 ## Core Features
 
+- **Auto Mode (default):** Zizou reads your prompt and picks how to handle it — conversation, a read-only answer, a single edit, or a reviewed multi-step plan. You do not pick the mode; you can still pin one.
 - **Safe Code Modification:** The AI can read and write files, but every modification requires your review and approval.
 - **Controlled Command Execution:** The AI can execute bash/powershell commands, prompting you for permission before running them.
 - **Git-Independent Version Control:** Zizou tracks file modifications in an internal checkpoint database. You can diff and revert AI edits without polluting your git history.
@@ -38,16 +39,67 @@ docker run -it arnv17/zizou:latest
 
 ---
 
+## Operating Modes
+
+Zizou has one pinned mode and four execution routes. The default pin is **Auto**,
+which classifies each prompt with one small, fast model call and runs the route
+it picks. The badge shows both — `Auto → Build` — so you can see what it chose.
+
+| Route | What it does | Tools |
+| --- | --- | --- |
+| `◇ Auto` | Reads the prompt, picks one of the four below | — |
+| `○ Chat` | Greetings and small talk | None when pinned; read-only via Auto |
+| `? Ask` | Answers questions about your codebase | Read-only — never writes |
+| `● Build` | One concrete change, executed and verified | Full |
+| `◆ Plan` | Multi-file work: plan → review → execute → verify | Full, after approval |
+
+Pin one with `/auto`, `/chat`, `/ask`, `/build`, `/plan`, or the matching CLI
+flag. **The classification call happens only in Auto mode** — pin any other
+mode and no router call is made.
+
+The router is treated as a guess: low-confidence answers resolve toward the
+cheaper mistake, a routed plan still stops at the review gate, and if the
+provider is slow or down the turn continues on a deterministic fallback rather
+than failing.
+
+### The Plan Gate
+
+Before any step runs, Zizou shows the plan, its assumptions, and every file each
+step will touch — marked `+` for new and `~` for existing. That is where "it is
+about to create `game.html` at the repo root" becomes visible *before* approval.
+
+The gate takes `y` to run, `n` to cancel, `b` to run it as a single build step,
+`a` to just answer — and **anything else as a correction**. Typing
+`put it in src/games/, not the root` revises the plan in place instead of making
+you retype the request.
+
+### Where Files Go
+
+New files go beside the files of their kind that already exist; the workspace
+root is for files that belong at a root by convention. Before creating a file,
+the agent searches for the one that already does that job — editing it is
+almost always what was meant. A `## Layout` section in your `ZIZOU.md`
+overrides both; run `/init` for a template.
+
+---
+
 ## Slash Commands
 
 Zizou supports several built-in slash commands you can type into the chat input to manage the agent:
 
+- **/auto, /chat, /ask, /build, /plan**: Pin an operating mode (see above). `/auto` is the default.
+- **/effort `<fast|balanced|max>`**: One dial for speed vs quality — sets the model, sampling and tool-round cap together. Shorthands: `/fast`, `/balanced`, `/max`.
 - **/keys**: Opens the interactive setup screen to switch AI providers and enter/update your API keys.
-- **/models**: Overrides the default model choice for the active provider.
-- **/context**: Shows a list of pinned files currently loaded in the AI's context window.
+- **/model `<provider> [name]`**: Switch the active provider, optionally pinning a model.
+- **/models**: Lists every available model option for all providers.
+- **/add `<filepath>`**: Pins a file's contents permanently to context. Type `@` for fuzzy file search.
+- **/init**: Creates a `ZIZOU.md` for project settings, layout conventions and coding standards.
 - **/session**: Manages parallel chat sessions (`/session list`, `/session switch <name>`, `/session new`).
 - **/checkpoint**: Rollback, branch, diff, and revert tools for AI changes (see details below).
-- **/help**: Shows available commands, active provider, and configured model.
+- **/undo, /redo**: Step back and forward through the last steps' file changes.
+- **/export**: Exports the conversation transcript to markdown.
+- **/permissions**: Views or clears session-cached file and command permissions.
+- **/help**: Shows available commands, the active mode, effort and model.
 - **/exit**: Closes the Zizou CLI.
 
 ---
@@ -107,7 +159,7 @@ To avoid writing keys to disk, provide them via environment variables instead, w
 ---
 
 ## Known Limitations
-- **No File Indexing:** Zizou currently cannot index or search across the entire repository (no tree-sitter integration).
-- **No Session Persistence:** Chat history is lost when you exit the CLI.
-- **No Keychain Storage:** API keys are stored in unencrypted plain text.
-- **No Cost Tracking:** Token usage and cost tracking are not yet displayed in the UI.
+- **No Semantic Code Index:** Zizou has no tree-sitter symbol index. It finds code with `glob`, `grep` and `readFile` rather than from a pre-computed map, which is accurate but costs tool calls on large repos.
+- **No Keychain Storage:** API keys are stored in unencrypted plain text (see above).
+- **Auto Mode Adds Latency:** The routing call costs roughly 0.5–4s before the turn starts, depending on the provider. Pin a mode to skip it.
+- **The Router Can Be Wrong:** It is a classifier, not an oracle. A wrong route is visible in the badge, and a routed plan is correctable at the gate before anything runs.

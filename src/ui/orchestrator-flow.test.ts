@@ -42,7 +42,7 @@ test("a new prompt keeps the mode the user pinned", () => {
     { type: "set-mode", mode: "plan" },
     { type: "prompt-submitted", prompt: "next task" },
   );
-  expect(state.mode).toBe("plan");
+  expect(state.pinnedMode).toBe("plan");
 });
 
 test("step-verified does not double-count an already completed step", () => {
@@ -92,14 +92,67 @@ test("approving a plan keeps the steps but closes the gate", () => {
   expect(state.isAwaitingPlanApproval).toBe(false);
 });
 
-test("mode-reported reflects an auto-detected chat turn", () => {
+test("route-reported records what ran without touching the pin", () => {
   const state = reduce(initialFlowState,
     { type: "set-mode", mode: "build" },
     { type: "prompt-submitted", prompt: "hi" },
-    { type: "mode-reported", mode: "chat" },
+    { type: "route-reported", route: "chat", reason: "greeting" },
   );
 
-  expect(state.mode).toBe("chat");
+  expect(state.lastRoute).toBe("chat");
+  expect(state.lastRouteReason).toBe("greeting");
+  expect(state.pinnedMode).toBe("build");
+});
+
+test("auto survives a turn that routed somewhere else", () => {
+  // THE REGRESSION THIS FILE EXISTS FOR. mode and lastRoute used to be one
+  // field, so a single auto turn that routed to plan overwrote the pin with
+  // "plan" and the session never routed again.
+  const state = reduce(initialFlowState,
+    { type: "prompt-submitted", prompt: "add dark mode everywhere" },
+    { type: "route-reported", route: "plan", reason: "multi-file work" },
+    { type: "plan-received", steps: oneStep, assumptions: [] },
+    { type: "plan-approved" },
+    { type: "step-verified", stepIndex: 0, verified: true },
+  );
+
+  expect(state.pinnedMode).toBe("auto");
+  expect(state.lastRoute).toBe("plan");
+});
+
+test("a new prompt clears the last route but keeps the pin", () => {
+  // The badge reads "Auto -> Plan" from lastRoute. Carrying it into the next
+  // prompt would claim a route that has not been chosen yet.
+  const state = reduce(initialFlowState,
+    { type: "route-reported", route: "plan", reason: "multi-file work" },
+    { type: "prompt-submitted", prompt: "now something else" },
+  );
+
+  expect(state.pinnedMode).toBe("auto");
+  expect(state.lastRoute).toBeNull();
+});
+
+test("pinning a mode clears a stale route from the badge", () => {
+  const state = reduce(initialFlowState,
+    { type: "route-reported", route: "plan", reason: "multi-file work" },
+    { type: "set-mode", mode: "build" },
+  );
+
+  expect(state.pinnedMode).toBe("build");
+  expect(state.lastRoute).toBeNull();
+});
+
+test("a correction at the gate keeps the gate open", () => {
+  // The revised plan lands back at the same gate. Closing the flag here would
+  // let the next keystroke be read as a brand-new prompt while the revision
+  // is still generating.
+  const state = reduce(initialFlowState,
+    { type: "plan-received", steps: oneStep, assumptions: [] },
+    { type: "plan-revision-requested" },
+  );
+
+  expect(state.isAwaitingPlanApproval).toBe(true);
+  expect(state.pendingPlan).toEqual(oneStep);
 });
 
 test("nothing in the reducer can switch a build flow into plan mode", () => {
@@ -115,16 +168,16 @@ test("nothing in the reducer can switch a build flow into plan mode", () => {
     { type: "plan-rejected" },
   );
 
-  expect(afterEverything.mode).toBe("build");
+  expect(afterEverything.pinnedMode).toBe("build");
 });
 
 test("restore fills in defaults for anything the persisted state omits", () => {
   const state = flowReducer(initialFlowState, {
     type: "restore",
-    state: { mode: "plan", originalPrompt: "resume me" },
+    state: { pinnedMode: "plan", originalPrompt: "resume me" },
   });
 
-  expect(state.mode).toBe("plan");
+  expect(state.pinnedMode).toBe("plan");
   expect(state.originalPrompt).toBe("resume me");
   expect(state.completedStepIndices).toEqual([]);
   expect(state.pendingPlan).toBeNull();

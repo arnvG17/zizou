@@ -140,6 +140,15 @@ effort:   balanced
 # model:   pin an exact model, overriding what effort would pick
 #          e.g. model: claude-sonnet-4-5
 
+## Layout
+
+Where things go. The agent treats these as binding when choosing a
+destination for a new file, overriding its own guess.
+
+- Example: apps go in apps/<name>/
+- Example: React components go in src/components/
+- Example: nothing new at the repo root
+
 ## Conventions
 
 Everything below this point is injected into the agent's context.

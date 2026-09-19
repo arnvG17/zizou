@@ -39,10 +39,10 @@ import { runTurn } from "../agent/run-turn.js";
 import { buildSystemPrompt, addPinnedFile, pinnedContextFiles } from "../context/build-system-prompt.js";
 import { buildRepoMap } from "../context/repo-map.js";
 import { useTerminalSize, SidebarWordmark, SidebarMountains } from "./Figurine.js";
-import { handleSlashCommand, SLASH_COMMANDS, WELCOME_MESSAGE, getSkills } from "../commands/index.js";
+import { handleSlashCommand, SLASH_COMMANDS, WELCOME_MESSAGE, getSkills, PLAN_GATE_PROMPT } from "../commands/index.js";
 import type { LogEntry as SharedLogEntry } from "../commands/index.js";
-import { readdirSync, statSync } from "fs";
-import { join, relative } from "path";
+import { readdirSync, statSync, existsSync } from "fs";
+import { join, relative, resolve as resolvePath } from "path";
 import { loadActiveSessionState, saveActiveSessionState, listSessions, getActiveSession, getActiveSessionId, createSession } from "../session/registry.js";
 import { listCheckpoints, listBranches } from "../checkpoint/manager.js";
 import { FileSearchOverlay } from "../tui/file-search-overlay.js";
@@ -50,7 +50,7 @@ import { estimateCost, formatCost, getModelRate } from "../tui/cost-tracker.js";
 
 // ─── Orchestrator imports ────────────────────────────────────────────────────
 // These enable the full clarify → plan → execute → verify pipeline.
-import type { Mode } from "../agent/mode.js";
+import type { Mode, Route } from "../agent/mode.js";
 import { isCurrentSessionSchema } from "../session/types.js";
 import {
   flowReducer,
@@ -59,7 +59,7 @@ import {
   type OrchestratorFlowState,
 } from "./orchestrator-flow.js";
 import { runOrchestrator, type OrchestratorEvent } from "../agent/orchestrator.js";
-import type { PlanStep } from "../agent/types.js";
+import type { PlanStep, PlanRevision } from "../agent/types.js";
 
 const PROVIDERS: ProviderChoice[] = ["groq", "google", "openrouter", "anthropic", "openai", "ollama"];
 
@@ -69,10 +69,49 @@ const PROVIDERS: ProviderChoice[] = ["groq", "google", "openrouter", "anthropic"
  * then silently render as another mode's colour.
  */
 const MODE_BADGE: Record<Mode, { label: string; glyph: string; color: string }> = {
+  auto: { label: "Auto", glyph: "◇", color: "#8A6FD4" },
   chat: { label: "Chat", glyph: "○", color: "#5BA37F" },
+  ask: { label: "Ask", glyph: "?", color: "#4EA5C0" },
   build: { label: "Build", glyph: "●", color: "#3B5FE0" },
   plan: { label: "Plan", glyph: "◆", color: "#D08A4E" },
 };
+
+/**
+ * What the badge shows, given the pin and what actually ran.
+ *
+ * In auto mode the pin and the route disagree on every turn, and both matter:
+ * the route is what just happened, the pin is what will happen next time.
+ * Showing only the route would make auto look like it silently switched the
+ * user's mode; showing only the pin would hide what it chose.
+ */
+/**
+ * Does this planned target file already exist?
+ *
+ * Used only to mark a step's files as new or edited at the plan gate, so a
+ * wrong answer costs a wrong marker and nothing more — hence swallowing the
+ * error rather than surfacing it. An unreadable path is shown as new, which
+ * is the reading that prompts the user to look.
+ */
+function fileExists(projectRoot: string | undefined, file: string): boolean {
+  try {
+    return existsSync(resolvePath(projectRoot ?? process.cwd(), file));
+  } catch {
+    return false;
+  }
+}
+
+function badgeFor(pinnedMode: Mode, lastRoute: Route | null) {
+  const pin = MODE_BADGE[pinnedMode];
+  if (pinnedMode !== "auto" || !lastRoute) return pin;
+
+  const route = MODE_BADGE[lastRoute];
+  return {
+    label: `${pin.label} → ${route.label}`,
+    glyph: pin.glyph,
+    // The route's colour, because the route is what the line is about.
+    color: route.color,
+  };
+}
 
 const SHORT_LABELS: Record<ProviderChoice, string> = {
   groq: "Groq",
@@ -351,7 +390,7 @@ export function Chat({ onChangeKeys, mode: initialMode = "build", initialPrompt 
   // See orchestrator-flow.ts for the four bugs that caused.
   const [flow, dispatchFlow] = useReducer(flowReducer, {
     ...initialFlowState,
-    mode: initialMode,
+    pinnedMode: initialMode,
   });
 
   // A synchronously-current mirror of `flow`. React state updates are async,
@@ -440,7 +479,10 @@ export function Chat({ onChangeKeys, mode: initialMode = "build", initialPrompt 
       applyFlow({
         type: "restore",
         state: {
-          mode: sessionState.currentMode ?? "build",
+          // A session saved before auto existed has no currentMode, and gets
+          // the new default. A session that saved one keeps it — nobody is
+          // switched out from under themselves mid-session.
+          pinnedMode: sessionState.currentMode ?? "auto",
           pendingPlan: orchState?.pendingPlan ?? null,
           pendingAssumptions: orchState?.pendingAssumptions ?? [],
           originalPrompt: orchState?.originalPrompt ?? "",
@@ -946,7 +988,7 @@ export function Chat({ onChangeKeys, mode: initialMode = "build", initialPrompt 
 
       if (suggestionMode === "commands") {
         const executableCommands = [
-          "/settings", "/keys", "/clear", "/reset", "/exit", "/quit", "/prompt", "/skills", "/help", "/model", "/chat", "/plan", "/build", "/effort", "/init"
+          "/settings", "/keys", "/clear", "/reset", "/exit", "/quit", "/prompt", "/skills", "/help", "/model", "/auto", "/chat", "/ask", "/plan", "/build", "/effort", "/init"
         ];
         if (executableCommands.includes(selected)) {
           shouldExecute = true;
@@ -983,7 +1025,7 @@ export function Chat({ onChangeKeys, mode: initialMode = "build", initialPrompt 
             } catch {}
           },
           onModeChange: (mode: Mode) => applyFlow({ type: "set-mode", mode }),
-          getCurrentMode: () => flowRef.current.mode,
+          getCurrentMode: () => flowRef.current.pinnedMode,
           setLog,
           setTokenStats,
           calculateTokenStats,
@@ -1026,7 +1068,7 @@ export function Chat({ onChangeKeys, mode: initialMode = "build", initialPrompt 
         } catch {}
       },
       onModeChange: (mode: Mode) => applyFlow({ type: "set-mode", mode }),
-      getCurrentMode: () => flowRef.current.mode,
+      getCurrentMode: () => flowRef.current.pinnedMode,
       setLog,
       setTokenStats,
       calculateTokenStats,
@@ -1038,30 +1080,69 @@ export function Chat({ onChangeKeys, mode: initialMode = "build", initialPrompt 
 
     const currentFlow = flowRef.current;
 
-    // ── Plan approval: user is saying Y/n to a displayed plan ────────
+    // ── The plan gate ────────────────────────────────────────────────
     //
     // This is the ONLY place plan mode asks the user anything. There is no
-    // clarification round beforehand — the planner states its assumptions in
-    // the plan, and rejecting it with a reason is how you correct them.
+    // clarification round beforehand — the planner states its assumptions and
+    // this gate is where they get accepted, corrected, or thrown out.
+    //
+    // It accepts four short answers and, for anything else, treats what was
+    // typed as a CORRECTION rather than a rejection. The old gate took y/n
+    // only, so one wrong destination directory cost the user the whole prompt.
     if (currentFlow.isAwaitingPlanApproval && currentFlow.pendingPlan) {
       const answer = userText.trim().toLowerCase();
       setLog((l) => [...l, { kind: "user", text: userText }]);
+
+      const rerunAs = (mode: Mode, note: string) => {
+        // Discard the plan and rerun the ORIGINAL prompt on another route.
+        // A misrouted plan is the router's mistake to undo, not the user's to
+        // work around by retyping.
+        const prompt = currentFlow.originalPrompt;
+        applyFlow({ type: "plan-rejected" });
+        const next = applyFlow({ type: "set-mode", mode });
+        setLog((l) => [...l, { kind: "assistant", text: note }]);
+        runOrchestratorFlow(prompt, { ...next, originalPrompt: prompt });
+      };
 
       if (answer === "y" || answer === "yes" || answer === "continue") {
         const approvedSteps = currentFlow.pendingPlan;
         const next = applyFlow({ type: "plan-approved" });
         runOrchestratorFlow(next.originalPrompt, next, { approvedSteps });
-      } else {
+        return;
+      }
+
+      if (answer === "n" || answer === "no" || answer === "cancel") {
         applyFlow({ type: "plan-rejected" });
         setLog((l) => [
           ...l,
           {
             kind: "assistant",
-            text: "Plan cancelled. Re-prompt with what you'd like changed — e.g. \"same thing but with Svelte, and no betting\".",
+            text: "Plan cancelled. Nothing was written.",
           },
         ]);
         setBusy(false);
+        return;
       }
+
+      if (answer === "b" || answer === "build") {
+        rerunAs("build", "Running it as a single build step instead.");
+        return;
+      }
+
+      if (answer === "a" || answer === "ask") {
+        rerunAs("ask", "Answering instead — nothing will be written.");
+        return;
+      }
+
+      // Anything else is a correction. Re-plan with it and come back here.
+      const revision = {
+        previousSteps: currentFlow.pendingPlan,
+        previousAssumptions: currentFlow.pendingAssumptions,
+        feedback: userText.trim(),
+      };
+      const next = applyFlow({ type: "plan-revision-requested" });
+      setLog((l) => [...l, { kind: "assistant", text: "Revising the plan…" }]);
+      runOrchestratorFlow(next.originalPrompt, next, { planRevision: revision });
       return;
     }
 
@@ -1096,7 +1177,7 @@ export function Chat({ onChangeKeys, mode: initialMode = "build", initialPrompt 
   async function runOrchestratorFlow(
     prompt: string,
     flowState: OrchestratorFlowState,
-    opts: { approvedSteps?: PlanStep[] } = {},
+    opts: { approvedSteps?: PlanStep[]; planRevision?: PlanRevision } = {},
   ) {
     setBusy(true);
     const submitTime = Date.now();
@@ -1125,7 +1206,7 @@ export function Chat({ onChangeKeys, mode: initialMode = "build", initialPrompt 
       // Mode comes from the flow state passed in, not from the render
       // closure, so a mode the user just set is honoured on this very call.
       const modeContext = {
-        mode: flowState.mode,
+        mode: flowState.pinnedMode,
         reason: "user-flag" as const,
       };
 
@@ -1137,6 +1218,7 @@ export function Chat({ onChangeKeys, mode: initialMode = "build", initialPrompt 
         model,
         onConfirm: confirmFn,
         approvedPlan: opts.approvedSteps,
+        planRevision: opts.planRevision,
         completedStepIndices: flowState.completedStepIndices,
         history: history.current,
         provider,
@@ -1148,9 +1230,18 @@ export function Chat({ onChangeKeys, mode: initialMode = "build", initialPrompt 
 
         // ── Handle orchestrator-level events ──────────────────────────────
         switch (event.kind) {
+          case "route-decided":
+            // Auto mode only. Handled by "mode-info" below for both the badge
+            // and the log line — this event exists so the route can be
+            // observed without inferring it, and is where a future "wrong
+            // route, redirect me" affordance would hang.
+            break;
+
           case "mode-info":
-            // Reflect what actually ran (chat mode may be auto-detected).
-            applyFlow({ type: "mode-reported", mode: event.mode });
+            // Record the route WITHOUT touching the pinned mode. In auto mode
+            // these differ every turn, and overwriting the pin would mean one
+            // routed prompt silently ended auto mode for the session.
+            applyFlow({ type: "route-reported", route: event.mode, reason: event.reason });
             setLog((l) => [
               ...l,
               { kind: "mode-switch", mode: event.mode, reason: event.reason },
@@ -1158,7 +1249,7 @@ export function Chat({ onChangeKeys, mode: initialMode = "build", initialPrompt 
             break;
 
           case "plan-ready":
-            // The planner generated a plan — display it for Y/n approval.
+            // The planner generated a plan — display it at the gate.
             applyFlow({
               type: "plan-received",
               steps: event.steps,
@@ -1167,11 +1258,17 @@ export function Chat({ onChangeKeys, mode: initialMode = "build", initialPrompt 
 
             setLog((l) => [
               ...l,
-              { kind: "plan-display", steps: event.steps, assumptions: event.assumptions },
-              { kind: "assistant", text: "Execute this plan? (y/n)" },
+              {
+                kind: "plan-display",
+                steps: event.steps,
+                assumptions: event.assumptions,
+                routeReason: event.routeReason,
+                projectRoot: process.cwd(),
+              },
+              { kind: "assistant", text: PLAN_GATE_PROMPT },
             ]);
 
-            // STOP processing — we'll re-invoke after Y/n
+            // STOP processing — we'll re-invoke once the user decides.
             setBusy(false);
             return;
 
@@ -1377,7 +1474,7 @@ export function Chat({ onChangeKeys, mode: initialMode = "build", initialPrompt 
           tokenStats,
           pinnedFilesArray,
           log,
-          flowRef.current.mode,
+          flowRef.current.pinnedMode,
           {
             pendingPlan: flowRef.current.pendingPlan,
             pendingAssumptions: flowRef.current.pendingAssumptions,
@@ -1399,6 +1496,13 @@ export function Chat({ onChangeKeys, mode: initialMode = "build", initialPrompt 
     return String(t);
   }, [tokenStats.totalTokens]);
 
+  // One computation for all three badges (header, input footer, sidebar), so
+  // they cannot disagree about what mode the session is in.
+  const modeBadge = useMemo(
+    () => badgeFor(flow.pinnedMode, flow.lastRoute),
+    [flow.pinnedMode, flow.lastRoute],
+  );
+
   return (
     <Box flexDirection="row" width="100%">
       {/* Left conversation pane */}
@@ -1411,7 +1515,7 @@ export function Chat({ onChangeKeys, mode: initialMode = "build", initialPrompt 
             <Text color="gray">{sessionId}</Text>
           </Box>
           <Box flexDirection="row" gap={2}>
-            <Text color={MODE_BADGE[flow.mode].color} bold>{MODE_BADGE[flow.mode].glyph} {MODE_BADGE[flow.mode].label}</Text>
+            <Text color={modeBadge.color} bold>{modeBadge.glyph} {modeBadge.label}</Text>
             <Text color="gray">{formattedTokensStr} tokens</Text>
           </Box>
         </Box>
@@ -1578,7 +1682,7 @@ export function Chat({ onChangeKeys, mode: initialMode = "build", initialPrompt 
               {/* Input Footer */}
               <Box flexDirection="row" justifyContent="space-between" paddingX={1} marginTop={0}>
                 <Box flexDirection="row" gap={1}>
-                  <Text backgroundColor={MODE_BADGE[flow.mode].color} color="white" bold> {MODE_BADGE[flow.mode].label} · {resolveAgentConfig().effort} </Text>
+                  <Text backgroundColor={modeBadge.color} color="white" bold> {modeBadge.label} · {resolveAgentConfig().effort} </Text>
                   <Text color="gray">{getActiveModelId(getDefaultProvider() || "groq")}</Text>
                 </Box>
                 <Box flexDirection="row" gap={2}>
@@ -1606,7 +1710,7 @@ export function Chat({ onChangeKeys, mode: initialMode = "build", initialPrompt 
             <Text color="#E6E6E6" bold>{sessionName}</Text>
             <Text color="gray">{sessionId}</Text>
             <Box flexDirection="row" gap={1} marginTop={0}>
-              <Text color={MODE_BADGE[flow.mode].color} bold>{MODE_BADGE[flow.mode].glyph} {MODE_BADGE[flow.mode].label}</Text>
+              <Text color={modeBadge.color} bold>{modeBadge.glyph} {modeBadge.label}</Text>
               <Text color="gray">mode</Text>
             </Box>
           </Box>
@@ -1794,9 +1898,20 @@ function LogLine({ entry }: { entry: LogEntry }) {
           is wrong. Putting them below the steps would bury the part most
           likely to be wrong.
         */}
+        {/*
+          Why the router picked plan, when it did. A pinned /plan gets nothing
+          here — telling someone who typed /plan that they are in plan mode is
+          noise. A ROUTED plan is a guess, and the guess should be visible
+          next to the thing it produced.
+        */}
+        {entry.routeReason && (
+          <Box marginBottom={1}>
+            <Text color="#8A6FD4">{entry.routeReason}</Text>
+          </Box>
+        )}
         {entry.assumptions.length > 0 && (
           <Box flexDirection="column" marginBottom={1}>
-            <Text color="#5BA37F" bold>Assumptions — reject (n) to change any of these:</Text>
+            <Text color="#5BA37F" bold>Assumptions — say what to change, or n to cancel:</Text>
             {entry.assumptions.map((assumption, ai) => (
               <Box key={ai} paddingLeft={2}>
                 <Text color="gray">• {assumption}</Text>
@@ -1810,11 +1925,28 @@ function LogLine({ entry }: { entry: LogEntry }) {
               <Text color="#3B5FE0" bold>Step {step.index + 1}.</Text>
               <Text color="#E6E6E6">{step.description}</Text>
             </Box>
+            {/*
+              Each file marked new (+) or existing (~).
+
+              This is the part of the gate that earns its keep: it is where
+              "it is about to create chess.html at the repo root" becomes
+              visible BEFORE approval rather than after, while a correction
+              still costs one line of typing.
+            */}
             {step.targetFiles.length > 0 && (
               <Box paddingLeft={2} flexDirection="column">
-                {step.targetFiles.map((file, fi) => (
-                  <Text key={fi} color="gray" dimColor>↳ {file}</Text>
-                ))}
+                {step.targetFiles.map((file, fi) => {
+                  const isNew = !fileExists(entry.projectRoot, file);
+                  return (
+                    <Box key={fi} flexDirection="row" gap={1}>
+                      <Text color={isNew ? "#5BA37F" : "#D08A4E"} bold>{isNew ? "+" : "~"}</Text>
+                      <Text color="gray" dimColor>{file}</Text>
+                      <Text color={isNew ? "#5BA37F" : "gray"} dimColor>
+                        {isNew ? "(new)" : "(edit)"}
+                      </Text>
+                    </Box>
+                  );
+                })}
               </Box>
             )}
             {step.dependsOn.length > 0 && (
@@ -1885,12 +2017,15 @@ function LogLine({ entry }: { entry: LogEntry }) {
   }
 
   if (entry.kind === "mode-switch") {
-    // Shows mode change notification
+    // Which route this turn ran, and why.
+    //
+    // Driven off MODE_BADGE rather than a plan-vs-build ternary: the ternary
+    // rendered every non-plan mode with build's glyph and colour, so chat and
+    // ask would both have announced themselves as build.
+    const badge = MODE_BADGE[entry.mode];
     return (
       <Box marginBottom={1} flexDirection="row" gap={1}>
-        <Text color={entry.mode === "plan" ? "#D08A4E" : "#3B5FE0"} bold>
-          {entry.mode === "plan" ? "◆" : "●"}
-        </Text>
+        <Text color={badge.color} bold>{badge.glyph}</Text>
         <Text color="#E6E6E6">{entry.reason}</Text>
       </Box>
     );

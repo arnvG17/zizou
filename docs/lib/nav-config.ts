@@ -9,7 +9,10 @@ export type NavItem = {
 export const navItems: NavItem[] = [
   { title: "Getting Started", slug: "getting-started", category: "Guide", sidebarLabel: "Getting Started" },
   { title: "Installation", slug: "getting-started", hash: "installation", category: "Guide", sidebarLabel: "Installation" },
-  { title: "Modes & Context", slug: "modes-and-context", category: "Guide", sidebarLabel: "Modes & Context" },
+  { title: "Operating Modes", slug: "modes-and-context", category: "Guide", sidebarLabel: "Operating Modes" },
+  { title: "The Plan Gate", slug: "modes-and-context", hash: "the-plan-gate", category: "Guide", sidebarLabel: "The Plan Gate" },
+  { title: "Where Files Go", slug: "modes-and-context", hash: "file-placement", category: "Guide", sidebarLabel: "Where Files Go" },
+  { title: "Effort", slug: "modes-and-context", hash: "effort", category: "Guide", sidebarLabel: "Effort" },
   { title: "Slash Commands", slug: "commands", category: "Reference", sidebarLabel: "Slash Commands" },
   { title: "LLM Compatibility", slug: "commands", hash: "llm-compatibility", category: "Reference", sidebarLabel: "LLM Compatibility" },
   { title: "Security", slug: "security", category: "Reference", sidebarLabel: "Security" },
@@ -22,7 +25,7 @@ export function getAdjacentRoutes(currentSlug: string) {
   const index = docRoutes.indexOf(currentSlug);
   const routeTitles: Record<string, string> = {
     "getting-started": "Getting Started",
-    "modes-and-context": "Modes & Context",
+    "modes-and-context": "Operating Modes",
     "commands": "Slash Commands",
     "security": "Security",
     "file-structure": "File Structure",

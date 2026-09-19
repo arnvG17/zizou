@@ -46,7 +46,7 @@
 import { generateText, stepCountIs, type LanguageModel } from "ai";
 import { buildReadOnlyToolMap } from "../tools/index.js";
 import { buildSystemPrompt, type AgentRole } from "../context/build-system-prompt.js";
-import type { Plan, PlanStep, ProjectContext } from "./types.js";
+import type { Plan, PlanRevision, PlanStep, ProjectContext } from "./types.js";
 import { SessionLogger } from "./debug/index.js";
 
 // ─── Planner System Prompt Extension ─────────────────────────────────────────
@@ -140,13 +140,46 @@ export async function plan(
   userPrompt: string,
   context: ProjectContext,
   model: LanguageModel,
+  revision?: PlanRevision,
 ): Promise<Plan> {
   const systemPrompt = await buildSystemPrompt(
     context.projectRoot,
     "planner" as AgentRole,
   );
 
-  const userMessage = `Create a detailed implementation plan for the following request:
+  // A revision is the same request, re-planned with the user's correction in
+  // hand. Showing the previous plan matters: without it the model re-derives
+  // everything from the prompt and the correction has nothing to attach to,
+  // so a note about one step's destination silently rewrites all of them.
+  const userMessage = revision
+    ? `Create a detailed implementation plan for the following request:
+
+${userPrompt}
+
+You previously produced this plan:
+
+Assumptions:
+${revision.previousAssumptions.map((a) => `- ${a}`).join("\n") || "- (none stated)"}
+
+Steps:
+${revision.previousSteps
+  .map(
+    (s) =>
+      `${s.index}. ${s.description}\n   files: ${s.targetFiles.join(", ") || "(none listed)"}${
+        s.dependsOn.length ? `\n   depends on: ${s.dependsOn.join(", ")}` : ""
+      }`,
+  )
+  .join("\n")}
+
+The user reviewed that plan and asked for this change:
+
+${revision.feedback}
+
+Produce a REVISED plan. Keep every step the correction does not touch, and
+apply the correction exactly as asked — it overrides any assumption you made
+before, including anything in your project conventions. Re-index from 0 and
+fix up dependsOn accordingly.`
+    : `Create a detailed implementation plan for the following request:
 
 ${userPrompt}`;
 

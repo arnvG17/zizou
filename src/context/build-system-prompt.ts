@@ -41,8 +41,11 @@ import { loadProjectConventions } from "./load-project-conventions.js";
 //                  existing file layout and avoids write-before-scaffold.
 //   "executor"  — works from an explicit PlanStep with targetFiles,
 //                  so the repo map is optional (follows budget setting).
+//   "ask"       — answers questions about the codebase with read-only tools.
+//                  Same discovery needs as the planner, different output:
+//                  prose for the user rather than a JSON plan.
 
-export type AgentRole = "clarifier" | "planner" | "executor";
+export type AgentRole = "clarifier" | "planner" | "executor" | "ask";
 
 /**
  * How many characters of pinned file content may enter the prompt.
@@ -92,6 +95,11 @@ CRITICAL — File operations:
 - Your text response is for conversation, explanations, and status updates ONLY. File contents MUST be written using writeFile or editFile tool calls.
 - Showing code in a chat text response does NOT create or edit files on disk. You MUST use tool calls to write files.
 
+EDIT, DON'T RECREATE:
+- Before writeFile to a path that does not exist: search for the file that already does this job. glob the basename, grep a distinctive string from the request.
+- If you find it, edit it. Modifying the existing file is almost always what was meant; a near-duplicate under a new name is almost always wrong, and leaves two files that disagree.
+- If you searched and there is genuinely nothing, say so in one line and then create the file.
+
 editFile recovery strategy:
 - If editFile fails with "appeared N times", provide near_line (the line number nearest your intended match), e.g.:
   editFile({ path: "app.html", old_string: "...", new_string: "...", near_line: 42 })
@@ -110,7 +118,56 @@ Rules:
 - Prefer grep for "does X exist and where", glob for "what files match",
   listDir for "what is in this folder", readFile when you need the contents.
 - Stop exploring once you can write the plan. You are not reviewing the
-  codebase, you are gathering just enough to order the work correctly.`;
+  codebase, you are gathering just enough to order the work correctly.
+- targetFiles are shown to the user at the approval gate, marked as new or
+  existing. Get the destination right there and the executor inherits it.`;
+
+const ASK_INSTRUCTIONS = `You are Zizou, an AI coding agent, currently answering a question rather than making a change.
+
+You have READ-ONLY tools: glob, grep, listDir, readFile. You cannot write
+files, edit files, or run commands. Nothing you do in this turn can change
+anything on disk.
+
+Rules:
+- Use the native function-calling protocol only. Never emit raw JSON blocks
+  or pseudo-calls as plain text.
+- Look before you answer. If the question is about this codebase, the answer
+  comes from files you actually read — not from what a project like this one
+  usually looks like.
+- Never reference a file path you have not seen in a glob, grep or listDir
+  result. Cite what you found as path:line so it can be checked.
+- Prefer grep for "does X exist and where", glob for "what files match",
+  listDir for "what is in this folder", readFile when you need the contents.
+- Answer the question that was asked, at the length it deserves. A one-line
+  question gets a one-line answer.
+- Say plainly when you do not know or could not find it. A wrong confident
+  answer about someone's own codebase is worse than no answer.
+- If the user actually wants a change made, say so and suggest /build — do
+  not describe an edit as though you made it. You did not.`;
+
+/**
+ * Where new files go.
+ *
+ * This is in the prompt because the failure it prevents is a real and
+ * repeated one: asked for an app, the agent writes chess.html, poker.tsx and
+ * notesapp.html into the workspace root, next to package.json — sometimes
+ * alongside the chess-app/ directory that already existed.
+ *
+ * The old SESSION_CONTEXT made that worse by offering `index.html` at the
+ * root as its example of a relative path, so the one concrete placement
+ * example the model saw was the wrong one.
+ */
+const FILE_PLACEMENT_RULES = `
+FILE PLACEMENT — decide before you write, and state the destination:
+- Look first. Use glob or listDir to find where files of this kind already
+  live in this repo, and put the new file beside them.
+- Only write to the workspace root when the repo is empty, or when the file
+  belongs at the root by convention (README, package.json, tsconfig,
+  Dockerfile, .gitignore). A new app, page, component or script does NOT
+  belong at the root.
+- A multi-file artifact gets its own directory, named for what it is.
+- If PROJECT CONVENTIONS below name a layout, that layout wins over every
+  rule above. It is not a suggestion.`;
 
 /**
  * Builds the system prompt for one role.
@@ -129,7 +186,16 @@ export async function buildSystemPrompt(
   role: AgentRole = "executor",
 ): Promise<string> {
   const instructions =
-    role === "planner" ? PLANNER_INSTRUCTIONS_BASE : EXECUTOR_INSTRUCTIONS;
+    role === "planner"
+      ? PLANNER_INSTRUCTIONS_BASE
+      : role === "ask"
+        ? ASK_INSTRUCTIONS
+        : EXECUTOR_INSTRUCTIONS;
+
+  // The ask role cannot write anything, so placement rules would be noise.
+  // The planner needs them because its targetFiles become the executor's
+  // destinations — and the gate preview shows them to the user.
+  const placementRules = role === "ask" ? "" : FILE_PLACEMENT_RULES;
 
   // Project conventions from ZIZOU.md, minus its "## Agent" settings block.
   // Those lines are configuration for Zizou, not guidance for the model, and
@@ -152,10 +218,12 @@ Workspace root (cwd): ${projectRoot}
 Operating system: ${os}
 Shell: ${shell}
 All relative paths you provide to tools are resolved from this root.
-When creating or writing a file, you can use either:
-  - An absolute path  (e.g. ${projectRoot}/index.html)
-  - A relative path   (e.g. index.html  or  src/components/Foo.tsx)
-Both will work — relative paths are resolved to the workspace root automatically.
+Absolute paths and relative paths both work — a relative path like
+src/components/Foo.tsx is resolved against the workspace root automatically.${
+    placementRules
+      ? "\nBeing able to write to the root is not a reason to: see FILE PLACEMENT below."
+      : ""
+  }
 --- END SESSION CONTEXT ---`;
 
   const pinnedText = buildPinnedSection();
@@ -163,9 +231,13 @@ Both will work — relative paths are resolved to the workspace root automatical
   const exploreHint =
     role === "planner"
       ? "\n\nYou have not been given a summary of this codebase. Use glob, grep and listDir to find what you need."
-      : "\n\nYou have not been given a summary of this codebase. Use glob, grep, listDir and readFile to find what you need before editing.";
+      : role === "ask"
+        ? "\n\nYou have not been given a summary of this codebase. Use glob, grep, listDir and readFile to find what you need before answering."
+        : "\n\nYou have not been given a summary of this codebase. Use glob, grep, listDir and readFile to find what you need before editing.";
 
-  return `${instructions}${SESSION_CONTEXT}${projectConventions}${pinnedText}${exploreHint}`;
+  // ORDER MATTERS: the placement rules end by deferring to "PROJECT
+  // CONVENTIONS below", so the conventions must actually be below them.
+  return `${instructions}${SESSION_CONTEXT}${placementRules}${projectConventions}${pinnedText}${exploreHint}`;
 }
 
 /**

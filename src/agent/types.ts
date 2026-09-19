@@ -136,6 +136,24 @@ export interface Plan {
   steps: PlanStep[];
 }
 
+/**
+ * A correction the user typed at the plan gate instead of y/n.
+ *
+ * The gate used to accept only y/n, so the single way to fix one wrong
+ * assumption — a destination directory, a framework, an out-of-scope step —
+ * was to reject the plan and retype the entire request. Free text at the gate
+ * is a correction, not a rejection, and this is what carries it back to the
+ * planner along with the plan it corrects.
+ */
+export interface PlanRevision {
+  /** The plan the user was looking at when they typed the correction. */
+  previousSteps: PlanStep[];
+  /** The assumptions displayed alongside it. */
+  previousAssumptions: string[];
+  /** What the user typed, verbatim. */
+  feedback: string;
+}
+
 // ─── Step Digest ──────────────────────────────────────────────────────
 
 /**

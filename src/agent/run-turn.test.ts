@@ -53,7 +53,7 @@ test("runTurn yields text deltas incrementally, not as one block at the end", as
     history: [{ role: "user", content: "hi" }],
     model: model as any,
     onConfirm: neverConfirm,
-    disableTools: true,
+    toolMode: "none",
   });
 
   let step = await turn.next();
@@ -75,7 +75,7 @@ test("a consumer sees the first delta before the model has finished", async () =
     history: [{ role: "user", content: "hi" }],
     model: model as any,
     onConfirm: neverConfirm,
-    disableTools: true,
+    toolMode: "none",
   });
 
   const first = await turn.next();
@@ -96,7 +96,7 @@ test("runTurn reports usage and returns the appended history", async () => {
     history: [{ role: "user", content: "hi" }],
     model: model as any,
     onConfirm: neverConfirm,
-    disableTools: true,
+    toolMode: "none",
   });
 
   let step = await turn.next();
@@ -130,7 +130,7 @@ test("maxOutputTokens reaches the provider", async () => {
     history: [{ role: "user", content: "hi" }],
     model: model as any,
     onConfirm: neverConfirm,
-    disableTools: true,
+    toolMode: "none",
     maxOutputTokens: 1234,
   });
 

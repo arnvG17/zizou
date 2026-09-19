@@ -30,7 +30,9 @@ import {
   fileMatches,
   noFallbackParsing,
   noToolFailures,
+  nothingAtRoot,
   planHasAtLeast,
+  routedTo,
   statedAssumptions,
   touchedFiles,
   touchedNothingBut,
@@ -179,6 +181,150 @@ const buildMissingTarget: GoldenTask = {
   ],
 };
 
+
+// ─── 6. Auto mode: the router picks the route ────────────────────────────
+//
+// Four tasks, one per route, over the seams that actually get misread:
+// a question phrased as a task, a task phrased as a question, a greeting
+// with nothing attached, and work whose size is the whole point.
+//
+// Each one asserts the ROUTE, not the answer. A route task that also graded
+// the output would fail for two unrelated reasons and tell you neither.
+
+const autoRoutesGreetingToChat: GoldenTask = {
+  id: "auto-route-chat",
+  intent: "Auto sends a bare greeting to chat, without writing anything.",
+  prompt: "hey there",
+  mode: "auto",
+  tags: ["router", "auto-mode"],
+  budget: { maxToolCalls: 4, maxDurationMs: 90_000 },
+  assertions: [
+    routedTo("chat"),
+    // The route's real contract: conversation changes nothing on disk.
+    nothingAtRoot(),
+    touchedNothingBut(),
+  ],
+};
+
+const autoRoutesQuestionToAsk: GoldenTask = {
+  id: "auto-route-ask",
+  intent: "Auto sends a codebase question to ask, which reads but never writes.",
+  prompt: "how does the retry logic in this project work?",
+  mode: "auto",
+  tags: ["router", "auto-mode"],
+  fixture: {
+    "src/retry.ts": [
+      "export async function withRetry<T>(fn: () => Promise<T>, attempts = 3): Promise<T> {",
+      "  let lastError: unknown;",
+      "  for (let i = 0; i < attempts; i++) {",
+      "    try {",
+      "      return await fn();",
+      "    } catch (err) {",
+      "      lastError = err;",
+      "    }",
+      "  }",
+      "  throw lastError;",
+      "}",
+      "",
+    ].join("\n"),
+  },
+  budget: { maxToolCalls: 12, maxDurationMs: 150_000 },
+  assertions: [
+    routedTo("ask"),
+    // Ask mode has no write tools at all, so anything touched here means the
+    // route did not actually restrict what it claimed to restrict.
+    touchedNothingBut(),
+  ],
+};
+
+const autoRoutesEditToBuild: GoldenTask = {
+  id: "auto-route-build",
+  intent: "Auto sends a small concrete change to build, even phrased as a question.",
+  prompt: "can you add a trailing newline and a // TODO: tests comment to the end of src/retry.ts?",
+  mode: "auto",
+  tags: ["router", "auto-mode"],
+  fixture: {
+    "src/retry.ts": "export const retries = 3;\n",
+  },
+  budget: { maxToolCalls: 10, maxDurationMs: 150_000 },
+  assertions: [
+    // Grammar lies: this is phrased as a question and is a change.
+    routedTo("build"),
+    fileContains("src/retry.ts", "TODO: tests"),
+    touchedNothingBut("src/retry.ts"),
+  ],
+};
+
+const autoRoutesFeatureToPlan: GoldenTask = {
+  id: "auto-route-plan",
+  intent: "Auto sends ordered multi-file work to plan, and the plan decomposes it.",
+  prompt:
+    "Add a settings page, a header link to it, and a theme provider that both read from, " +
+    "wired together so the header link works.",
+  mode: "auto",
+  tags: ["router", "auto-mode", "plan-mode"],
+  budget: { maxToolCalls: 40, maxDurationMs: 300_000 },
+  assertions: [
+    routedTo("plan"),
+    planHasAtLeast(3),
+    advisory(statedAssumptions(1)),
+  ],
+};
+
+// ─── 7. File placement ─────────────────────────────────────────
+//
+// The failure this repo wears on its sleeve: asked for an app, the agent
+// wrote chess.html, poker.tsx and notesapp.html into the workspace root,
+// next to package.json — in one case alongside the chess-app/ directory
+// that already existed.
+//
+// The fixture matters as much as the prompt. It establishes that this repo
+// puts apps under apps/, so "put it beside its own kind" has something to
+// find. A placement rule with nothing to look at is just a preference.
+
+const buildPlacesFilesSensibly: GoldenTask = {
+  id: "build-file-placement",
+  intent: "A new app goes in a directory of its own, not loose in the workspace root.",
+  prompt: "Build me a tic tac toe game I can open in a browser.",
+  mode: "build",
+  tags: ["placement"],
+  fixture: {
+    "package.json": '{\n  "name": "fixture",\n  "private": true\n}\n',
+    "apps/snake/index.html": "<!doctype html>\n<title>Snake</title>\n",
+    "apps/snake/game.js": "// snake game\n",
+  },
+  budget: { maxToolCalls: 20, maxDurationMs: 240_000 },
+  assertions: [
+    // package.json is seeded, so an edit to it would be a real offence here
+    // rather than an artifact of the fixture.
+    nothingAtRoot("package.json"),
+  ],
+};
+
+const buildEditsRatherThanRecreates: GoldenTask = {
+  id: "build-edit-not-recreate",
+  intent: "Asked to change something, the agent edits the existing file instead of making a twin.",
+  prompt: "The greeting should say Hi instead of Hello.",
+  mode: "build",
+  tags: ["placement"],
+  fixture: {
+    "src/lib/greet.ts": [
+      "export function greet(name: string) {",
+      "  return `Hello, ${name}!`;",
+      "}",
+      "",
+    ].join("\n"),
+  },
+  budget: { maxToolCalls: 12, maxDurationMs: 150_000 },
+  assertions: [
+    fileContains("src/lib/greet.ts", "Hi, "),
+    fileLacks("src/lib/greet.ts", "Hello, "),
+    // The actual point: one file changed, no near-duplicate left behind under
+    // a new name for the two to disagree.
+    touchedNothingBut("src/lib/greet.ts"),
+  ],
+};
+
 // ─── Registry ────────────────────────────────────────────────────────────────
 
 export const ALL_TASKS: GoldenTask[] = [
@@ -187,6 +333,12 @@ export const ALL_TASKS: GoldenTask[] = [
   planDependencyOrdering,
   planAmbiguousAssumptions,
   buildMissingTarget,
+  autoRoutesGreetingToChat,
+  autoRoutesQuestionToAsk,
+  autoRoutesEditToBuild,
+  autoRoutesFeatureToPlan,
+  buildPlacesFilesSensibly,
+  buildEditsRatherThanRecreates,
 ];
 
 /** Filters by id or tag. `--task` and `--tag` both land here. */

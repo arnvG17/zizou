@@ -4,37 +4,136 @@ Everything you need to run, extend, and understand Zizou — the AI coding agent
 
 <div id="modes-and-context" className="pt-8" />
 
-## Operating Modes: Build vs Plan
+## Operating Modes
 
-Zizou supports two execution pipelines designed for different workflow complexities:
+Zizou has one pinned mode and four execution routes. The default pin is
+**Auto**, which reads each prompt and picks the route for you.
 
-### 1. Build Mode (`● Build` — Default)
-- **Fast, One-Shot Execution**: Ideal for single-file edits, quick bug fixes, and concise tasks.
-- **Pipeline**: Prompt → Synthesize single step → Stream tool execution → Verify result.
-- **Escalation Safety Net**: If execution touches more than 3 files or verification fails, Zizou deterministically prompts you to escalate to Plan Mode.
+### Auto (`◇ Auto` — the default)
 
-### 2. Plan Mode (`◆ Plan` — `--plan` or `/plan`)
-- **Structured Multi-Step Pipeline**: Designed for complex features, multi-file refactors, and architectural changes.
-- **Pipeline**: Prompt → Clarify (interactive Q&A) → Plan (ordered JSON plan) → User Confirmation (Y/n) → Execute each step → Verify each step.
-- **Dependency Ordering**: Enforces strict topological sorting so setup and file scaffolding steps execute before consumers.
+Auto classifies your prompt with one small, fast model call, then runs the
+route it picks. The badge shows both — `Auto → Build` — so you can always
+see what it chose.
+
+The classification call happens **only** in auto mode. Pin any other mode and
+no router call is made, so a pinned mode costs exactly what it always did.
+
+The router is a guess, and is treated as one:
+
+- Low-confidence guesses resolve toward the cheaper mistake. An uncertain
+  `plan` runs as `build`; an uncertain `chat` runs as `ask`.
+- A routed plan still stops at the gate, where a wrong route is one keystroke
+  to redirect.
+- If the router times out or the provider is down, the turn continues on a
+  deterministic fallback. It never fails your prompt.
+
+Switch with `/auto`, or the `--auto` flag.
+
+### Chat (`○ Chat` — `/chat` or `--chat`)
+
+Conversation. Nothing on disk can change.
+
+Pinned `/chat` has no tools at all — an explicit pin means "just talk".
+Reached *via auto*, chat keeps read-only tools, so a message like "hey, is
+this repo on React 19?" can check instead of guessing.
+
+### Ask (`? Ask` — `/ask` or `--ask`)
+
+Questions about your codebase. Read-only tools — `readFile`, `glob`, `grep`,
+`listDir` — and nothing else: it can look at anything and change nothing.
+
+This is the route for "how does X work", "where is Y", "why is this failing".
+Answers cite what they found as `path:line`.
+
+### Build (`● Build` — `/build` or `--build`)
+
+Fast, one-shot execution for single-file edits, quick fixes and concise tasks.
+
+- **Pipeline**: Prompt → synthesize a single step → stream tool execution → verify.
+- **Scope hint**: if a step touches more than 3 files, Zizou prints one
+  advisory line mentioning plan mode. It does not prompt, block, or restart —
+  the work is already on disk.
+
+### Plan (`◆ Plan` — `/plan`, `--plan`, or `zizou plan "…"`)
+
+Structured multi-step work: features, multi-file refactors, architectural
+changes.
+
+- **Pipeline**: Prompt → ordered plan with stated assumptions → the gate →
+  execute each step → verify each step.
+- **Dependency ordering**: topological sort, so scaffolding runs before the
+  code that consumes it.
+- **No clarifying questions.** The planner decides anything you left open and
+  declares those decisions as assumptions. The gate is where you correct them.
 
 ---
 
-<div id="context-and-reasoning" className="pt-16" />
+<div id="the-plan-gate" className="pt-16" />
 
-## Context Budgets & Reasoning Levels
+## The Plan Gate
 
-### Context Budgets (`/context <mode>`)
-Controls how much project structure is injected into the system prompt:
-- **`light`**: Minimal context. Repo map is excluded for the Executor to keep context lean. (Clarifier and Planner always retain the repo map to prevent scaffolding errors).
-- **`default`**: Includes the full pre-computed codebase symbol index (Repo Map).
-- **`max`**: Maximum context inclusion for deep codebase reasoning.
+Before any step runs, Zizou shows you the plan: its assumptions, its steps,
+and **every file each step will touch**, marked `+` for a new file and `~` for
+one that already exists. When auto chose plan, it also shows why.
 
-### Reasoning Levels (`/reasoning <level>` or `/expert`)
-Presets tune inference temperature and output window tokens based on task complexity:
-- **`low`** (`fast` preset): Speed & low cost (Temp: 0.2, Max Tokens: 1,024).
-- **`medium`** (`balanced` preset): Standard balance (Temp: 0.2, Max Tokens: 2,048).
-- **`high`** (`high` preset): Maximum depth & deterministic output for complex code generation (Temp: 0.1, Max Tokens: 4,096).
+Those markers are the point. "It is about to create `chess.html` at the repo
+root" is visible *before* approval, while fixing it costs one line.
+
+The gate takes:
+
+| Input | What happens |
+|---|---|
+| `y` | Run the plan |
+| `n` | Cancel. Nothing is written. |
+| `b` | Run the original prompt as a single build step instead |
+| `a` | Answer the original prompt instead — nothing is written |
+| anything else | **A correction.** Re-plans with your note and comes back here. |
+
+That last row matters most. Free text is a correction, not a rejection —
+typing `put it in src/games/, not the root` revises the plan in place. The
+gate used to accept `y`/`n` only, so fixing one wrong assumption meant
+cancelling and retyping the entire request.
+
+---
+
+<div id="file-placement" className="pt-16" />
+
+## Where Files Go
+
+Two rules are built into the agent's instructions:
+
+- **Look before you write.** New files go beside the files of their kind that
+  already exist. The workspace root is for files that belong at a root by
+  convention — README, package.json, tsconfig — not for a new app or
+  component. A multi-file artifact gets its own directory.
+- **Edit, don't recreate.** Before creating a file at a path that does not
+  exist, the agent searches for the file that already does that job. When
+  `writeFile` is about to create something whose name matches an existing
+  file, the confirmation prompt lists those files so you can catch a
+  near-duplicate before it is written.
+
+A `## Layout` section in your `ZIZOU.md` overrides both. Run `/init` to get a
+template with one.
+
+---
+
+<div id="effort" className="pt-16" />
+
+## Effort (`/effort <level>`)
+
+One dial for speed versus quality. It sets the model, the sampling parameters
+and how many tool rounds the agent gets — because those are the same decision.
+
+- **`fast`**: small model, little searching. Quick edits and questions.
+- **`balanced`**: mid model, normal searching. The default.
+- **`max`**: strongest model, thorough searching. Hard or wide work.
+
+Shorthands: `/fast`, `/balanced`, `/max`. A `/model` pin overrides the model
+effort would choose. Put `effort: max` under `## Agent` in ZIZOU.md to make it
+stick for a project.
+
+The router ignores this dial and always uses the fast tier — picking between
+four labels does not need your strongest model.
 
 ---
 

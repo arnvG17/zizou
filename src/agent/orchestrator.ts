@@ -10,20 +10,35 @@
 // pipeline. No other module should drive the full loop — the orchestrator
 // is the single owner of execution flow.
 //
-// THREE MODES:
-//   Chat mode:
-//     Conversation only, tools disabled. Nothing on disk can change.
+// ROUTING HAPPENS HERE, ONCE PER TURN:
+//   resolveRoute() turns the pinned mode into the route that runs. A pinned
+//   mode passes straight through; "auto" — the default — asks router.ts.
+//   The decision is made before anything executes and is never revisited
+//   inside the turn. See mode.ts for why nothing switches mid-turn.
 //
-//   Build mode (default):
+// FOUR ROUTES:
+//   Chat:
+//     Conversation. No tools when the user pinned /chat; read-only tools
+//     when auto routed here, so a guess that needs a file can read it.
+//     Nothing on disk can change either way.
+//
+//   Ask:
+//     Questions about the codebase. Read-only tools, no executor, no
+//     verifier, no checkpoint — nothing changed, so there is nothing to
+//     snapshot or undo.
+//
+//   Build (the route auto picks most often):
 //     1. Synthesize a single PlanStep from the raw user prompt
 //     2. Execute it via executeStep()
 //     3. Verify it via verifyStep()
 //     4. Emit a scope hint if the step looked oversized. Advisory only.
 //
-//   Plan mode (--plan flag or /plan):
+//   Plan (--plan flag, /plan, or auto on multi-step work):
 //     1. Run the planner to generate a structured plan plus the assumptions
 //        it had to make
-//     2. Display the plan for user review (Y/n gate)
+//     2. Display the plan for user review at the gate. The gate takes y, n,
+//        a redirect to another route, or free text — which is a CORRECTION,
+//        re-planned and re-gated rather than a rejection.
 //     3. For each step in dependsOn order:
 //        a. capturePreSnapshot()
 //        b. executeStep()
@@ -35,13 +50,14 @@
 //   - No clarifier. Plan mode does not interrogate the user before it has
 //     anything to show. The planner decides, states its assumptions, and the
 //     y/n gate on a concrete plan IS the clarification step.
-//   - No mode switching. The mode is whatever the user chose; the
-//     orchestrator never changes it mid-turn. A build step that looks too
-//     big emits an advisory hint and finishes — it does not interrupt with a
-//     modal prompt, and it does not discard work already on disk.
-//     This previously escalated on verification failure, which the verifier
-//     reports routinely, so ordinary turns were interrupted by a modal
-//     asking whether to restart the entire request.
+//   - No mid-turn mode switching. Routing is decided once, up front. A build
+//     step that looks too big emits an advisory hint and finishes — it does
+//     not interrupt with a modal prompt, and it does not discard work already
+//     on disk. This previously escalated on verification failure, which the
+//     verifier reports routinely, so ordinary turns were interrupted by a
+//     modal asking whether to restart the entire request. The router replaces
+//     that guess-late-and-restart design with a guess-early-and-commit one.
+//   - No router call outside auto mode. A pinned mode never constructs it.
 //
 // EVENT STREAMING:
 //   The orchestrator is an async generator that yields OrchestratorEvents.
@@ -53,7 +69,7 @@
 
 import type { LanguageModel, ModelMessage } from "ai";
 import type { ConfirmFn } from "../tools/types.js";
-import type { Mode, ModeContext } from "./mode.js";
+import type { Mode, ModeContext, Route } from "./mode.js";
 import type {
   PlanStep,
   StepResult,
@@ -61,9 +77,12 @@ import type {
   VerificationResult,
   ProjectContext,
   ScopeHint,
+  PlanRevision,
 } from "./types.js";
 import { plan } from "./planner.js";
+import { routePrompt, type RouteDecision } from "./router.js";
 import { executeStep } from "./executor.js";
+import { buildSystemPrompt } from "../context/build-system-prompt.js";
 import { capturePreSnapshot, verifyStep } from "./verifier.js";
 import { type AgentEvent } from "./run-turn.js";
 import { SessionLogger } from "./debug/index.js";
@@ -92,13 +111,23 @@ export type OrchestratorEvent =
   // so the UI can render them the same way it already does.
   | { kind: "agent-event"; event: AgentEvent }
 
-  // Emitted when the current mode is determined or changes. The UI uses
-  // this to update the mode badge in the input footer.
-  | { kind: "mode-info"; mode: Mode; reason: string }
+  // Emitted once per turn, as soon as the route is known. The UI uses this
+  // to update the mode badge in the input footer. `mode` is the ROUTE that
+  // ran, which in auto mode is not the mode the user pinned — hence the
+  // separate pinnedMode, so the badge can render "Auto → Build" rather than
+  // silently replacing the user's pin.
+  | { kind: "mode-info"; mode: Route; pinnedMode?: Mode; reason: string }
+
+  // Auto mode only: the router's decision, before anything runs. Carried
+  // separately from mode-info because the UI prints it differently — a
+  // routing guess the user may want to override is not the same thing as a
+  // mode announcement.
+  | { kind: "route-decided"; decision: RouteDecision }
 
   // Plan mode: the planner generated a structured plan.
   // The UI displays the assumptions and steps for review before execution.
-  | { kind: "plan-ready"; steps: PlanStep[]; assumptions: string[] }
+  // `routeReason` is set when auto chose plan, so the gate can say why.
+  | { kind: "plan-ready"; steps: PlanStep[]; assumptions: string[]; routeReason?: string }
 
   // Both modes: a step is about to begin execution.
   // The UI shows progress like "Step 2/5: Create component file".
@@ -267,9 +296,10 @@ async function* runBuildMode(
   onConfirm: ConfirmFn,
   history?: ModelMessage[],
   provider?: string,
+  reason: string = "Direct execution — single step",
 ): AsyncGenerator<OrchestratorEvent> {
   // Emit mode info so the UI can update the badge
-  yield { kind: "mode-info", mode: "build", reason: "Direct execution — single step" };
+  yield { kind: "mode-info", mode: "build", reason };
 
   // Synthesize a single PlanStep from the raw user prompt.
   // In build mode there's no planner — we go straight to execution.
@@ -371,9 +401,12 @@ async function* runPlanMode(
   approvedPlan?: PlanStep[],
   completedStepIndices: number[] = [],
   provider?: string,
+  reason: string = "Plan, review, then execute",
+  routeReason?: string,
+  planRevision?: PlanRevision,
 ): AsyncGenerator<OrchestratorEvent> {
   // Emit mode info
-  yield { kind: "mode-info", mode: "plan", reason: "Plan, review, then execute" };
+  yield { kind: "mode-info", mode: "plan", reason };
 
   let steps: PlanStep[];
 
@@ -389,12 +422,17 @@ async function* runPlanMode(
     // There is no clarifier stage. Asking a list of abstract questions and
     // THEN showing a plan for approval was two gates for one decision, and
     // the questions came before the user had anything concrete to react to.
-    const generated = await plan(userPrompt, context, model);
+    //
+    // `planRevision` carries the previous plan plus what the user typed at
+    // the gate instead of y/n. Free text there is a correction, not a
+    // rejection — "put it in src/games/ not the root" should produce a fixed
+    // plan, not make the user retype the whole request.
+    const generated = await plan(userPrompt, context, model, planRevision);
     steps = generated.steps;
 
     // Yield the plan for user review. The UI displays the assumptions and
-    // steps, then presents a Y/n confirmation gate.
-    yield { kind: "plan-ready", steps, assumptions: generated.assumptions };
+    // steps, then presents the confirmation gate.
+    yield { kind: "plan-ready", steps, assumptions: generated.assumptions, routeReason };
     // STOP HERE — the UI will show the plan and collect Y/n.
     // If the user approves, they re-invoke with approvedPlan = steps.
     return;
@@ -481,40 +519,47 @@ async function* runPlanMode(
   yield { kind: "complete" };
 }
 
-// ─── Conversational Mode Helper & Heuristics ───────────────────────────────
+// ─── Chat Mode ───────────────────────────────────────────────────────────────
+//
+// Conversation. Nothing here can change the filesystem under any tool mode —
+// "readonly" is readFile/glob/grep/listDir, which look and do not touch.
 
-function isConversational(prompt: string): boolean {
-  const p = prompt.trim().toLowerCase();
-
-  // A greeting-only message: the greeting word is immediately followed by
-  // punctuation or end-of-string — NOT by more words that form a task.
-  // "hi" → conversational   "hi build me a file" → NOT conversational
-  const greetingOnly = /^(hi|hello|hey|yo|hola|greetings|good morning|good afternoon|good evening|howdy|sup|whats up|what's up)[.,!?\s]*$/i.test(p);
-  if (!greetingOnly) return false;
-
-  // Even if it looks like a greeting, bail out if there are task-intent keywords.
-  // This is a safety net for "hi, can you write me..." style messages.
-  const taskKeywords = /\b(build|make|create|write|generate|add|edit|fix|update|run|install|refactor|implement|change|delete|remove|file|code|function|component|page|app|script|test|html|css|ts|js|tsx|jsx)\b/i;
-  if (taskKeywords.test(p)) return false;
-
-  if (greetingOnly) return true;
-
-  // Pure chit-chat phrases (exact match only)
-  return p === "test" || p === "ping" || p === "how are you" || p === "who are you" || p === "what is your name";
-}
-
-async function* runConversationalMode(
+/**
+ * Runs the chat route.
+ *
+ * @param toolMode - "none" when the user pinned /chat: an explicit pin means
+ *   "just talk", and this is the one genuinely tool-free path. "readonly"
+ *   when auto ROUTED here: the router is guessing, and a guess that turns out
+ *   to need a file ("hey, is this repo on React 19?") should read it rather
+ *   than invent an answer. Nothing on disk changes either way.
+ */
+async function* runChatMode(
   history: ModelMessage[],
   context: ProjectContext,
   model: LanguageModel,
   onConfirm: ConfirmFn,
+  toolMode: "none" | "readonly",
+  reason: string,
   provider?: string,
 ): AsyncGenerator<OrchestratorEvent> {
-  yield { kind: "mode-info", mode: "chat", reason: "Conversation — tools disabled" };
+  yield { kind: "mode-info", mode: "chat", reason };
 
   const { runTurn } = await import("./run-turn.js");
 
-  const systemPrompt = "You are Zizou, an AI pair programming agent. Keep your response helpful, concise, and friendly. Since this is a casual conversation, do not mention or invoke any file-modifying tools.";
+  const conversational =
+    "You are Zizou, an AI pair programming agent, in casual conversation. " +
+    "Keep your response helpful, concise, and friendly.";
+
+  // With tools, the prompt is built from the ask role so the read-only rules
+  // (search before asserting, cite what you found, never name an unseen path)
+  // live in ONE place rather than a second hand-written copy that drifts.
+  const systemPrompt =
+    toolMode === "readonly"
+      ? `${conversational}\n\n${await buildSystemPrompt(context.projectRoot, "ask")}\n\n` +
+        "This is conversation, not a formal question. Only reach for a tool " +
+        "when the answer genuinely depends on what is in this repo; for a " +
+        "greeting or small talk, just reply."
+      : `${conversational} Do not mention or invoke any tools — you have none this turn.`;
 
   const turn = runTurn({
     history,
@@ -522,7 +567,8 @@ async function* runConversationalMode(
     provider,
     onConfirm,
     systemPrompt,
-    disableTools: true,
+    toolMode,
+    journalRole: "chat",
   });
 
   let result = await turn.next();
@@ -530,6 +576,60 @@ async function* runConversationalMode(
     yield { kind: "agent-event", event: result.value };
     result = await turn.next();
   }
+
+  yield { kind: "history-updated", history: result.value };
+  yield { kind: "complete" };
+}
+
+// ─── Ask Mode ────────────────────────────────────────────────────────────────
+//
+// Questions about the codebase. Read-only tools and nothing else.
+//
+// This route exists because the two it sits between could not answer a
+// question honestly: chat mode had no tools, so it answered from the system
+// prompt alone and guessed; build mode could answer, but it could also
+// rewrite the file it was asked about.
+//
+// No executor, no verifier, no checkpoint — nothing changed on disk, so there
+// is nothing to snapshot, verify or undo.
+
+async function* runAskMode(
+  history: ModelMessage[],
+  context: ProjectContext,
+  model: LanguageModel,
+  onConfirm: ConfirmFn,
+  reason: string,
+  provider?: string,
+): AsyncGenerator<OrchestratorEvent> {
+  yield { kind: "mode-info", mode: "ask", reason };
+
+  const { runTurn } = await import("./run-turn.js");
+
+  const systemPrompt = await buildSystemPrompt(context.projectRoot, "ask");
+
+  const turn = runTurn({
+    history,
+    model,
+    provider,
+    onConfirm,
+    systemPrompt,
+    toolMode: "readonly",
+    maxSteps: context.maxSteps,
+    temperature: context.temperature,
+    maxOutputTokens: context.maxOutputTokens,
+    journalRole: "ask",
+  });
+
+  let result = await turn.next();
+  while (!result.done) {
+    yield { kind: "agent-event", event: result.value };
+    result = await turn.next();
+  }
+
+  // The generator's RETURN value is the updated history. Ask mode reads files
+  // to answer, and that reading is how the conversation gains context —
+  // dropping it would make the follow-up question start from nothing.
+  yield { kind: "history-updated", history: result.value };
 
   yield { kind: "complete" };
 }
@@ -554,16 +654,80 @@ export interface RunOrchestratorOptions {
   approvedPlan?: PlanStep[];
   /** Indices of steps already completed (plan mode). */
   completedStepIndices?: number[];
-  /** Full conversation history (used for build and conversational modes). */
+  /**
+   * A correction typed at the plan gate instead of y/n, with the plan it
+   * corrects. Re-enters plan mode to produce a revised plan.
+   */
+  planRevision?: PlanRevision;
+  /** Full conversation history (used for build, ask and chat modes). */
   history?: ModelMessage[];
   /** Provider name, e.g. "ollama" — selects provider options and model tier. */
   provider?: string;
 }
 
 /**
- * Main orchestrator entry point. Routes to build or plan mode based on
- * the ModeContext, and returns an async generator of OrchestratorEvents
- * for the UI to consume.
+ * Resolves the pinned mode to the route that will actually run.
+ *
+ * The ONLY place auto mode is turned into something executable, and the only
+ * place the router is called from. Three rules:
+ *
+ *   1. A mid-flow re-entry NEVER re-routes. Approving a plan or correcting
+ *      one continues the turn already in progress; re-classifying "y" would
+ *      be both wasteful and wrong.
+ *   2. A pinned mode is honoured exactly. It never touches the router, so it
+ *      costs what it always cost — the answer to the objection this repo
+ *      recorded against upfront classification (see mode.ts).
+ *   3. Auto asks the router, which never throws and always answers.
+ */
+async function resolveRoute(args: {
+  mode: Mode;
+  userPrompt: string;
+  history?: ModelMessage[];
+  provider?: string;
+  projectRoot: string;
+  isMidFlow: boolean;
+}): Promise<{ route: Route; reason: string; decision?: RouteDecision }> {
+  const { mode, isMidFlow, userPrompt, history, provider, projectRoot } = args;
+
+  if (isMidFlow) {
+    // Only plan mode has mid-flow re-entries, so an "auto" pin arriving here
+    // can only have routed to plan on the entry that produced the gate.
+    return {
+      route: mode === "auto" ? "plan" : mode,
+      reason: "Continuing the turn in progress",
+    };
+  }
+
+  if (mode !== "auto") {
+    return { route: mode, reason: PINNED_REASONS[mode] };
+  }
+
+  const decision = await routePrompt({
+    userPrompt,
+    history,
+    provider: (provider ?? "groq") as any,
+    projectRoot,
+  });
+
+  return {
+    route: decision.route,
+    reason: `Auto → ${decision.route}: ${decision.reason}`,
+    decision,
+  };
+}
+
+/** What the badge says when the user pinned the mode themselves. */
+const PINNED_REASONS: Record<Route, string> = {
+  chat: "Conversation — tools disabled",
+  ask: "Read-only — questions about this codebase",
+  build: "Direct execution — single step",
+  plan: "Plan, review, then execute",
+};
+
+/**
+ * Main orchestrator entry point. Resolves the pinned mode to a route — via
+ * the router when that mode is "auto" — and returns an async generator of
+ * OrchestratorEvents for the UI to consume.
  *
  * Takes an options object rather than positional arguments: there were ten
  * parameters, three of them optional and adjacent, so call sites were a row
@@ -581,14 +745,17 @@ export async function* runOrchestrator(
     clarificationAnswers,
     approvedPlan,
     completedStepIndices,
+    planRevision,
     history,
     provider,
   } = options;
 
-  // A re-entry that carries an approved plan or clarification answers is a
-  // continuation of the turn already in progress, not a new one.
+  // A re-entry that carries an approved plan, a plan correction, or
+  // clarification answers is a continuation of the turn already in progress,
+  // not a new one.
   const isMidFlow =
     !!approvedPlan ||
+    !!planRevision ||
     (!!clarificationAnswers && Object.keys(clarificationAnswers).length > 0);
 
   // Only log session start on the very first entry of the conversation turn
@@ -596,46 +763,71 @@ export async function* runOrchestrator(
     SessionLogger.logSessionStart(userPrompt, modeContext.mode, context.projectRoot);
   }
 
-  // ── Chat mode ────────────────────────────────────────────────────────
+  // ── Routing ──────────────────────────────────────────────────────────
   //
-  // Either pinned by the user (/chat) or auto-detected for a greeting. The
-  // auto-detect is a deterministic regex, never an LLM classification call —
-  // see the rationale in mode.ts.
-  //
-  // Mid-flow re-entries (answering clarifications, executing an approved
-  // plan) are never chat, whatever the prompt text looks like.
-  if (!isMidFlow && (modeContext.mode === "chat" || isConversational(userPrompt))) {
-    const activeHistory = history || [{ role: "user", content: userPrompt }];
-    yield* runConversationalMode(
-      activeHistory,
-      context,
-      model,
-      onConfirm,
-      provider,
-    );
-    return;
+  // Decided ONCE, here, before anything runs — and never revisited inside
+  // the turn. Mode switching mid-turn is exactly what was removed when
+  // build-mode escalation was deleted; a router that changed its mind
+  // halfway would reintroduce it.
+  const { route, reason, decision } = await resolveRoute({
+    mode: modeContext.mode,
+    userPrompt,
+    history,
+    provider,
+    projectRoot: context.projectRoot,
+    isMidFlow,
+  });
+
+  if (decision) {
+    SessionLogger.logRouteDecision(decision.route, decision.reason, decision.confidence, decision.source);
+    yield { kind: "route-decided", decision };
   }
 
-  if (modeContext.mode === "plan") {
-    // Plan mode: plan → review → execute → verify
-    yield* runPlanMode(
-      userPrompt,
-      context,
-      model,
-      onConfirm,
-      approvedPlan,
-      completedStepIndices || [],
-      provider,
-    );
-  } else {
-    // Build mode: single step → execute → verify → optional scope hint
-    yield* runBuildMode(
-      userPrompt,
-      context,
-      model,
-      onConfirm,
-      history,
-      provider,
-    );
+  // The route reason is worth showing at the plan gate only when the router
+  // picked it. "Plan, review, then execute" tells a user who typed /plan
+  // nothing they don't know.
+  const routeReason = decision ? reason : undefined;
+
+  switch (route) {
+    case "chat": {
+      const activeHistory = history || [{ role: "user", content: userPrompt }];
+      // Pinned /chat means "just talk" and gets no tools. Routed-to chat is
+      // a guess, so it keeps read-only tools to check itself.
+      yield* runChatMode(
+        activeHistory,
+        context,
+        model,
+        onConfirm,
+        modeContext.mode === "chat" ? "none" : "readonly",
+        reason,
+        provider,
+      );
+      return;
+    }
+
+    case "ask": {
+      const activeHistory = history || [{ role: "user", content: userPrompt }];
+      yield* runAskMode(activeHistory, context, model, onConfirm, reason, provider);
+      return;
+    }
+
+    case "plan":
+      yield* runPlanMode(
+        userPrompt,
+        context,
+        model,
+        onConfirm,
+        approvedPlan,
+        completedStepIndices || [],
+        provider,
+        reason,
+        routeReason,
+        planRevision,
+      );
+      return;
+
+    case "build":
+      yield* runBuildMode(userPrompt, context, model, onConfirm, history, provider, reason);
+      return;
   }
 }

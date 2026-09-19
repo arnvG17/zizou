@@ -38,8 +38,9 @@ export interface TokenStats {
  *
  * v2: mode gained "chat"; orchestrator flow moved behind a reducer.
  * v3: clarification state removed; plans carry assumptions instead.
+ * v4: mode gained "auto" (now the default) and "ask".
  */
-export const SESSION_SCHEMA_VERSION = 3;
+export const SESSION_SCHEMA_VERSION = 4;
 
 export interface SessionState {
   /** Absent on sessions written before versioning existed (treated as v1). */
@@ -47,7 +48,12 @@ export interface SessionState {
   conversation: ModelMessage[];
   tokenStats: TokenStats;
   log: string;  // Full UI log serialized as JSON string to avoid circular dependency
-  currentMode: Mode;  // Current operating mode
+  /**
+   * The mode the user PINNED, not the route the last turn happened to run.
+   * In auto mode those differ every turn, and persisting the route would
+   * mean reopening the session pinned to whatever it last did.
+   */
+  currentMode: Mode;
   orchestratorState?: {
     pendingPlan?: any[];  // Plan steps awaiting the y/n gate
     pendingAssumptions?: string[];  // Assumptions declared for that plan
