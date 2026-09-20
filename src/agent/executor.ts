@@ -186,6 +186,8 @@ export interface ExecuteStepOptions {
   conversationHistory?: ModelMessage[];
   /** Digests of earlier steps in the same plan. Empty/absent in build mode. */
   priorSteps?: StepDigest[];
+  /** Cancels this step's LLM call when the user stops the run. */
+  abortSignal?: AbortSignal;
 }
 
 /**
@@ -276,6 +278,7 @@ export async function* executeStep(
     maxSteps: context.maxSteps,
     temperature: context.temperature,
     maxOutputTokens: context.maxOutputTokens,
+    abortSignal: options.abortSignal,
   });
 
   /** Renders one labelled block for the session log, matching the existing format. */

@@ -36,6 +36,7 @@ together. A `/model` pin overrides the model effort would choose.
 - `/models` — List every available model option for all providers.
 - `/modelid <name>` — Set a custom model ID for the current provider.
 - `/ollama <url>` — Set the Ollama base URL.
+- `/ollama ctx <n>` — Cap the context window requested from local models.
 
 ### Context
 
@@ -44,6 +45,13 @@ together. A `/model` pin overrides the model effort would choose.
 - `/init` — Create a `ZIZOU.md` for project settings, layout and conventions.
 - `/prompt` — Dump the full system prompt sent to the LLM.
 - `/skills` — List available custom agent skills.
+
+### Running turns
+
+- **Esc** — Stop the turn in flight. The request is cancelled at the provider,
+  not just hidden from you. Anything already written to disk stays; `/undo`
+  rolls back the last step. Esc works during a permission prompt too, where
+  "deny this one write" and "stop the whole run" are different things.
 
 ### History & safety
 
@@ -118,7 +126,49 @@ Zizou (Phase 1) is built on top of the Vercel AI SDK, meaning it is provider-agn
 - **Groq** — Extremely fast inference for Llama 3 models. Requires an API key.
 - **Google** — Gemini capabilities. Requires an API key.
 - **OpenRouter** — Access a massive ecosystem of models through a single API key.
-- **Ollama** — 100% free, local execution. Ollama exposes an OpenAI-compatible API on `http://localhost:11434/v1`. Run `llama3` locally with no API key.
+- **Ollama** — 100% free, local execution. Ollama exposes an OpenAI-compatible API on `http://localhost:11434/v1`. No API key needed.
+
+#### Running local models
+
+`/models` reads your installed models straight from the Ollama server and shows
+what actually matters for each one:
+
+```
+ollama      - installed locally (v0.32.1):
+              qwen3:4b 4.0B Q4_K_M  [tools, thinking, 256k ctx]
+              gemma4:e4b 8.0B Q4_K_M  [tools, thinking, 128k ctx]
+```
+
+The `tools` badge is the one to check. A model without it cannot emit native
+tool calls, so Zizou has to scrape them out of plain text — unreliable for
+anything past a single edit. `/model ollama <name>` warns you when the model
+you pick lacks it, and tells you which of your installed models has it.
+
+With no model pinned, `/effort` picks from what you have installed: `fast`
+takes the smallest tool-capable model, `max` the largest. Pinning a model with
+`/model ollama <name>` or `/modelid <name>` overrides that, and `/effort` then
+only changes the token and step budgets.
+
+#### Context window
+
+This is the setting that most often makes a local model look worse than it is.
+**Ollama defaults to a 4096-token context.** Zizou's system prompt plus the
+JSON Schema for its 13 tools is most of that before your message is added, and
+Ollama truncates silently rather than erroring — so the model can receive its
+own tool definitions cut in half and then appears to "not support tool calls".
+
+Zizou requests a larger window per request and reads back what was actually
+loaded. If your Ollama version ignores the request, you get a warning naming
+the fix:
+
+```
+OLLAMA_CONTEXT_LENGTH=16384 ollama serve
+```
+
+`/ollama ctx <n>` adjusts the ceiling Zizou asks for. Higher costs memory — the
+KV cache scales with it — which is why it is capped rather than simply using
+each model's advertised maximum. `qwen3:4b` advertises 262144; asking for that
+on a laptop trades a truncation bug for an out-of-memory crash.
 
 To connect to any of these, run `/keys` inside the CLI, or export an environment variable:
 

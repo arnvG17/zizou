@@ -297,6 +297,7 @@ async function* runBuildMode(
   history?: ModelMessage[],
   provider?: string,
   reason: string = "Direct execution — single step",
+  abortSignal?: AbortSignal,
 ): AsyncGenerator<OrchestratorEvent> {
   // Emit mode info so the UI can update the badge
   yield { kind: "mode-info", mode: "build", reason };
@@ -336,6 +337,7 @@ async function* runBuildMode(
       onConfirm,
       provider,
       conversationHistory: history,
+      abortSignal,
     }),
   );
 
@@ -404,6 +406,8 @@ async function* runPlanMode(
   reason: string = "Plan, review, then execute",
   routeReason?: string,
   planRevision?: PlanRevision,
+  history?: ModelMessage[],
+  abortSignal?: AbortSignal,
 ): AsyncGenerator<OrchestratorEvent> {
   // Emit mode info
   yield { kind: "mode-info", mode: "plan", reason };
@@ -427,7 +431,7 @@ async function* runPlanMode(
     // the gate instead of y/n. Free text there is a correction, not a
     // rejection — "put it in src/games/ not the root" should produce a fixed
     // plan, not make the user retype the whole request.
-    const generated = await plan(userPrompt, context, model, planRevision);
+    const generated = await plan(userPrompt, context, model, planRevision, history, abortSignal);
     steps = generated.steps;
 
     // Yield the plan for user review. The UI displays the assumptions and
@@ -479,7 +483,7 @@ async function* runPlanMode(
 
     // Execute the step, streaming its events to the UI as they happen.
     const stepResult = yield* streamStep(
-      executeStep({ step, context, model, onConfirm, provider, priorSteps }),
+      executeStep({ step, context, model, onConfirm, provider, priorSteps, conversationHistory: history, abortSignal }),
     );
 
     // Verify the step's execution
@@ -663,6 +667,14 @@ export interface RunOrchestratorOptions {
   history?: ModelMessage[];
   /** Provider name, e.g. "ollama" — selects provider options and model tier. */
   provider?: string;
+  /**
+   * Cancels the whole turn — the planner, every step, every LLM call.
+   *
+   * Threaded rather than checked at the loop boundary: abandoning the
+   * generator would leave the in-flight request streaming and its tools
+   * firing. Stopping has to reach the provider.
+   */
+  abortSignal?: AbortSignal;
 }
 
 /**
@@ -748,6 +760,7 @@ export async function* runOrchestrator(
     planRevision,
     history,
     provider,
+    abortSignal,
   } = options;
 
   // A re-entry that carries an approved plan, a plan correction, or
@@ -823,11 +836,13 @@ export async function* runOrchestrator(
         reason,
         routeReason,
         planRevision,
+        history,
+        abortSignal,
       );
       return;
 
     case "build":
-      yield* runBuildMode(userPrompt, context, model, onConfirm, history, provider, reason);
+      yield* runBuildMode(userPrompt, context, model, onConfirm, history, provider, reason, abortSignal);
       return;
   }
 }

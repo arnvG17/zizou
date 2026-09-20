@@ -101,6 +101,7 @@ const initialPrompt = initialPromptParts.join(" ").trim() || undefined;
 
 import { getDefaultProvider, getOllamaBaseUrl } from "./config/api-keys.js";
 import { getActiveModelId } from "./sdk/resolve-model.js";
+import { primeOllamaCache } from "./sdk/ollama.js";
 import { join } from "node:path";
 import { RunJournal, setActiveJournal } from "./agent/debug/index.js";
 
@@ -123,6 +124,17 @@ if (process.env.ZIZOU_DEBUG === "1" || process.env.ZIZOU_DEBUG === "true") {
   });
   setActiveJournal(journal);
   console.log(`zizou: debug journal -> ${journal.logPath}`);
+}
+
+// Read the local model catalogue before the first render.
+//
+// getActiveModelId() is synchronous and is called from render paths, but for
+// Ollama the answer lives on the server — the catalogue is whatever the user
+// pulled. Priming here means the very first frame names the model that will
+// actually be called, instead of a built-in default the user may not have
+// installed. Fails soft: Ollama being off is not a reason not to start.
+if (getDefaultProvider() === "ollama") {
+  await primeOllamaCache();
 }
 
 const instance = render(

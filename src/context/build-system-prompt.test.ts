@@ -191,3 +191,11 @@ test("the executor is told to look for an existing file before creating one", as
   const prompt = await buildSystemPrompt(workspace, "executor");
   expect(prompt).toContain("EDIT, DON'T RECREATE");
 });
+
+test("the ask role is told to open files rather than paste them", async () => {
+  // The reported failure: asked to "open it", the agent read the file and
+  // dumped 60 lines of HTML into the terminal, which is not opening it.
+  const prompt = await buildSystemPrompt(workspace, "ask");
+  expect(prompt).toContain("openFile");
+  expect(prompt).toContain('If the user says "open it"');
+});

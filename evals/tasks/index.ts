@@ -273,10 +273,10 @@ const autoRoutesFeatureToPlan: GoldenTask = {
 
 // ─── 7. File placement ─────────────────────────────────────────
 //
-// The failure this repo wears on its sleeve: asked for an app, the agent
-// wrote chess.html, poker.tsx and notesapp.html into the workspace root,
-// next to package.json — in one case alongside the chess-app/ directory
-// that already existed.
+// The failure this exists to catch: asked for an app, the agent wrote
+// chess.html, poker.tsx and notesapp.html into the workspace root next to
+// package.json — in one case alongside the chess-app/ directory that already
+// existed. This repo carried that litter until it was cleaned out.
 //
 // The fixture matters as much as the prompt. It establishes that this repo
 // puts apps under apps/, so "put it beside its own kind" has something to

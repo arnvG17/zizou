@@ -79,6 +79,15 @@ export interface RunTurnOptions {
   journal?: RunJournal;
   /** Label for this turn in the journal, e.g. "executor" or "chat". */
   journalRole?: string;
+  /**
+   * Cancels the turn. Aborting stops the in-flight request at the provider.
+   *
+   * Without this, "stopping" could only mean the UI walking away from the
+   * generator while the model kept streaming and tools kept firing — the run
+   * continues, invisibly, and the user's only real remedy is killing the
+   * process. Cancelling has to reach the request itself.
+   */
+  abortSignal?: AbortSignal;
 }
 
 /** Normalizes the AI SDK's usage object into the journal's shape. */
@@ -111,7 +120,7 @@ function extractAssistantText(msg: ModelMessage): string {
 export async function* runTurn(
   options: RunTurnOptions,
 ): AsyncGenerator<AgentEvent, ModelMessage[]> {
-  const { history, model, provider, onConfirm, systemPrompt, maxSteps = 15, toolMode = "full", temperature, maxOutputTokens } = options;
+  const { history, model, provider, onConfirm, systemPrompt, maxSteps = 15, toolMode = "full", temperature, maxOutputTokens, abortSignal } = options;
 
   // Where this turn gets recorded. See debug/run-journal.ts — the journal is
   // write-only, so an absent one degrades to a no-op rather than a branch.
@@ -157,7 +166,10 @@ export async function* runTurn(
     toolMode === "none"
       ? undefined
       : toolMode === "readonly"
-        ? buildReadOnlyToolMap()
+        // canOpen: these are conversational routes (ask, and chat under
+        // auto), where "open it" is an ordinary thing to say. The planner
+        // builds its own strict map and does NOT come through here.
+        ? buildReadOnlyToolMap({ canOpen: true })
         : buildToolMap(onConfirm);
 
   // Order matters. The journal wraps the OUTSIDE, so it records what the model
@@ -188,7 +200,15 @@ export async function* runTurn(
   // OpenAI's default parallel tool calls cause race conditions in agentic
   // loops (e.g., writing a file while also reading it). Force sequential
   // tool execution for reliable read→write→verify behavior.
-  const providerOptions = provider === "openai"
+  //
+  // This applies to every provider served through createOpenAI, not just
+  // OpenAI itself. Ollama and OpenRouter go through the same client and so
+  // read the same `openai` provider-options key — and they were excluded by
+  // the old `provider === "openai"` check, which left the two providers most
+  // likely to fire parallel calls (small local models especially) as the only
+  // ones without the guard.
+  const OPENAI_COMPATIBLE = new Set(["openai", "ollama", "openrouter"]);
+  const providerOptions = provider !== undefined && OPENAI_COMPATIBLE.has(provider)
     ? { openai: { parallelToolCalls: false } }
     : undefined;
 
@@ -213,6 +233,9 @@ export async function* runTurn(
     ...(maxOutputTokens !== undefined ? { maxOutputTokens } : {}),
     // 7. Provider Options: Includes OpenAI-specific overrides (like parallelToolCalls: false to avoid race conditions).
     ...(providerOptions ? { providerOptions } : {}),
+    // 8. Cancellation: aborts the request at the provider when the user
+    //    presses Esc, rather than leaving it streaming into nothing.
+    ...(abortSignal ? { abortSignal } : {}),
   });
 
   // ── Consume the live stream ────────────────────────────────────────────

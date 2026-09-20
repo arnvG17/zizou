@@ -107,10 +107,10 @@ export const createWriteFileTool = (confirm: ConfirmFn) => {
         const action = fileExists ? "Overwrite existing file" : "Create new file";
 
         // For a NEW file, say whether something like it already exists
-        // elsewhere. The repeated failure this catches is the agent writing
-        // chess.html at the root next to an existing chess-app/, or a second
-        // poker.tsx beside src/components/Poker/poker.tsx — two files that
-        // disagree, where one edit was wanted.
+        // elsewhere. The repeated failure this catches: the agent writing a
+        // fresh game.html at the root while a game-app/ directory already
+        // held one, or a second copy of a component beside the original —
+        // two files that disagree, where one edit was wanted.
         //
         // ADVISORY, like the scope hint: it informs the confirmation the user
         // is already being shown. It does not block the write, because a

@@ -43,7 +43,7 @@
 // DEPENDENCY DIRECTION: imports from agent/types.ts, context/, sdk/.
 // Must NOT import from ui/, config/, or provider/.
 
-import { generateText, stepCountIs, type LanguageModel } from "ai";
+import { generateText, stepCountIs, type LanguageModel, type ModelMessage } from "ai";
 import { buildReadOnlyToolMap } from "../tools/index.js";
 import { buildSystemPrompt, type AgentRole } from "../context/build-system-prompt.js";
 import type { Plan, PlanRevision, PlanStep, ProjectContext } from "./types.js";
@@ -67,6 +67,18 @@ there. Do not guess at a path you have not seen.
 
 Keep exploration proportionate: a handful of targeted searches, not a tour
 of the repo. When you know enough, stop and output the plan.
+
+STAY INSIDE THE REQUEST. Plan the thing that was asked for and nothing else.
+- If the user is talking about a file or project they just mentioned, that is
+  the subject. Do not plan changes to the surrounding repository because it
+  happens to be what you are standing in.
+- Every step must be something the user asked for. Tidying the directory
+  layout, renaming unrelated files, reorganising docs, adding test folders or
+  centralising config are NOT in scope unless the user asked for them.
+- If a step is not clearly traceable to the request, drop it.
+- Do not add a step whose only action is to look at something. "Analyze the
+  current X" is not a step; it is what you are doing right now, with the
+  read-only tools, before you write the plan.
 
 You cannot write, edit, or run commands. Do not try.
 
@@ -124,6 +136,51 @@ IMPORTANT:
 - Output ONLY the JSON object. No text before or after it.
 `;
 
+// ─── Conversation context ──────────────────────────────────────
+
+/** How much prior conversation the planner sees. */
+const HISTORY_TURNS = 6;
+const HISTORY_CHARS = 1500;
+
+/**
+ * Renders recent turns so the planner can resolve what the user is
+ * referring to.
+ *
+ * Capped on both axes. The planner needs the SUBJECT of the conversation,
+ * not a transcript — and a long history pasted into a planning prompt
+ * crowds out the plan itself.
+ */
+function renderHistory(history: ModelMessage[] | undefined): string {
+  if (!history || history.length === 0) return "";
+
+  const lines: string[] = [];
+  for (const message of history.slice(-HISTORY_TURNS)) {
+    if (message.role !== "user" && message.role !== "assistant") continue;
+
+    const text =
+      typeof message.content === "string"
+        ? message.content
+        : message.content
+            .map((part) => ("text" in part && typeof part.text === "string" ? part.text : ""))
+            .join(" ");
+
+    const trimmed = text.trim();
+    if (trimmed) lines.push(`${message.role}: ${trimmed.slice(0, HISTORY_CHARS)}`);
+  }
+
+  if (lines.length === 0) return "";
+
+  return `Recent conversation, so you can tell what the user is referring to:
+
+${lines.join("\n")}
+
+The request below continues THAT conversation. If it says "the layout", "it",
+"the pieces" or similar, the referent is in the lines above — not something
+you should go looking for in the repository.
+
+`;
+}
+
 // ─── Main Plan Function ──────────────────────────────────────────────────────
 
 /**
@@ -141,18 +198,33 @@ export async function plan(
   context: ProjectContext,
   model: LanguageModel,
   revision?: PlanRevision,
+  history?: ModelMessage[],
+  abortSignal?: AbortSignal,
 ): Promise<Plan> {
   const systemPrompt = await buildSystemPrompt(
     context.projectRoot,
     "planner" as AgentRole,
   );
 
+  // WHY THE PLANNER SEES THE CONVERSATION:
+  //
+  // It used to get the raw prompt and nothing else, which made every
+  // referring expression unresolvable. "the layout is bad and the pieces are
+  // not working" has no subject on its own, so the planner went looking for
+  // one, found this repo's own src/ui/App.tsx and src/styles/board.css, and
+  // confidently planned a redesign of Zizou's TUI — while the user was
+  // talking about a chess game they had just opened.
+  //
+  // That is the scope drift. It is not the model being careless; it is the
+  // model being handed a pronoun with no antecedent and having to guess.
+  const conversationContext = renderHistory(history);
+
   // A revision is the same request, re-planned with the user's correction in
   // hand. Showing the previous plan matters: without it the model re-derives
   // everything from the prompt and the correction has nothing to attach to,
   // so a note about one step's destination silently rewrites all of them.
   const userMessage = revision
-    ? `Create a detailed implementation plan for the following request:
+    ? `${conversationContext}Create a detailed implementation plan for the following request:
 
 ${userPrompt}
 
@@ -179,7 +251,7 @@ Produce a REVISED plan. Keep every step the correction does not touch, and
 apply the correction exactly as asked — it overrides any assumption you made
 before, including anything in your project conventions. Re-index from 0 and
 fix up dependsOn accordingly.`
-    : `Create a detailed implementation plan for the following request:
+    : `${conversationContext}Create a detailed implementation plan for the following request:
 
 ${userPrompt}`;
 
@@ -201,6 +273,7 @@ ${PLANNER_INSTRUCTIONS}`;
     system: systemText,
     tools: buildReadOnlyToolMap(),
     stopWhen: stepCountIs(context.maxSteps),
+    ...(abortSignal ? { abortSignal } : {}),
     messages: [
       {
         role: "user",

@@ -6,9 +6,21 @@ import {
   setProviderModel,
   setOllamaBaseUrl,
   getOllamaBaseUrl,
+  getOllamaNumCtx,
+  setOllamaNumCtx,
 } from "../config/api-keys.js";
 import { addPinnedFile, clearPinnedFiles } from "../context/build-system-prompt.js";
 import { getActiveModelId } from "../sdk/resolve-model.js";
+import {
+  checkOllamaHealth,
+  primeOllamaCache,
+  clearOllamaCache,
+  preflightOllama,
+  supportsTools,
+  isThinkingModel,
+  MIN_USABLE_NUM_CTX,
+  DEFAULT_NUM_CTX_CEILING,
+} from "../sdk/ollama.js";
 import { existsSync, readdirSync, writeFileSync } from "fs";
 import { join } from "path";
 import {
@@ -70,7 +82,7 @@ export const SLASH_COMMANDS: SlashCommandInfo[] = [
   { command: "/model", description: "Switch provider and/or set custom model name" },
   { command: "/models", description: "List all available model options for all providers" },
   { command: "/modelid", description: "Set custom model ID for the active provider" },
-  { command: "/ollama", description: "Set the Ollama base URL" },
+  { command: "/ollama", description: "Set the Ollama base URL, or `ctx <n>` for the local context cap" },
   { command: "/effort", description: "Set effort: fast, balanced or max (model + context + limits)" },
   { command: "/init", description: "Create ZIZOU.md for project settings and conventions" },
   { command: "/add", description: "Pin a file's contents permanently to context" },
@@ -141,6 +153,120 @@ export type LogEntry =
   | { kind: "scope-hint"; text: string }
   | { kind: "mode-switch"; mode: Mode; reason: string };
 
+// ─── Restoring a persisted log ───────────────────────────────────────────────
+//
+// The chat log is persisted as a JSON string and restored on session load.
+// It used to be JSON.parse'd and cast straight to LogEntry[], which is a lie
+// the type system cannot catch: the parsed value is whatever some earlier
+// version of Zizou happened to write.
+//
+// That lie crashed the whole TUI. LogEntry has gained fields over time —
+// plan-display gained `assumptions`, then `routeReason` and `projectRoot` —
+// and a session saved before a field existed restores an entry without it.
+// The renderer then does `entry.assumptions.length` on undefined and takes
+// down the entire app, so the session becomes permanently unopenable and the
+// only way out is deleting it by hand.
+//
+// A log entry is display history. One unreadable line of it is worth a
+// dropped line, never a dead session.
+
+/** Is this a plain object we can inspect? */
+function isRecord(value: unknown): value is Record<string, unknown> {
+  return typeof value === "object" && value !== null && !Array.isArray(value);
+}
+
+const str = (v: unknown, fallback = ""): string => (typeof v === "string" ? v : fallback);
+const arr = <T,>(v: unknown): T[] => (Array.isArray(v) ? (v as T[]) : []);
+
+/**
+ * Coerces one restored value into a renderable LogEntry, or null to drop it.
+ *
+ * Repairs what it can (a missing array becomes empty, a missing string becomes
+ * "") and drops what it cannot identify. It never throws.
+ */
+function coerceLogEntry(raw: unknown): LogEntry | null {
+  if (!isRecord(raw)) return null;
+
+  switch (raw.kind) {
+    case "user":
+    case "assistant":
+    case "error":
+    case "scope-hint":
+      return { ...raw, kind: raw.kind, text: str(raw.text) } as LogEntry;
+
+    case "tool-call":
+      return {
+        ...raw,
+        kind: "tool-call",
+        toolCallId: str(raw.toolCallId),
+        name: str(raw.name, "unknown"),
+        startTime: typeof raw.startTime === "number" ? raw.startTime : 0,
+        status: raw.status === "running" || raw.status === "error" ? raw.status : "success",
+      } as LogEntry;
+
+    case "plan-display":
+      // The entry that caused the crash. Both arrays are defaulted because a
+      // plan restored without its steps still renders as an empty plan, which
+      // is honest, rather than as a stack trace.
+      return {
+        ...raw,
+        kind: "plan-display",
+        steps: arr(raw.steps),
+        assumptions: arr<string>(raw.assumptions),
+      } as LogEntry;
+
+    case "step-progress":
+      return {
+        ...raw,
+        kind: "step-progress",
+        stepIndex: typeof raw.stepIndex === "number" ? raw.stepIndex : 0,
+        totalSteps: typeof raw.totalSteps === "number" ? raw.totalSteps : 1,
+        description: str(raw.description),
+      } as LogEntry;
+
+    case "verification":
+      return {
+        ...raw,
+        kind: "verification",
+        stepIndex: typeof raw.stepIndex === "number" ? raw.stepIndex : 0,
+        verified: raw.verified === true,
+        mismatches: arr<string>(raw.mismatches),
+      } as LogEntry;
+
+    case "mode-switch":
+      // "mode" is rendered by indexing a badge table, so an unknown value
+      // would be a second undefined-property crash in the same renderer.
+      return {
+        ...raw,
+        kind: "mode-switch",
+        mode: MODE_LABELS[raw.mode as Mode] ? (raw.mode as Mode) : "build",
+        reason: str(raw.reason),
+      } as LogEntry;
+
+    default:
+      // A kind this version does not know about. Dropped rather than guessed.
+      return null;
+  }
+}
+
+/**
+ * Parses and repairs a persisted log. Never throws, always returns an array.
+ *
+ * Callers do NOT need their own try/catch — an unparseable log comes back as
+ * [], which the caller can treat as "nothing to restore".
+ */
+export function parseRestoredLog(serialized: string | undefined | null): LogEntry[] {
+  if (!serialized) return [];
+  let parsed: unknown;
+  try {
+    parsed = JSON.parse(serialized);
+  } catch {
+    return [];
+  }
+  if (!Array.isArray(parsed)) return [];
+  return parsed.map(coerceLogEntry).filter((e): e is LogEntry => e !== null);
+}
+
 /**
  * The prompt under a displayed plan.
  *
@@ -177,6 +303,39 @@ const SHORT_LABELS: Record<ProviderChoice, string> = {
   openai: "OpenAI",
   ollama: "Ollama (local)",
 };
+
+/**
+ * Renders the local Ollama catalogue for /models.
+ *
+ * Shows what decides whether a model is usable — the `tools` capability above
+ * all — rather than just names. A model without it can never emit a native
+ * tool call, which is the difference between Zizou working and Zizou guessing
+ * at tool calls in plain text.
+ */
+async function renderOllamaCatalogue(): Promise<string> {
+  const health = await checkOllamaHealth();
+  if (!health.ok) {
+    return `ollama      - not reachable at ${getOllamaBaseUrl()} (run \`ollama serve\` to use local models)`;
+  }
+
+  const models = await primeOllamaCache();
+  if (models.length === 0) {
+    return `ollama      - running (v${health.version ?? "?"}), no models installed — try \`ollama pull qwen3:4b\``;
+  }
+
+  const rows = models.map((m) => {
+    const badges = [
+      supportsTools(m) ? "tools" : "NO TOOLS",
+      isThinkingModel(m) ? "thinking" : null,
+      m.contextLength ? `${Math.round(m.contextLength / 1024)}k ctx` : null,
+    ].filter(Boolean);
+    const size = m.parameterSize ? ` ${m.parameterSize}` : "";
+    const quant = m.quantization ? ` ${m.quantization}` : "";
+    return `              ${m.name}${size}${quant}  [${badges.join(", ")}]`;
+  });
+
+  return `ollama      - installed locally (v${health.version ?? "?"}):\n${rows.join("\n")}`;
+}
 
 export function getSkills(): string[] {
   const skills: string[] = [];
@@ -359,6 +518,8 @@ Use /build when you want changes made.`,
                             e.g. /modelid llama3:70b
   /ollama <url>             Set the Ollama base URL
                             e.g. /ollama http://localhost:11434
+  /ollama ctx <n>           Cap the context window asked of local models
+                            Ollama defaults to 4096, too small for Zizou
   /add <filepath>           Pin a file's contents permanently to the system prompt
 
   Effort — one dial for speed vs quality:
@@ -506,6 +667,12 @@ ${cmdList}
       setProviderModel(choice, customModel);
     }
 
+    // Prime the local catalogue BEFORE reading the active model: with no
+    // custom model pinned, getActiveModelId consults that cache to pick a
+    // model for the current effort, and an unprimed cache would fall back to
+    // the built-in default and report a model the user may not even have.
+    if (choice === "ollama") await primeOllamaCache();
+
     const modelId = getActiveModelId(choice);
     ctx.setLog((l: LogEntry[]) => [
       ...l,
@@ -515,6 +682,15 @@ ${cmdList}
         text: `Switched to ${SHORT_LABELS[choice]} › ${modelId}${customModel ? " (custom model)" : ""}`,
       },
     ]);
+
+    // Say what is wrong with the local setup at the moment the user opts into
+    // it, not later as a stream error with no context. Silence here means the
+    // setup is sound, which is worth the check on its own.
+    if (choice === "ollama") {
+      for (const problem of await preflightOllama(modelId)) {
+        ctx.setLog((l: LogEntry[]) => [...l, { kind: "error", text: problem }]);
+      }
+    }
     ctx.setTokenStats(
       ctx.calculateTokenStats(ctx.history.current, ctx.systemPrompt, undefined, choice)
     );
@@ -522,6 +698,12 @@ ${cmdList}
   }
 
   if (command === "models") {
+    // Ollama's catalogue is whatever the user pulled, so it is read from the
+    // server rather than hardcoded. The old static line claimed "llama3
+    // (default), mistral, phi3" — none of which was the real default, and any
+    // of which might not be installed.
+    const local = await renderOllamaCatalogue();
+
     const list =
       `Available Models by Provider:\n` +
       `${"-".repeat(40)}\n` +
@@ -530,7 +712,7 @@ ${cmdList}
       `google      - gemini-2.5-flash (default), gemini-2.5-pro, gemini-2.0-flash, gemini-1.5-pro, gemini-1.5-flash\n` +
       `anthropic   - claude-3-5-sonnet-latest (default), claude-3-5-haiku-latest, claude-3-opus-20240229\n` +
       `openrouter  - google/gemma-4-31b-it:free (default), meta-llama/llama-3.3-70b-instruct:free, deepseek/deepseek-chat\n` +
-      `ollama      - llama3 (default), mistral, phi3\n\n` +
+      `\n${local}\n\n` +
       `Use "/model <provider> [model-name]" to switch, or "/modelid <model-name>" to set a custom ID.`;
 
     ctx.setLog((l: LogEntry[]) => [
@@ -571,6 +753,52 @@ ${cmdList}
 
   if (command === "ollama") {
     const url = args[0];
+
+    // `/ollama ctx <n>` caps the context window requested from local models.
+    // Raising it costs memory (the KV cache scales with it), which is why it
+    // is a dial rather than simply using each model's advertised maximum —
+    // qwen3:4b advertises 262144, and asking for that on a laptop trades a
+    // truncation bug for an out-of-memory crash.
+    if (url?.toLowerCase() === "ctx") {
+      const raw = args[1];
+      if (!raw) {
+        ctx.setLog((l: LogEntry[]) => [
+          ...l,
+          { kind: "user", text },
+          {
+            kind: "assistant",
+            text:
+              `Local context ceiling: ${getOllamaNumCtx() ?? DEFAULT_NUM_CTX_CEILING} tokens\n` +
+              `Usage: /ollama ctx <tokens>  — e.g. /ollama ctx 32768\n` +
+              `Higher uses more memory. Ollama's own default is 4096, which is too small for Zizou's prompt plus tool definitions.`,
+          },
+        ]);
+        return true;
+      }
+      const n = Number(raw);
+      if (!Number.isFinite(n) || n < MIN_USABLE_NUM_CTX) {
+        ctx.setLog((l: LogEntry[]) => [
+          ...l,
+          { kind: "user", text },
+          {
+            kind: "error",
+            text: `Context ceiling must be a number of at least ${MIN_USABLE_NUM_CTX} — below that, Zizou's system prompt and tool definitions do not fit.`,
+          },
+        ]);
+        return true;
+      }
+      setOllamaNumCtx(n);
+      ctx.setLog((l: LogEntry[]) => [
+        ...l,
+        { kind: "user", text },
+        {
+          kind: "assistant",
+          text: `Local context ceiling set to ${n} tokens. Each model still caps at its own maximum.`,
+        },
+      ]);
+      return true;
+    }
+
     if (!url) {
       const current = getOllamaBaseUrl();
       ctx.setLog((l: LogEntry[]) => [
@@ -578,12 +806,19 @@ ${cmdList}
         { kind: "user", text },
         {
           kind: "assistant",
-          text: `Ollama base URL: ${current}\nUsage: /ollama <url>  — e.g. /ollama http://192.168.1.10:11434`,
+          text:
+            `Ollama base URL: ${current}\n` +
+            `Usage: /ollama <url>        — e.g. /ollama http://192.168.1.10:11434\n` +
+            `       /ollama ctx <n>      — cap the context window asked of local models`,
         },
       ]);
       return true;
     }
     setOllamaBaseUrl(url);
+    // The catalogue belongs to the old server. Re-read it, so the next model
+    // resolution reflects what THIS machine has installed.
+    clearOllamaCache();
+    await primeOllamaCache();
     ctx.setLog((l: LogEntry[]) => [
       ...l,
       { kind: "user", text },

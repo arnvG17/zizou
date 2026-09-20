@@ -19,6 +19,18 @@ interface FileSearchOverlayProps {
   onSelectFile: (filePath: string) => void;
   /** Called to close the overlay */
   onClose: () => void;
+  /**
+   * Reports whether this overlay currently has matches, and so whether it
+   * will consume the Enter key.
+   *
+   * The parent needs this because Ink delivers a keypress to EVERY mounted
+   * useInput handler. With the overlay open, Enter hit both this component
+   * (select the file) and the TextInput's onSubmit (send the prompt) — so
+   * picking a file also fired the half-typed "@que" prompt. The parent
+   * suppresses its submit only while this is true, which keeps Enter working
+   * normally when the query matches nothing.
+   */
+  onActiveChange?: (active: boolean) => void;
 }
 
 interface FileMatch {
@@ -31,6 +43,7 @@ export function FileSearchOverlay({
   cursorPosition,
   onSelectFile,
   onClose,
+  onActiveChange,
 }: FileSearchOverlayProps) {
   const [selectedIndex, setSelectedIndex] = useState(0);
   const [searchQuery, setSearchQuery] = useState("");
@@ -50,14 +63,20 @@ export function FileSearchOverlay({
 
   // Get filtered matches
   const matches = useMemo(() => {
-    if (!searchQuery) return [];
-    
     const allFiles = getFileIndex();
+
+    // A bare "@" lists the first files rather than showing nothing. An empty
+    // query is not "no matches" — it is "you have not narrowed yet", and
+    // rendering nothing there makes the picker look broken.
+    if (!searchQuery) {
+      return allFiles.slice(0, 10).map((path) => ({ path, score: 0 }));
+    }
+
     const results = fuzzysort.go(searchQuery, allFiles, {
       limit: 10,
       threshold: -10000, // Allow some fuzziness
     });
-    
+
     return results.map((result) => ({
       path: result.target,
       score: result.score,
@@ -68,6 +87,14 @@ export function FileSearchOverlay({
   useEffect(() => {
     setSelectedIndex(0);
   }, [matches]);
+
+  // Tell the parent whether Enter belongs to us this render. Also fires with
+  // `false` on unmount, so a closed overlay can never leave submit suppressed.
+  const active = matches.length > 0;
+  useEffect(() => {
+    onActiveChange?.(active);
+    return () => onActiveChange?.(false);
+  }, [active, onActiveChange]);
 
   // Handle keyboard navigation using Ink's useInput
   useInput((input, key) => {
@@ -86,8 +113,9 @@ export function FileSearchOverlay({
     }
   });
 
-  // Don't render if no search query or no matches
-  if (!searchQuery || matches.length === 0) {
+  // Nothing matched the query — the overlay gets out of the way, and Enter
+  // goes back to submitting the prompt (see onActiveChange).
+  if (matches.length === 0) {
     return null;
   }
 

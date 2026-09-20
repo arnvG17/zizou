@@ -379,9 +379,9 @@ export function routedTo(expected: string): Assertion {
 /**
  * Nothing was written directly into the workspace root.
  *
- * The failure this exists for: asked for an app, the agent drops chess.html,
- * poker.tsx and notesapp.html at the top level next to package.json. A file
- * one directory down is fine; a bare filename at the root is not.
+ * The failure this exists for: asked for an app, the agent drops a pile of
+ * loose .html and .tsx files at the top level next to package.json. A file one
+ * directory down is fine; a bare filename at the root is not.
  *
  * `allowed` names the root files a task legitimately expects (a README, a
  * package.json), so the assertion stays about misplacement rather than about

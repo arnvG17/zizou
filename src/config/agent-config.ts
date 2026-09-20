@@ -37,6 +37,7 @@ import {
   type Effort,
 } from "./effort.js";
 import { loadProjectSettings } from "./zizou-md.js";
+import { localModelForEffort } from "./local-catalog.js";
 
 /** Everything the runtime needs to make a model call. */
 export interface ResolvedAgentConfig {
@@ -108,7 +109,16 @@ export function resolveAgentConfig(projectRoot?: string): ResolvedAgentConfig {
   // a specific model, raising effort must not silently swap it out. Raising
   // effort still widens context and raises the token cap.
   const pinned = project.model ?? getProviderModel(provider) ?? null;
-  const modelId = pinned ?? modelForEffort(provider, effort) ?? fallbackModel(provider);
+
+  // Ollama has no model table in the source: the catalogue is whatever the
+  // user pulled, so it is read from the server and cached in local-catalog.ts.
+  // getActiveModelId() consults the SAME function — the two must never resolve
+  // a model by different routes (see sdk/active-model.test.ts for the bug that
+  // caused).
+  const fromEffort =
+    provider === "ollama" ? localModelForEffort(effort) : modelForEffort(provider, effort);
+
+  const modelId = pinned ?? fromEffort ?? fallbackModel(provider);
 
   return {
     provider,

@@ -112,13 +112,17 @@ export const EFFORT_MODELS: Record<string, Record<Effort, string>> = {
     balanced: "meta-llama/llama-3.3-70b-instruct:free",
     max: "deepseek/deepseek-chat",
   },
-  // Local models are whatever the user has pulled, so effort cannot pick one
-  // for them. These are the common defaults; /model overrides per provider.
-  ollama: {
-    fast: "qwen3:4b",
-    balanced: "qwen3:4b",
-    max: "qwen3:4b",
-  },
+  // NO ENTRY FOR OLLAMA — deliberately.
+  //
+  // It used to map all three efforts to "qwen3:4b", which had two effects:
+  // /effort was a silent no-op for local models, and anyone who had not
+  // pulled that exact tag got a 404 from a model they never chose.
+  //
+  // A local catalogue is whatever the user happened to pull, so it cannot be
+  // known at build time — it has to be read from the server. sdk/ollama.ts
+  // does that with pickModelForEffort(), and modelForEffort() returning null
+  // here is what hands the decision over. The lookup below already treats a
+  // missing provider as "fall back to the resolver", so this is not a gap.
 };
 
 export const DEFAULT_EFFORT: Effort = "balanced";

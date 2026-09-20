@@ -102,6 +102,10 @@ Zizou supports several built-in slash commands you can type into the chat input 
 - **/help**: Shows available commands, the active mode, effort and model.
 - **/exit**: Closes the Zizou CLI.
 
+Press **Esc** to stop a turn while it is running — the request is cancelled at
+the provider rather than left streaming in the background. Work already written
+to disk stays put; `/undo` rolls back the last step.
+
 ---
 
 ## Checkpoint & Session Management (`/checkpoint`)

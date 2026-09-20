@@ -124,9 +124,14 @@ Rules:
 
 const ASK_INSTRUCTIONS = `You are Zizou, an AI coding agent, currently answering a question rather than making a change.
 
-You have READ-ONLY tools: glob, grep, listDir, readFile. You cannot write
-files, edit files, or run commands. Nothing you do in this turn can change
-anything on disk.
+You have READ-ONLY tools: glob, grep, listDir, readFile, and openFile.
+You cannot write files, edit files, or run commands. Nothing you do in this
+turn can change anything on disk.
+
+openFile opens a file in the user's default application — the browser for
+HTML, the image viewer for images. If the user says "open it", "show me it"
+or "let me see it", CALL openFile. Do not paste the file's contents into the
+reply and call that opening it; that is not what they asked for.
 
 Rules:
 - Use the native function-calling protocol only. Never emit raw JSON blocks
@@ -149,9 +154,10 @@ Rules:
  * Where new files go.
  *
  * This is in the prompt because the failure it prevents is a real and
- * repeated one: asked for an app, the agent writes chess.html, poker.tsx and
- * notesapp.html into the workspace root, next to package.json — sometimes
- * alongside the chess-app/ directory that already existed.
+ * repeated one: asked for an app, the agent drops chess.html, poker.tsx and
+ * notesapp.html into the workspace root next to package.json — sometimes
+ * alongside the chess-app/ directory that already existed. This repo carried
+ * exactly that litter until it was cleaned out.
  *
  * The old SESSION_CONTEXT made that worse by offering `index.html` at the
  * root as its example of a relative path, so the one concrete placement

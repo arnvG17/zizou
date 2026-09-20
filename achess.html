@@ -1,0 +1,88 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>A Chess Game</title>
+    <style>
+        body {
+            font-family: Arial, sans-serif;
+            display: flex;
+            justify-content: center;
+            align-items: center;
+            height: 100vh;
+            background-color: #f4f4f4;
+        }
+        .chess-board {
+            display: grid;
+            grid-template-columns: repeat(8, 1fr);
+            width: 400px;
+            height: 400px;
+        }
+        .chess-board div {
+            width: 50px;
+            height: 50px;
+        }
+        .black {
+            background-color: #333;
+        }
+        .white {
+            background-color: #fff;
+        }
+    </style>
+</head>
+<body>
+    <div class="chess-board">
+        <div class="chess-pieces">
+        <div class="piece white-rook">♖</div>
+        <div class="piece white-knight">♘</div>
+        <div class="piece white-bishop">♗</div>
+        <div class="piece white-queen">♕</div>
+        <div class="piece white-king">♔</div>
+        <div class="piece white-bishop">♗</div>
+        <div class="piece white-knight">♘</div>
+        <div class="piece white-rook">♖</div>
+        <div class="piece white-pawn">♙</div>
+        <div class="piece white-pawn">♙</div>
+        <div class="piece white-pawn">♙</div>
+        <div class="piece white-pawn">♙</div>
+        <div class="piece white-pawn">♙</div>
+        <div class="piece white-pawn">♙</div>
+        <div class="piece white-pawn">♙</div>
+        <div class="piece white-pawn">♙</div>
+        <div class="piece black-rook">♖</div>
+        <div class="piece black-knight">♘</div>
+        <div class="piece black-bishop">♗</div>
+        <div class="piece black-queen">♕</div>
+        <div class="piece black-king">♔</div>
+        <div class="piece black-bishop">♗</div>
+        <div class="piece black-knight">♘</div>
+        <div class="piece black-rook">♖</div>
+        <div class="piece black-pawn">♙</div>
+        <div class="piece black-pawn">♙</div>
+        <div class="piece black-pawn">♙</div>
+        <div class="piece black-pawn">♙</div>
+        <div class="piece black-pawn">♙</div>
+        <div class="piece black-pawn">♙</div>
+        <div class="piece black-pawn">♙</div>
+        <div class="piece black-pawn">♙</div>
+    </div>
+    </div>
+    <script>
+        const pieces = document.querySelectorAll('.piece');
+        pieces.forEach(piece => {
+            piece.addEventListener('click', () => {
+                // Logic for moving pieces will go here
+                alert('Piece clicked: ' + piece.className);
+            });
+        });
+    
+        const board = document.querySelector('.chess-board');
+        for (let i = 0; i < 64; i++) {
+            const square = document.createElement('div');
+            square.className = (Math.floor(i / 8) + i) % 2 === 0 ? 'white' : 'black';
+            board.appendChild(square);
+        }
+    </script>
+</body>
+</html>

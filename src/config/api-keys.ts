@@ -25,6 +25,15 @@ interface ConfigSchema {
   providerModels?: Partial<Record<ProviderChoice, string>>;
   /** Ollama base URL — defaults to http://localhost:11434 */
   ollamaBaseUrl?: string;
+  /**
+   * Ceiling on the context window requested from local models.
+   *
+   * Not the window itself: the model's own maximum still applies, and this
+   * only caps it. It exists because a model may advertise 262144 while the
+   * machine has nowhere near enough memory for that KV cache — see
+   * sdk/ollama.ts recommendedNumCtx().
+   */
+  ollamaNumCtx?: number;
 }
 
 const config = new Conf<ConfigSchema>({
@@ -150,6 +159,21 @@ export function getOllamaBaseUrl(): string {
  */
 export function setOllamaBaseUrl(url: string): void {
   config.set("ollamaBaseUrl", url);
+}
+
+/**
+ * Gets the configured ceiling on local context window size, or undefined to
+ * use the built-in default.
+ */
+export function getOllamaNumCtx(): number | undefined {
+  const fromEnv = Number(process.env.ZIZOU_OLLAMA_NUM_CTX);
+  if (Number.isFinite(fromEnv) && fromEnv > 0) return fromEnv;
+  return config.get("ollamaNumCtx");
+}
+
+/** Sets the ceiling on local context window size. */
+export function setOllamaNumCtx(n: number): void {
+  config.set("ollamaNumCtx", n);
 }
 
 /**

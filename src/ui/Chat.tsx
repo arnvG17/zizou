@@ -26,6 +26,7 @@ import TextInput from "ink-text-input";
 import pkg from "../../package.json";
 import type { ModelMessage } from "ai";
 import { resolveModel, getActiveModelId } from "../sdk/resolve-model.js";
+import { explainOllamaError, drainOllamaWarnings } from "../sdk/ollama.js";
 import { resolveAgentConfig } from "../config/agent-config.js";
 import {
   getDefaultProvider,
@@ -39,7 +40,7 @@ import { runTurn } from "../agent/run-turn.js";
 import { buildSystemPrompt, addPinnedFile, pinnedContextFiles } from "../context/build-system-prompt.js";
 import { buildRepoMap } from "../context/repo-map.js";
 import { useTerminalSize, SidebarWordmark, SidebarMountains } from "./Figurine.js";
-import { handleSlashCommand, SLASH_COMMANDS, WELCOME_MESSAGE, getSkills, PLAN_GATE_PROMPT } from "../commands/index.js";
+import { handleSlashCommand, SLASH_COMMANDS, WELCOME_MESSAGE, getSkills, PLAN_GATE_PROMPT, parseRestoredLog } from "../commands/index.js";
 import type { LogEntry as SharedLogEntry } from "../commands/index.js";
 import { readdirSync, statSync, existsSync } from "fs";
 import { join, relative, resolve as resolvePath } from "path";
@@ -325,23 +326,40 @@ function ThinkingLoader() {
     };
   }, []);
 
-  return <Text color="#39FF14"> ({SPINNER_FRAMES[frameIndex]} {word}…)</Text>;
+  // The "esc to stop" hint rides along with the spinner because that is the
+  // only moment it is true, and the only moment anyone needs it. A cancel key
+  // nobody knows about is the same as no cancel key — which is why the only
+  // way out of a long run used to be Ctrl+C and a dead session.
+  return (
+    <Text>
+      <Text color="#39FF14"> ({SPINNER_FRAMES[frameIndex]} {word}…)</Text>
+      <Text color="#6B7280" dimColor>  esc to stop</Text>
+    </Text>
+  );
 }
 
 export interface ChatProps {
   onChangeKeys?: () => void;
-  /** The operating mode (build or plan) determined by CLI args. */
+  /** The pinned mode from CLI args. Defaults to auto — see agent/mode.ts. */
   mode?: Mode;
   /** If provided, auto-submit this prompt on startup. */
   initialPrompt?: string;
 }
 
-export function Chat({ onChangeKeys, mode: initialMode = "build", initialPrompt }: ChatProps) {
+export function Chat({ onChangeKeys, mode: initialMode = "auto", initialPrompt }: ChatProps) {
   // Ensure model_config.md exists on first startup so users can find and edit it
 
   const [log, setLog] = useState<LogEntry[]>([]);
   const [input, setInput] = useState("");
   const [busy, setBusy] = useState(false);
+
+  /**
+   * Cancels the turn in flight. Null when nothing is running.
+   *
+   * A ref, not state: the Esc handler must reach the CURRENT controller from
+   * inside a stable useInput callback, and a re-render is not needed to abort.
+   */
+  const abortRef = useRef<AbortController | null>(null);
   const [pendingConfirm, setPendingConfirm] = useState<{
     description: string;
     resolve: (approved: boolean) => void;
@@ -354,6 +372,14 @@ export function Chat({ onChangeKeys, mode: initialMode = "build", initialPrompt 
   const [customModelInput, setCustomModelInput] = useState("");
 
   const [showFileSearch, setShowFileSearch] = useState(false);
+  /**
+   * True while the @ overlay has matches and therefore owns the Enter key.
+   *
+   * A ref because handleSubmit must read the value AT KEYPRESS TIME, and Ink
+   * fires the TextInput's onSubmit in the same tick as the overlay's own
+   * handler — a state read there would see the previous render.
+   */
+  const fileSearchOwnsEnterRef = useRef(false);
 
   const { cols } = useTerminalSize();
   const showSidebar = cols >= 90 && log.length > 0;
@@ -450,12 +476,20 @@ export function Chat({ onChangeKeys, mode: initialMode = "build", initialPrompt 
         contextLimit: 128000,
       });
       
-      // Restore full log from serialized JSON
-      try {
-        const restoredLog = JSON.parse(sessionState.log);
-        setLog(restoredLog || []);
-      } catch (error) {
-        // Fallback: reconstruct from conversation
+      // Restore the log, repairing entries written by older versions.
+      //
+      // parseRestoredLog never throws and never returns a shape the renderer
+      // cannot handle. This was a bare JSON.parse cast to LogEntry[], so a
+      // session saved before a field existed — plan-display without
+      // `assumptions`, for one — crashed the entire TUI on open and left the
+      // session permanently unopenable.
+      const restoredLog = parseRestoredLog(sessionState.log);
+
+      if (restoredLog.length > 0) {
+        setLog(restoredLog);
+      } else {
+        // Nothing salvageable. Rebuild a transcript from the conversation so
+        // the session still opens with its history visible.
         const reconstructedLog: LogEntry[] = [];
         for (const msg of (sessionState.conversation || [])) {
           if (msg.role === "user") {
@@ -587,12 +621,11 @@ export function Chat({ onChangeKeys, mode: initialMode = "build", initialPrompt 
     }
     
     // Detect @ for file search
+    // A bare "@" opens the picker (showing the first matches) rather than
+    // requiring a character first — typing "@" and getting nothing reads as
+    // the feature not existing.
     const atMatch = input.match(/@([^\s]*)$/);
-    if (atMatch && atMatch[1].length >= 1) {
-      setShowFileSearch(true);
-    } else {
-      setShowFileSearch(false);
-    }
+    setShowFileSearch(!!atMatch);
   }, [input]);
 
   const showSuggestions = input.startsWith("/") && !closedSuggestions;
@@ -905,6 +938,27 @@ export function Chat({ onChangeKeys, mode: initialMode = "build", initialPrompt 
 
   useInput((inputChar, key) => {
     const state = inputStateRef.current;
+
+    // ── Esc cancels the run in flight ──────────────────────────────────
+    //
+    // Checked FIRST, and deliberately ahead of the confirmation prompt: a
+    // permission dialog is exactly where a user realises the agent is doing
+    // the wrong thing, and "deny this one write" is not the same as "stop".
+    // Denying leaves the agent running and free to try something else.
+    //
+    // Before this, the only way out of a bad run was Ctrl+C, which kills the
+    // whole CLI and takes the session with it.
+    if (key.escape && abortRef.current) {
+      abortRef.current.abort();
+      // Release a pending confirmation too, or the aborted turn sits waiting
+      // on a promise nobody will ever resolve.
+      if (state.pendingConfirm) {
+        state.pendingConfirm.resolve(false);
+        setPendingConfirm(null);
+      }
+      return;
+    }
+
     if (state.pendingConfirm) {
       if (inputChar.toLowerCase() === "y") {
         state.pendingConfirm.resolve(true);
@@ -980,6 +1034,12 @@ export function Chat({ onChangeKeys, mode: initialMode = "build", initialPrompt 
   });
 
   async function handleSubmit(userText: string) {
+    // The @ overlay is open and has matches, so this Enter was the user
+    // PICKING A FILE, not sending the prompt. Ink hands the keypress to every
+    // mounted handler, so without this the file got inserted AND the
+    // half-typed "@que" prompt got submitted in the same keystroke.
+    if (fileSearchOwnsEnterRef.current) return;
+
     if (showSuggestions && activeSuggestions.length > 0) {
       const selected = activeSuggestions[selectedIndex].value;
       const cmdToRun = completedValue.trim();
@@ -1180,6 +1240,13 @@ export function Chat({ onChangeKeys, mode: initialMode = "build", initialPrompt 
     opts: { approvedSteps?: PlanStep[]; planRevision?: PlanRevision } = {},
   ) {
     setBusy(true);
+
+    // One controller per turn. Any previous one is aborted first so a stale
+    // run cannot keep streaming behind the new one.
+    abortRef.current?.abort();
+    const controller = new AbortController();
+    abortRef.current = controller;
+
     const submitTime = Date.now();
     let currentAssistantText = "";
     let assistantEntryAdded = false;
@@ -1222,10 +1289,18 @@ export function Chat({ onChangeKeys, mode: initialMode = "build", initialPrompt 
         completedStepIndices: flowState.completedStepIndices,
         history: history.current,
         provider,
+        abortSignal: controller.signal,
       });
 
       let result = await orchestrator.next();
       while (!result.done) {
+        // The signal stops the provider request; this stops US. Without it the
+        // loop would keep draining buffered events after the user said stop.
+        if (controller.signal.aborted) {
+          await orchestrator.return(undefined as never).catch(() => {});
+          break;
+        }
+
         const event = result.value;
 
         // ── Handle orchestrator-level events ──────────────────────────────
@@ -1463,8 +1538,45 @@ export function Chat({ onChangeKeys, mode: initialMode = "build", initialPrompt 
         setTokenStats(calculateTokenStats(history.current, systemPromptRef.current, undefined, provider, usageEntries));
       }
     } catch (err: any) {
-      setLog((l) => [...l, { kind: "error", text: err.message ?? String(err) }]);
+      // A user-initiated stop is not a failure, and it can surface here as
+      // AbortError or APICallError depending on where it lands — so the
+      // controller's own state is the reliable signal, not the error shape.
+      // The message itself is emitted in `finally`, because aborting between
+      // events breaks the loop cleanly and never reaches this catch.
+      if (!controller.signal.aborted) {
+        const raw = err.message ?? String(err);
+        // Ollama reports failures as raw llama-server stderr, which says
+        // nothing a user can act on — "failed to allocate CPU_REPACK buffer"
+        // means "close some apps or pick a smaller model". Falls through to
+        // the original whenever the message is not one we recognise: a worse
+        // guess is not an improvement.
+        const explained =
+          getDefaultProvider() === "ollama"
+            ? explainOllamaError(raw, getActiveModelId("ollama"))
+            : null;
+        setLog((l) => [...l, { kind: "error", text: explained ?? raw }]);
+      }
     } finally {
+      // Findings published by the local-model request hook, e.g. that Ollama
+      // ignored our num_ctx and is silently truncating the prompt. Drained
+      // here rather than printed at the source because the sdk layer cannot
+      // reach the UI, and a console write would corrupt the Ink frame.
+      for (const warning of drainOllamaWarnings()) {
+        setLog((l) => [...l, { kind: "error", text: warning }]);
+      }
+
+      // One place for the stopped notice, covering both exits: the throw above
+      // and the clean `break` in the event loop.
+      if (controller.signal.aborted) {
+        setLog((l) => [
+          ...l,
+          {
+            kind: "assistant",
+            text: "Stopped. Anything already written to disk is still there — /undo rolls back the last step.",
+          },
+        ]);
+      }
+      abortRef.current = null;
       setBusy(false);
       // Auto-save session state after each turn
       try {
@@ -1664,6 +1776,7 @@ export function Chat({ onChangeKeys, mode: initialMode = "build", initialPrompt 
                     }
                     setShowFileSearch(false);
                   }}
+                  onActiveChange={(active) => { fileSearchOwnsEnterRef.current = active; }}
                   onClose={() => setShowFileSearch(false)}
                 />
               )}
@@ -1783,7 +1896,32 @@ export function Chat({ onChangeKeys, mode: initialMode = "build", initialPrompt 
   );
 }
 
+/**
+ * Renders one transcript line, and never takes the app down doing it.
+ *
+ * The log is display history, some of it restored from disk and written by
+ * older versions of Zizou. parseRestoredLog repairs what it can on the way in,
+ * but this is the second layer: a renderer that throws here unmounts the
+ * WHOLE TUI, so the session cannot be opened at all and its history is
+ * unreachable. One unreadable line is worth one unreadable line.
+ *
+ * Ink has no error boundary here, so this is a try/catch rather than one.
+ */
 function LogLine({ entry }: { entry: LogEntry }) {
+  try {
+    return <LogLineInner entry={entry} />;
+  } catch (err) {
+    return (
+      <Box marginBottom={1}>
+        <Text color="#6B7280" dimColor>
+          [unreadable log entry: {err instanceof Error ? err.message : String(err)}]
+        </Text>
+      </Box>
+    );
+  }
+}
+
+function LogLineInner({ entry }: { entry: LogEntry }) {
   if (entry.kind === "user") {
     return (
       <Box

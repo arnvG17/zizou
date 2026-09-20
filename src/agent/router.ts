@@ -34,6 +34,7 @@ import { generateText, type ModelMessage } from "ai";
 import type { Route } from "./mode.js";
 import { resolveModel } from "../sdk/resolve-model.js";
 import { modelForEffort } from "../config/effort.js";
+import { resolveAgentConfig } from "../config/agent-config.js";
 import type { ProviderChoice } from "../config/api-keys.js";
 
 // ─── Tuning ──────────────────────────────────────────────────────────────────
@@ -162,14 +163,17 @@ THE FOUR ROUTES:
 
 "chat" — Greetings, thanks, small talk, or a question about Zizou itself (what can you do, what mode am I in). No knowledge of the user's codebase is needed to respond.
 
-"ask" — The user wants an ANSWER, not a change. Questions about their codebase ("how does auth work", "where is the retry logic", "why is this test failing", "explain this function") and general technical questions. This route can read files but cannot write any. Choose it whenever the user is trying to understand something.
+"ask" — The user wants to UNDERSTAND something. Questions about their codebase ("how does auth work", "where is the retry logic", "why is this test failing", "explain this function") and general technical questions. Choose it when the reply itself is what the user wanted. If they want something DONE — even something small, even something that changes no code — it is not this route.
 
-"build" — One concrete change to the codebase, plausibly one to three files. "fix the typo in the header", "add a --verbose flag", "rename this function", "make the button blue", "write a test for parseConfig".
+"build" — The user wants an ACTION performed. Usually one concrete change, plausibly one to three files: "fix the typo in the header", "add a --verbose flag", "rename this function", "make the button blue", "write a test for parseConfig".
+
+    It is ALSO build when the action changes no code at all — opening a file, running a script, starting the dev server, installing a package, formatting, launching something in the browser. "Changes no code" does not make it a question. If the user is telling you to DO a thing rather than to EXPLAIN a thing, it is build.
 
 "plan" — Multi-file feature work, a migration, a refactor spanning modules, or any request with several ordered parts that must happen in sequence. Signals: multiple named surfaces, "across", "and then", "refactor", "migrate", "set up", "build me a <whole application>". Choose plan when getting the order wrong would mean redoing work.
 
 HOW TO DECIDE:
 - Is the user asking or telling? Asking → chat or ask. Telling → build or plan.
+- An imperative verb is telling, even a short one. "open it", "run it", "show me the file", "try it" are all build — the user wants the thing done, not described.
 - If telling: could one focused edit session finish it? Yes → build. Does it need several steps in a specific order → plan.
 - Grammar lies. "can you add a dark mode toggle" is phrased as a question but is a build. "should I be using useEffect here" is phrased as a question and is an ask.
 - A greeting attached to a task is the task. Route on the task.
@@ -181,6 +185,9 @@ EXAMPLES:
 "how does the checkpoint system work?" -> {"route":"ask","confidence":0.95,"reason":"wants an explanation of existing code"}
 "why is my build failing" -> {"route":"ask","confidence":0.85,"reason":"diagnosis, no change requested yet"}
 "where do we handle rate limits?" -> {"route":"ask","confidence":0.95,"reason":"locating existing code"}
+"open it" -> {"route":"build","confidence":0.9,"reason":"imperative action, not a question"}
+"open index.html in my browser" -> {"route":"build","confidence":0.95,"reason":"perform an action, changes no code"}
+"run the tests" -> {"route":"build","confidence":0.95,"reason":"perform an action"}
 "fix the typo in the README" -> {"route":"build","confidence":0.95,"reason":"single small edit"}
 "can you add a --verbose flag to the CLI" -> {"route":"build","confidence":0.85,"reason":"question-phrased, but one concrete change"}
 "hi, make the header sticky" -> {"route":"build","confidence":0.9,"reason":"greeting plus one task"}
@@ -326,11 +333,22 @@ export async function routePrompt(args: RoutePromptArgs): Promise<RouteDecision>
   }
 
   try {
-    // The fast tier explicitly, NOT the session's effort model. The router is
-    // a four-way label choice and it runs in front of every auto turn.
-    // modelForEffort returns null for an unknown provider, and resolveModel
-    // then falls back to that provider's configured model.
-    const modelId = modelForEffort(provider, "fast") ?? undefined;
+    // Normally the fast tier explicitly, NOT the session's effort model: the
+    // router is a four-way label choice that runs in front of every auto turn.
+    //
+    // BUT AN EXPLICIT PIN WINS. If the user pinned a model with /model or
+    // /modelid, that is the model we know they can actually reach. Overriding
+    // it with a fast-tier guess breaks exactly the people most likely to have
+    // pinned one — someone on Ollama who has pulled a single model would get
+    // a 404 here on EVERY auto turn, silently falling back to the greeting
+    // regex after paying the timeout each time.
+    //
+    // A working router on an expensive model beats a broken one on a cheap
+    // model that is never reached.
+    const { modelPinned, modelId: pinnedModelId } = resolveAgentConfig();
+    const modelId = modelPinned
+      ? pinnedModelId
+      : (modelForEffort(provider, "fast") ?? undefined);
     const model = resolveModel(provider, modelId);
 
     const prompt = `${renderHistory(history)}Classify this message:\n${userPrompt.slice(0, 4000)}`;

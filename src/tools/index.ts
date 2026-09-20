@@ -41,12 +41,27 @@ import type { ConfirmFn } from "./types.js";
  * regex-based extractor cannot see. Grepping for a symbol finds it; a map
  * that never listed it cannot.
  */
-export function buildReadOnlyToolMap(): Record<string, any> {
+export function buildReadOnlyToolMap(
+  opts: { canOpen?: boolean } = {},
+): Record<string, any> {
   return {
     readFile,
     glob,
     grep,
     listDir,
+    // openFile launches the OS viewer and cannot modify anything, so it is
+    // read-only by this map's own definition. It is still OPT-IN, because
+    // "changes nothing" and "appropriate here" are different questions:
+    //
+    //   - The PLANNER must not have it. Its whole contract is to describe
+    //     work rather than start it, and a planner that pops open a browser
+    //     while deciding what to do has begun doing it.
+    //   - The ASK and CHAT routes DO get it. They are talking to the user in
+    //     real time, and "open it" is a thing a user says mid-conversation.
+    //     Without this, a route that cannot open the file answers by dumping
+    //     the file's contents into the terminal instead — which is what
+    //     happened, and is not what anyone asked for.
+    ...(opts.canOpen ? { openFile } : {}),
   };
 }
 
