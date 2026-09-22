@@ -124,8 +124,15 @@ test("the system prompt is the real executor prompt", async () => {
   // Distinctive lines from EXECUTOR_INSTRUCTIONS in build-system-prompt.ts.
   // If the dataset ever stops matching what Zizou serves, this is where it
   // shows up.
+  //
+  // The tool-protocol line this used to anchor on ("Never emit raw JSON
+  // blocks...") was removed from the shared prompt: it is a crutch only small
+  // local models need, so the harness now adds it to the step prompt when the
+  // provider is ollama rather than charging every hosted call for it. A
+  // fine-tune therefore trains on exactly the system prompt it will be served,
+  // which is what this test is really protecting.
   expect(rec.system).toContain("You are Zizou");
-  expect(rec.system).toContain("Never emit raw JSON blocks or pseudo-calls as plain text");
+  expect(rec.system).toContain("Never claim success without verification");
   expect(rec.system).toContain("FILE PLACEMENT");
   expect(rec.system).toContain(`Workspace root (cwd): ${WORKSPACE_PLACEHOLDER}`);
 });

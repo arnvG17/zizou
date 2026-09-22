@@ -45,6 +45,8 @@ import type { ConfirmFn } from "../tools/types.js";
 import type { PlanStep, StepResult, StepDigest, ToolCall, ProjectContext } from "./types.js";
 import { getActiveJournal } from "./debug/index.js";
 import { wrapToolsWithTrace } from "../trace/wrap-tools.js";
+import { wrapToolsWithTaskState } from "./observe-tools.js";
+import { renderTaskState } from "./task-state.js";
 import { getActiveSessionId } from "../session/registry.js";
 import { randomUUID } from "node:crypto";
 import { buildToolMap } from "../tools/index.js";
@@ -60,6 +62,15 @@ import { buildToolMap } from "../tools/index.js";
  * Looks at readFile, openFile, editFile, and writeFile calls to determine which
  * files the user has been working with. This resolves deictic references like
  * "that file", "edit it", "the file I just opened", etc.
+ *
+ * NOT made redundant by TaskState, despite looking like the same information.
+ * The scopes differ and the difference is the whole point: task state covers
+ * ONE request, because its job is to know whether a file has been read since
+ * the agent last looked — a receipt that outlived the request would vouch for
+ * contents nobody has seen. This covers the CONVERSATION, because "edit it"
+ * refers to something from a previous turn. Deleting this in favour of task
+ * state would resolve deixis only within a single request, which is exactly
+ * where it is never needed.
  */
 function extractRecentFileReferences(history?: ModelMessage[]): string[] {
   if (!history || history.length === 0) return [];
@@ -101,14 +112,34 @@ function extractRecentFileReferences(history?: ModelMessage[]): string[] {
  * When conversationHistory is provided (build mode), extracts recently
  * referenced files so deictic references ("that file", "edit it") resolve
  * correctly even though the executor gets a fresh prompt.
+ *
+ * WHAT THIS NO LONGER SAYS: it used to open with "Call a tool to begin
+ * immediately. Do not ask clarifying questions. IMPORTANT: You MUST use the
+ * writeFile or editFile tools…" — three instructions restating what the
+ * system prompt and the tool schemas already establish, paid for on every
+ * step of every plan. What the model actually lacked was not urging but
+ * FACTS: what it had already read, written, run, and verified. That is what
+ * renderTaskState supplies, and it is the difference between telling a model
+ * to remember and handing it the memory.
+ *
+ * The tool-protocol reminder survives for local models only — see
+ * `opts.localTier`. The harness already knows the tier, so a crutch that only
+ * small models need stops being charged to every hosted call.
  */
 export function buildStepPrompt(
   step: PlanStep,
   conversationHistory?: ModelMessage[],
   priorSteps?: StepDigest[],
   repairContext?: string,
+  opts: { localTier?: boolean } = {},
 ): string {
-  let prompt = `Task: ${step.description}\n\nCall a tool to begin immediately. Do not ask clarifying questions.\nIMPORTANT: You MUST use the writeFile or editFile tools to write changes to disk. Printing file contents or code blocks as plain text in chat does NOT write files.`;
+  let prompt = `Task: ${step.description}`;
+
+  if (opts.localTier) {
+    prompt +=
+      `\n\nUse the native function-calling protocol. Printing file contents or a code block ` +
+      `in your reply does NOT write anything to disk — writeFile and editFile do.`;
+  }
 
   // A repair pass. This goes FIRST, right under the task, because it is the
   // most important thing the model needs to know: the previous attempt failed
@@ -117,6 +148,14 @@ export function buildStepPrompt(
   if (repairContext) {
     prompt += repairContext;
   }
+
+  // What this task has already established — files read and written, commands
+  // run with their exit codes, verification outcomes. Empty on a first attempt
+  // with nothing done yet, so it costs nothing until there is something to say.
+  //
+  // This is the main reason a repair pass no longer re-reads a file it read a
+  // moment ago or re-runs a command whose result it already has.
+  prompt += renderTaskState();
 
   // How this step will be judged. Telling the model the success condition up
   // front is strictly better than checking it afterwards and reporting a
@@ -260,7 +299,13 @@ export async function* executeStep(
 
   // Build the step-specific user message, passing conversation history
   // so it can resolve deictic references ("that file", "it") from prior turns.
-  const stepPrompt = buildStepPrompt(step, conversationHistory, priorSteps, options.repairContext);
+  //
+  // localTier is decided here rather than in the prompt builder: the provider
+  // is a fact the harness holds, and the tool-protocol reminder only earns its
+  // tokens against a model that needs it.
+  const stepPrompt = buildStepPrompt(step, conversationHistory, priorSteps, options.repairContext, {
+    localTier: provider === "ollama",
+  });
 
   const journal = getActiveJournal();
   journal.phase("executor", `maxSteps=${context.maxSteps} — ${step.description}`, step.index);
@@ -402,9 +447,10 @@ export async function* executeStep(
     // so this was worst precisely where it mattered most.
     //
     // Wrapper order matches runTurn: trace outermost, so it sees the same
-    // before-state the tool itself acts on.
+    // before-state the tool itself acts on, with task state inside the
+    // journal so a precondition refusal is recorded like any other outcome.
     const fallbackTools = wrapToolsWithTrace(
-      journal.wrapTools(buildToolMap(onConfirm)),
+      journal.wrapTools(wrapToolsWithTaskState(buildToolMap(onConfirm), { root: process.cwd() })),
       { turnId: options.turnId ?? randomUUID(), sessionId: getActiveSessionId() ?? null, root: process.cwd() },
     );
 

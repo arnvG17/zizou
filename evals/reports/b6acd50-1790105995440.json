@@ -1,0 +1,88 @@
+{
+  "reports": [
+    {
+      "startedAt": "2026-09-22T19:39:24.917Z",
+      "finishedAt": "2026-09-22T19:39:55.375Z",
+      "gitSha": "b6acd50",
+      "zizouVersion": "1.3.2",
+      "cell": {
+        "provider": "openai",
+        "effort": "balanced",
+        "modelId": "gpt-5-mini"
+      },
+      "tasks": [
+        {
+          "id": "build-edit-not-recreate",
+          "intent": "Asked to change something, the agent edits the existing file instead of making a twin.",
+          "runs": [
+            {
+              "runIndex": 0,
+              "passed": true,
+              "assertions": [
+                {
+                  "name": "contains \"Hi, \": src/lib/greet.ts",
+                  "passed": true,
+                  "detail": "present"
+                },
+                {
+                  "name": "lacks \"Hello, \": src/lib/greet.ts",
+                  "passed": true,
+                  "detail": "correctly absent"
+                },
+                {
+                  "name": "touched nothing but: src/lib/greet.ts",
+                  "passed": true,
+                  "detail": "no collateral changes"
+                }
+              ],
+              "totals": {
+                "durationMs": 30441,
+                "llmCalls": 0,
+                "toolCalls": 7,
+                "toolFailures": 2,
+                "fallbackParses": 0,
+                "duplicatesBlocked": 0,
+                "filesCreated": 0,
+                "filesModified": 1,
+                "filesDeleted": 0,
+                "linesAdded": 1,
+                "linesRemoved": 1,
+                "usage": {
+                  "inputTokens": 0,
+                  "outputTokens": 0,
+                  "cachedInputTokens": 0,
+                  "reasoningTokens": 0
+                },
+                "filesTouched": [
+                  "src/lib/greet.ts"
+                ]
+              },
+              "costUsd": 0.00072375,
+              "journalPath": "C:\\Users\\Arnv\\ZIZOUv1\\evals\\.artifacts\\openai-balanced--build-edit-not-recreate--run1-1790105964918\\openai-balanced--build-edit-not-recreate--run1-1790105964918.log"
+            }
+          ],
+          "passRate": 1
+        }
+      ],
+      "integrityOk": true
+    }
+  ],
+  "summaries": [
+    {
+      "cell": {
+        "provider": "openai",
+        "effort": "balanced",
+        "modelId": "gpt-5-mini"
+      },
+      "passRate": 1,
+      "tasksPassed": 1,
+      "tasksTotal": 1,
+      "avgToolCalls": 7,
+      "avgTokens": 0,
+      "avgDurationMs": 30441,
+      "avgCostUsd": 0.00072375,
+      "fallbackParses": 0,
+      "toolFailures": 2
+    }
+  ]
+}

@@ -6,6 +6,7 @@
 
 import { randomUUID } from "crypto";
 import type { Mode } from "../agent/mode.js";
+import type { PersistedTaskState } from "../agent/task-state.js";
 import type { SessionMeta, SessionState, TokenStats } from "./types.js";
 import { SESSION_SCHEMA_VERSION } from "./types.js";
 import { loadRegistry, saveRegistry, loadSessionState, saveSessionState, archiveSessionState } from "./state-io.js";
@@ -163,7 +164,8 @@ export function saveActiveSessionState(
   pinnedFiles: string[],
   log?: any[],
   currentMode?: Mode,
-  orchestratorState?: any
+  orchestratorState?: any,
+  taskState?: PersistedTaskState
 ): void {
   const activeId = getActiveSessionId();
   if (!activeId) {
@@ -205,6 +207,9 @@ export function saveActiveSessionState(
     log: log ? JSON.stringify(log) : existingState.log,
     currentMode: currentMode || existingState.currentMode,
     orchestratorState: orchestratorState || existingState.orchestratorState,
+    // Keeps the previous task when this turn produced none — a chat turn
+    // should not erase the record of the build that came before it.
+    taskState: taskState || existingState.taskState,
     pinnedFiles,
     lastActiveAt: new Date().toISOString(),
   };

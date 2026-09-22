@@ -26,6 +26,7 @@ import { randomUUID } from "node:crypto";
 import { getActiveJournal, type RunJournal, type UsageRecord } from "./debug/index.js";
 import { recordUsage } from "../telemetry/index.js";
 import { wrapToolsWithTrace } from "../trace/wrap-tools.js";
+import { wrapToolsWithTaskState } from "./observe-tools.js";
 import { getActiveSessionId } from "../session/registry.js";
 
 // ─── Event types emitted to whatever UI is listening ─────────────────────────
@@ -216,14 +217,24 @@ export async function* runTurn(
   // refusal never reaches it as a file change, which is correct — nothing was
   // written. Unlike the journal, this one is always on: undo cannot depend on
   // whether the user happened to set ZIZOU_DEBUG.
+  //
+  // TASK STATE sits between the journal and duplicate-detection. Outside the
+  // duplicate guard because its refusals must not register as failed calls:
+  // the recovery it asks for is "read the file, then retry that same edit",
+  // and the guard would refuse the retry as an unchanged repeat. Inside the
+  // journal so a refusal is still recorded — it happened, and the log should
+  // say so.
   const tools = rawTools
     ? wrapToolsWithTrace(
         journal.wrapTools(
-          Object.fromEntries(
-            Object.entries(rawTools).map(([name, toolInstance]) => [
-              name,
-              wrapToolForDuplicateDetection(name, toolInstance),
-            ])
+          wrapToolsWithTaskState(
+            Object.fromEntries(
+              Object.entries(rawTools).map(([name, toolInstance]) => [
+                name,
+                wrapToolForDuplicateDetection(name, toolInstance),
+              ])
+            ),
+            { root: process.cwd() },
           )
         ),
         { turnId, sessionId: getActiveSessionId() ?? null, root: process.cwd() },

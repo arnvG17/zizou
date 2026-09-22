@@ -87,6 +87,7 @@ import { buildSystemPrompt } from "../context/build-system-prompt.js";
 import { capturePreSnapshot, verifyStep, renderRepairContext } from "./verifier.js";
 import { type AgentEvent } from "./run-turn.js";
 import { getActiveJournal } from "./debug/index.js";
+import { beginTask, finishTask, recordAttempt, recordFailureSignature } from "./task-state.js";
 import { randomUUID } from "node:crypto";
 import { getActiveSessionId } from "../session/registry.js";
 import { resolve } from "path";
@@ -141,6 +142,19 @@ export type OrchestratorEvent =
   // A step failed on something real and is being tried again with the actual
   // error fed back. Carries only the HARD findings — the reason for the retry.
   | { kind: "step-retry"; step: PlanStep; findings: Finding[]; attempt: number }
+
+  // Recovery gave up: either the attempt budget ran out, or an attempt failed
+  // in exactly the way the previous one did, which means retrying again would
+  // learn nothing. Surfaced as its own event because a step that could not be
+  // fixed is the single most important thing for the user to see — it used to
+  // be reported as an ordinary failed verification and scrolled past.
+  | {
+      kind: "recovery-exhausted";
+      step: PlanStep;
+      findings: Finding[];
+      attempts: number;
+      reason: "no-progress" | "attempts-exhausted";
+    }
 
   // Emitted when the conversation history is updated (e.g. at the end of a build-mode step)
   | { kind: "history-updated"; history: ModelMessage[] }
@@ -221,14 +235,79 @@ function assessStepScope(
 //   build broke reported the failure and then handed the next step a broken
 //   tree, and the only actor who could do anything about it was the user.
 //
-// WHY EXACTLY ONE:
-//   One attempt covers the overwhelmingly common case — a typo'd import, a
-//   missing dependency, a wrong path — where the error message contains the
-//   fix. Beyond that a model tends to thrash, and each pass writes more edits
-//   on top of a tree already in an unexpected state. If one repair with the
-//   full stderr does not do it, a human should look.
+// WHY THE BUDGET IS NOW TWO, AND WHY THAT IS NOT A LOOSENING:
+//   It was one, on the reasoning that one pass covers the common case — a
+//   typo'd import, a missing dependency, a wrong path — and that beyond it a
+//   model thrashes, writing more edits on top of a tree already in an
+//   unexpected state. The diagnosis was right; the remedy was a proxy for it.
+//   Counting attempts cannot tell thrash from progress, so it cut off the
+//   genuine two-stage fix (the repair reveals a second, different error) for
+//   the same reason it cut off the thrash.
+//
+//   What actually distinguishes them is whether anything was LEARNED. A retry
+//   that fails in exactly the way the previous one did produced no new
+//   information, and a third pass will produce none either. So the loop now
+//   stops on a repeated failure signature no matter how much budget remains,
+//   and allows a second attempt when the failure genuinely moved. That is the
+//   "never repeatedly run an unchanged failing command" rule enforced rather
+//   than asserted — and against a truly stuck step it stops SOONER than the
+//   old single-retry budget did, because it does not need to spend the retry
+//   to find out.
 
-const MAX_REPAIR_ATTEMPTS = 1;
+/** Repairs permitted after the initial run, so three executions in total. */
+const MAX_REPAIR_ATTEMPTS = 2;
+
+/**
+ * Whether to try again, given how many repairs have happened and whether this
+ * failure is the same as the last one.
+ *
+ * A separate function because the arithmetic is easy to get wrong in a way
+ * nothing catches: `attempt` counts REPAIRS, so the initial run is 0, and
+ * writing the bound as `attempt + 1 < MAX` permits exactly one repair no
+ * matter how high MAX goes — silently reproducing the single-retry budget
+ * this was meant to replace.
+ */
+export function repairDecision(
+  attempt: number,
+  repeated: boolean,
+): { retry: boolean; reason: "no-progress" | "attempts-exhausted" | null } {
+  // Checked FIRST: an identical failure means the last attempt learned
+  // nothing, and that is true however much budget is left.
+  if (repeated) return { retry: false, reason: "no-progress" };
+  if (attempt >= MAX_REPAIR_ATTEMPTS) return { retry: false, reason: "attempts-exhausted" };
+  return { retry: true, reason: null };
+}
+
+/**
+ * A fingerprint of how a step failed.
+ *
+ * Codes plus the head of each detail, sorted so ordering noise does not read
+ * as a change.
+ *
+ * THE DETAIL IS INCLUDED because the code alone is far too coarse: two
+ * completely different compile errors are both `command-failed`, and calling
+ * them the same failure would abandon a step that was making progress.
+ *
+ * THE BIAS IS DELIBERATELY TOWARD "DIFFERENT", which is why a generous 200
+ * characters are compared rather than, say, the first line. The two ways to be
+ * wrong are not symmetric:
+ *
+ *   - Deciding two different failures are the same stops a step that was
+ *     getting somewhere, and the user has to notice and restart it.
+ *   - Deciding two identical failures differ costs one more attempt, and the
+ *     attempt budget then stops it anyway.
+ *
+ * So volatile content — a pid, a temp path, a duration — inside the compared
+ * head is tolerable, while truncating so aggressively that fixing one of five
+ * compiler errors looks like no change at all is not.
+ */
+export function failureSignature(findings: Finding[]): string {
+  return findings
+    .filter((f) => f.severity === "hard")
+    .map((f) => `${f.code}|${f.file ?? ""}|${(f.detail ?? "").slice(0, 200)}`)
+    .sort()
+    .join("\n");
+}
 
 interface RunStepArgs {
   step: PlanStep;
@@ -262,6 +341,8 @@ async function* runStepWithVerification(
   let attempt = 0;
   let repairContext = "";
   let outcome!: RunStepOutcome;
+  /** How the previous attempt AT THIS STEP failed. Empty before the first. */
+  let lastSignature = "";
 
   for (;;) {
     const modelTier: "hosted" | "local" = provider === "ollama" ? "local" : "hosted";
@@ -269,6 +350,7 @@ async function* runStepWithVerification(
       yield { kind: "step-start", step, totalSteps, modelTier };
     }
 
+    recordAttempt();
     const preSnapshots = capturePreSnapshot(step, context.projectRoot);
 
     const result = yield* streamStep(
@@ -290,20 +372,55 @@ async function* runStepWithVerification(
       yield { kind: "history-updated", history: result.conversationHistory };
     }
 
-    const verification = await verifyStep(step, result, context.projectRoot, preSnapshots, model);
+    const verification = await verifyStep(
+      step,
+      result,
+      context.projectRoot,
+      preSnapshots,
+      model,
+      context.autoVerify,
+    );
     outcome = { result, verification };
 
     const hardFindings = verification.findings.filter((f) => f.severity === "hard");
-    const canRetry = hardFindings.length > 0 && attempt < MAX_REPAIR_ATTEMPTS && !abortSignal?.aborted;
 
-    if (!canRetry) {
+    // Clean pass, or the user stopped the run. Either way there is nothing to
+    // recover from.
+    if (hardFindings.length === 0 || abortSignal?.aborted) {
       yield { kind: "step-verified", step, verification, modelTier: result.modelTier };
+      return outcome;
+    }
+
+    yield { kind: "step-verified", step, verification, modelTier: result.modelTier };
+
+    // Did this attempt fail the same way the last one did? Compared against
+    // THIS STEP's previous attempt, not the task's whole failure history: a
+    // plan is one task, so step 3 failing like step 1 is two separate
+    // problems that happen to resemble each other, and comparing globally
+    // would abandon step 3 before it had tried once.
+    const signature = failureSignature(verification.findings);
+    recordFailureSignature(signature);
+    const repeated = signature === lastSignature;
+    lastSignature = signature;
+
+    const decision = repairDecision(attempt, repeated);
+    if (!decision.retry) {
+      yield {
+        kind: "recovery-exhausted",
+        step,
+        findings: hardFindings,
+        attempts: attempt + 1,
+        reason: decision.reason!,
+      };
+      getActiveJournal().note(
+        "recovery-exhausted",
+        `${decision.reason} after ${attempt + 1} attempt(s)`,
+      );
       return outcome;
     }
 
     // Report the attempt as failed before retrying, so the user sees WHY a
     // retry is happening rather than watching the step silently run twice.
-    yield { kind: "step-verified", step, verification, modelTier: result.modelTier };
     yield { kind: "step-retry", step, findings: hardFindings, attempt: attempt + 1 };
 
     repairContext = renderRepairContext(verification.findings);
@@ -404,6 +521,11 @@ async function* runBuildMode(
   // plan — files are written solely by the invocation that executes it.
   const turnId = randomUUID();
 
+  // Task state shares the turnId rather than minting a second identity, so
+  // what the agent knows and what the trace ledger recorded are joined by the
+  // key that is already on every FileEdit.
+  beginTask({ taskId: turnId, goal: userPrompt, route: "build" });
+
   // Execute, verify, and repair once if something actually broke.
   const { result: stepResult, verification } = yield* runStepWithVerification({
     step: syntheticStep,
@@ -428,6 +550,11 @@ async function* runBuildMode(
     yield { kind: "scope-hint", hint };
   }
 
+  // finishTask, NOT endTask. The record is what the UI persists into the
+  // session once the generator drains, so discarding it here would leave
+  // nothing to save; marking it finished stops it collecting a later chat
+  // turn's file reads. beginTask() replaces it wholesale next request.
+  finishTask();
   getActiveJournal().runEnd(true);
   yield { kind: "complete" };
 }
@@ -508,6 +635,13 @@ async function* runPlanMode(
   const sortedSteps = topologicalSort(steps);
   const totalSteps = sortedSteps.length;
 
+  // One task spans the WHOLE approved plan, not one step of it — the same
+  // scope as the turnId, so `/undo` and task state agree on what "this
+  // request" means. A file read in step 1 therefore still counts as observed
+  // in step 3, which is correct: nothing in between could have changed it
+  // without the harness seeing that too.
+  beginTask({ taskId: turnId, goal: userPrompt, route: "plan" });
+
   // Each step still gets a fresh prompt; this carries forward only what the
   // next step needs to avoid redoing earlier work. See StepDigest.
   const priorSteps: StepDigest[] = [];
@@ -563,6 +697,8 @@ async function* runPlanMode(
     });
   }
 
+  // Kept for the session save, but closed to further records — see runBuildMode.
+  finishTask();
   getActiveJournal().runEnd(true);
   yield { kind: "complete" };
 }

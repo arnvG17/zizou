@@ -64,6 +64,8 @@ import {
   type OrchestratorFlowState,
 } from "./orchestrator-flow.js";
 import { runOrchestrator, type OrchestratorEvent } from "../agent/orchestrator.js";
+import { autoVerifyEnabled } from "../agent/verification-plan.js";
+import { toPersisted as persistTaskState } from "../agent/task-state.js";
 import type { PlanStep, PlanRevision } from "../agent/types.js";
 
 const PROVIDERS: ProviderChoice[] = ["groq", "google", "openrouter", "anthropic", "openai", "ollama"];
@@ -1399,6 +1401,7 @@ export function Chat({ onChangeKeys, mode: initialMode = "auto", initialPrompt }
         maxSteps: agentConfig.maxSteps,
         temperature: agentConfig.temperature,
         maxOutputTokens: agentConfig.maxOutputTokens,
+        autoVerify: autoVerifyEnabled(),
       };
 
       // Mode comes from the flow state passed in, not from the render
@@ -1531,6 +1534,27 @@ export function Chat({ onChangeKeys, mode: initialMode = "auto", initialPrompt }
             setLog((l) => [
               ...l,
               { kind: "step-retry", stepIndex: event.step.index, reason, attempt: event.attempt },
+            ]);
+            break;
+          }
+
+          case "recovery-exhausted": {
+            // The loud one. A step that could not be repaired used to look
+            // exactly like an ordinary failed verification and scroll past
+            // with it; the whole point of surfacing this separately is that
+            // the user now has to decide something.
+            const reason = event.findings
+              .map((f) => f.detail?.split("\n")[0] ?? f.code)
+              .join("; ");
+            setLog((l) => [
+              ...l,
+              {
+                kind: "recovery-exhausted",
+                stepIndex: event.step.index,
+                reason,
+                attempts: event.attempts,
+                cause: event.reason,
+              },
             ]);
             break;
           }
@@ -1734,7 +1758,11 @@ export function Chat({ onChangeKeys, mode: initialMode = "auto", initialPrompt }
             isAwaitingPlanApproval: flowRef.current.isAwaitingPlanApproval,
             originalPrompt: flowRef.current.originalPrompt,
             completedStepIndices: flowRef.current.completedStepIndices,
-          }
+          },
+          // What this turn read, changed, ran and verified. Undefined for a
+          // route that did no work (chat, ask), which leaves the previous
+          // task's record in place rather than blanking it.
+          persistTaskState(),
         );
       } catch {}
     }
@@ -2330,6 +2358,34 @@ function LogLineInner({ entry }: { entry: LogEntry }) {
         <Text color="#D9A441">↻</Text>
         <Text color="#D9A441" bold>Retrying step {entry.stepIndex + 1}</Text>
         <Text color="gray">{entry.reason}</Text>
+      </Box>
+    );
+  }
+
+  if (entry.kind === "recovery-exhausted") {
+    // Red and boxed, unlike the amber retry line: a retry is the agent still
+    // working, this is the agent stopping. Saying WHICH kind of stuck matters
+    // — "failed the same way twice" tells the user a third attempt is
+    // pointless, which is the one thing they would otherwise try first.
+    const because =
+      entry.cause === "no-progress"
+        ? `attempt ${entry.attempts} failed in exactly the same way as the one before it`
+        : `no attempts left after ${entry.attempts}`;
+
+    return (
+      <Box marginBottom={1} flexDirection="column">
+        <Box flexDirection="row" gap={1}>
+          <Text color="red">✗</Text>
+          <Text color="red" bold>
+            Step {entry.stepIndex + 1} could not be repaired
+          </Text>
+          <Text color="gray">— {because}</Text>
+        </Box>
+        {entry.reason ? (
+          <Box marginLeft={2}>
+            <Text color="gray">{entry.reason}</Text>
+          </Box>
+        ) : null}
       </Box>
     );
   }

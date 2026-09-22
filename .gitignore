@@ -46,4 +46,13 @@ evals/.artifacts/
 # The scenarios and the generator ARE committed — they are the source. The
 # manifest is committed too, for the same reason eval reports are: a claim
 # about what the dataset contains should be reviewable in a diff.
-evals/sft/data/*.jsonl
+
+# CSV exports: inspection views of the same data, rebuilt by `bun run sft:csv`.
+# summary.csv is small and reviewable in a diff, so it is NOT ignored — the
+# other two are ~1MB of derived rows.
+evals/sft/data/records.csv
+evals/sft/data/calls.csv
+ 
+
+# Colab upload bundle, rebuilt on demand (see training/README.md).
+zizou-sft-colab.zip

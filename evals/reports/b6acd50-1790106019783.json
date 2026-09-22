@@ -1,0 +1,102 @@
+{
+  "reports": [
+    {
+      "startedAt": "2026-09-22T19:39:55.752Z",
+      "finishedAt": "2026-09-22T19:40:19.718Z",
+      "gitSha": "b6acd50",
+      "zizouVersion": "1.3.2",
+      "cell": {
+        "provider": "openai",
+        "effort": "balanced",
+        "modelId": "gpt-5-mini"
+      },
+      "tasks": [
+        {
+          "id": "build-fix-off-by-one",
+          "intent": "Find and fix an off-by-one bug in existing code without collateral damage.",
+          "runs": [
+            {
+              "runIndex": 0,
+              "passed": false,
+              "assertions": [
+                {
+                  "name": "exits 0: node test.js",
+                  "passed": false,
+                  "detail": "exit 1. output:\nfile:///C:/Users/Arnv/ZIZOUv1/evals/.artifacts/openai-balanced--build-fix-off-by-one--run1-1790105995753/workspace/test.js:1\r\nconst assert = require('assert');\r\n               ^\r\n\r\nReferenceError: require is not defined in ES module scope, you can use import instead\r\nThis file is being treated as an ES module because it has a '.js' file extension and 'C:\\Users\\Arnv\\ZIZOUv1\\package.json' contains \"type\": \"module\". To treat it as a CommonJS script, rename it to use the '.cjs' file extension.\r\n    at file:///C:/Users/Arnv/ZIZOUv1/evals/.artifacts/openai-balanced--build-fix-off-by-one--run1-1790105995753/workspace/test.js:1:16\r\n    at ModuleJob.run (node:internal/modules/esm/module_job:345:25)\r\n    at async onImport.tracePromise.__proto__ (node:internal/modules/esm/loader:651:26)\r\n    at async asyncRunEntryPointWithESMLoader (node:internal/modules/run_main:117:5)\r\n\r\nNode.js v22.19.0\r\n"
+                },
+                {
+                  "name": "lacks \"numbers.length - 1\": calc.js",
+                  "passed": true,
+                  "detail": "correctly absent"
+                },
+                {
+                  "name": "contains \"sum([1, 2, 3]), 6\": test.js",
+                  "passed": true,
+                  "detail": "present"
+                },
+                {
+                  "name": "touched nothing but: calc.js",
+                  "passed": true,
+                  "detail": "no collateral changes"
+                },
+                {
+                  "name": "no failed tool calls",
+                  "passed": true,
+                  "detail": "0 of 4 tool calls failed",
+                  "advisory": true
+                }
+              ],
+              "failureCategory": "assertion",
+              "failureDetail": "exits 0: node test.js: exit 1. output:\nfile:///C:/Users/Arnv/ZIZOUv1/evals/.artifacts/openai-balanced--build-fix-off-by-one--run1-1790105995753/workspace/test.js:1\r\nconst assert = require('assert');\r\n               ^\r\n\r\nReferenceError: require is not defined in ES module scope, you can use import instead\r\nThis file is being treated as an ES module because it has a '.js' file extension and 'C:\\Users\\Arnv\\ZIZOUv1\\package.json' contains \"type\": \"module\". To treat it as a CommonJS script, rename it to use the '.cjs' file extension.\r\n    at file:///C:/Users/Arnv/ZIZOUv1/evals/.artifacts/openai-balanced--build-fix-off-by-one--run1-1790105995753/workspace/test.js:1:16\r\n    at ModuleJob.run (node:internal/modules/esm/module_job:345:25)\r\n    at async onImport.tracePromise.__proto__ (node:internal/modules/esm/loader:651:26)\r\n    at async asyncRunEntryPointWithESMLoader (node:internal/modules/run_main:117:5)\r\n\r\nNode.js v22.19.0\r\n",
+              "totals": {
+                "durationMs": 23878,
+                "llmCalls": 0,
+                "toolCalls": 4,
+                "toolFailures": 0,
+                "fallbackParses": 0,
+                "duplicatesBlocked": 0,
+                "filesCreated": 0,
+                "filesModified": 1,
+                "filesDeleted": 0,
+                "linesAdded": 1,
+                "linesRemoved": 1,
+                "usage": {
+                  "inputTokens": 0,
+                  "outputTokens": 0,
+                  "cachedInputTokens": 0,
+                  "reasoningTokens": 0
+                },
+                "filesTouched": [
+                  "calc.js"
+                ]
+              },
+              "costUsd": 0.001209,
+              "journalPath": "C:\\Users\\Arnv\\ZIZOUv1\\evals\\.artifacts\\openai-balanced--build-fix-off-by-one--run1-1790105995753\\openai-balanced--build-fix-off-by-one--run1-1790105995753.log",
+              "workspaceDir": "C:\\Users\\Arnv\\ZIZOUv1\\evals\\.artifacts\\openai-balanced--build-fix-off-by-one--run1-1790105995753\\workspace"
+            }
+          ],
+          "passRate": 0
+        }
+      ],
+      "integrityOk": true
+    }
+  ],
+  "summaries": [
+    {
+      "cell": {
+        "provider": "openai",
+        "effort": "balanced",
+        "modelId": "gpt-5-mini"
+      },
+      "passRate": 0,
+      "tasksPassed": 0,
+      "tasksTotal": 1,
+      "avgToolCalls": 4,
+      "avgTokens": 0,
+      "avgDurationMs": 23878,
+      "avgCostUsd": 0.001209,
+      "fallbackParses": 0,
+      "toolFailures": 0
+    }
+  ]
+}

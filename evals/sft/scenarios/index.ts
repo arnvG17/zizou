@@ -13,6 +13,7 @@ import { searchThenActScenarios } from "./search-then-act.js";
 import { multiFileScenarios } from "./multi-file.js";
 import { recoveryScenarios } from "./recovery.js";
 import { shellProcessScenarios, fsOpsScenarios } from "./shell-fs.js";
+import { processLayerScenarios } from "./process-layer.js";
 import { blockedScenarios, noToolChatScenarios } from "./prose.js";
 
 export function allScenarios(): Scenario[] {
@@ -23,6 +24,7 @@ export function allScenarios(): Scenario[] {
     ...multiFileScenarios(),
     ...recoveryScenarios(),
     ...shellProcessScenarios(),
+    ...processLayerScenarios(),
     ...fsOpsScenarios(),
     ...blockedScenarios(),
     ...noToolChatScenarios(),

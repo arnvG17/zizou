@@ -74,6 +74,21 @@ const buildFixBug: GoldenTask = {
   tags: ["editing", "precision"],
   budget: { maxToolCalls: 12, maxDurationMs: 180_000 },
   fixture: {
+    // MAKES THE WORKSPACE HERMETIC, and without it this task cannot be passed
+    // by any agent. The workspace lives under evals/.artifacts/, inside this
+    // repo, and node walks UP for the nearest package.json — finding Zizou's
+    // own, which declares "type": "module". So a .js fixture using require()
+    // dies with "require is not defined in ES module scope" even after a
+    // perfect fix, and `commandSucceeds("node test.js")` fails on a correct
+    // answer.
+    //
+    // Worse than a false negative: the agent reads that error, concludes the
+    // module system is the bug, and converts calc.js to ESM — which is
+    // exactly the collateral damage this task exists to catch it doing, so it
+    // failed for a reason the harness manufactured.
+    //
+    // Any future fixture with CommonJS .js files needs the same line.
+    "package.json": `${JSON.stringify({ type: "commonjs" }, null, 2)}\n`,
     "calc.js": [
       "// Sums every number in the array.",
       "function sum(numbers) {",

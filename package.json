@@ -19,6 +19,7 @@
     "sft:build": "bun run evals/sft/build.ts",
     "sft:check": "bun run evals/sft/build.ts --dry-run",
     "sft:render": "bun run evals/sft/render.ts",
+    "sft:csv": "bun run evals/sft/export-csv.ts",
     "prepublishOnly": "npm run build"
   },
   "dependencies": {

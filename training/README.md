@@ -144,6 +144,29 @@ trained on.
 
 ---
 
+## The short version: one file
+
+Steps 3–5 below exist so you can see each stage. If you just want it to run:
+
+```python
+!python colab_run.py
+```
+
+That does environment checks → data prep → the render-parity gate → training →
+smoke test → GGUF export → copy to Drive, stopping with an explanation and the
+actual fix at the first stage that fails.
+
+```python
+!python colab_run.py --skip-train     # everything except the training loop, ~6 min
+!python colab_run.py --epochs 1 --max-seq-length 6144
+```
+
+`--skip-train` is worth running first: it proves the pipeline end to end
+without committing 40 minutes to it.
+
+The per-stage instructions below are still accurate, and are what to fall back
+to when a stage fails and you want to poke at it interactively.
+
 ## Step 4 — Train
 
 ```python
@@ -279,6 +302,7 @@ after `/model ollama zizou-executor`, compared against Step 0.
 
 | File | What it does |
 |---|---|
+| `colab_run.py` | **The whole pipeline in one command.** Fails fast with the fix at each stage. `--skip-train` verifies everything but the training loop. |
 | `render_utils.py` | **The one place a record becomes training text.** Shared by the next two so they cannot diverge — if they did, verification would pass while the data was wrong. |
 | `prepare_data.py` | JSONL → HF Dataset. Fails on truncation. |
 | `verify_render.py` | Diffs the HF rendering against Ollama's. **Gate — must pass.** |

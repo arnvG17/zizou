@@ -40,6 +40,8 @@ import { makeFinding, renderFinding } from "./types.js";
 import { getActiveJournal } from "./debug/index.js";
 import { getService, hasStartingServices, listServices, serviceLogTail } from "../tools/service-registry.js";
 import { execCommand } from "../tools/run-bash.js";
+import { deriveVerification, alreadyRan } from "./verification-plan.js";
+import { recordVerification } from "./task-state.js";
 
 // ─── File State Snapshot ─────────────────────────────────────────────────────
 
@@ -213,6 +215,19 @@ function inspectToolCalls(calls: ToolCall[]): Finding[] {
     const out = call.output as Record<string, unknown> | null | undefined;
     if (!out || typeof out !== "object") continue;
 
+    // A HARNESS REFUSAL IS NOT A FAILED CALL. When the task-state layer
+    // declines an edit because the file was never read, or has changed since,
+    // the expected next move is that the model reads it and edits again — and
+    // it usually does, within the same step.
+    //
+    // Counting the refusal would then make a step that recovered perfectly
+    // well fail verification on a hard tool-error, which costs a whole repair
+    // attempt to rediscover that nothing is wrong. The step is judged on
+    // where it ended up, not on a guardrail it bounced off along the way. If
+    // the model never recovers, the edit simply did not happen, and the
+    // checks below catch that on the evidence rather than on this.
+    if (out.harnessRefusal === true) continue;
+
     const failed = out.success === false || out.error !== undefined;
 
     switch (call.toolName) {
@@ -342,6 +357,73 @@ async function runDeclaredCheck(step: PlanStep, result: StepResult, cwd: string)
   return [];
 }
 
+// ─── Derived checks ──────────────────────────────────────────────────────────
+
+/**
+ * Runs a check the step never declared, chosen from what it actually changed.
+ *
+ * THE GAP THIS CLOSES: only a plan step carries a `check`. Build mode
+ * synthesises its step from the raw user prompt with no check at all, so
+ * runDeclaredCheck above did nothing on the route that runs most often — a
+ * TypeScript change could touch three files, finish green, and never be
+ * compiled. "Never claim success without verification" was a prompt rule with
+ * no way to notice when it was ignored.
+ *
+ * Proportional by construction: deriveVerification reads the project's real
+ * scripts and returns null unless the changed files earn a check that the
+ * project actually declares. A README edit runs nothing. A step that already
+ * ran the check itself does not run it twice.
+ *
+ * A failure lands as a HARD command-failed finding, which is the existing
+ * currency — it flows into the same repair loop and the same
+ * renderRepairContext with no new plumbing.
+ */
+async function runDerivedCheck(
+  step: PlanStep,
+  result: StepResult,
+  cwd: string,
+  autoVerify: boolean,
+): Promise<Finding[]> {
+  if (!autoVerify) return [];
+  if (result.claimedFiles.length === 0) return [];
+
+  // A declared command check is the step's own statement of what success
+  // means. Deriving a second one on top of it would be the harness
+  // second-guessing the plan the user approved.
+  if (step.check?.kind === "command") return [];
+
+  const derived = deriveVerification(result.claimedFiles, cwd);
+  if (!derived) return [];
+
+  const ranCommands = result.toolCallsMade
+    .filter((c) => ["runBash", "terminal"].includes(c.toolName))
+    .map((c) => String((c.input as any)?.command ?? ""));
+
+  if (alreadyRan(derived, ranCommands)) return [];
+
+  const res = await execCommand(derived.command, { root: cwd });
+
+  recordVerification({
+    command: derived.command,
+    kind: derived.kind,
+    passed: res.success,
+    ...(res.success ? {} : { detail: `exit ${res.exitCode}` }),
+  });
+
+  if (res.success) return [];
+
+  return [
+    makeFinding(
+      "command-failed",
+      undefined,
+      `\`${derived.command}\` exited ${res.exitCode}\n` +
+        `(run automatically because this step changed code and declared no check of its own)` +
+        `${res.stderr ? `\n${clip(res.stderr)}` : ""}` +
+        `${!res.stderr && res.stdout ? `\n${clip(res.stdout)}` : ""}`,
+    ),
+  ];
+}
+
 // ─── Verification ────────────────────────────────────────────────────────────
 
 export async function verifyStep(
@@ -350,6 +432,7 @@ export async function verifyStep(
   cwd: string,
   preSnapshots: Map<string, FileSnapshot>,
   model?: LanguageModel,
+  autoVerify: boolean = true,
 ): Promise<VerificationResult> {
   const findings: Finding[] = [];
   let verboseFeedback: string | undefined = undefined;
@@ -416,6 +499,9 @@ export async function verifyStep(
 
   // ── Check 5: the step's own declared success condition ──────────────────
   findings.push(...(await runDeclaredCheck(step, result, cwd)));
+
+  // ── Check 5.5: a check derived from what actually changed ───────────────
+  findings.push(...(await runDerivedCheck(step, result, cwd, autoVerify)));
 
   // ── Check 6: LLM semantic review — ADVISORY ONLY ────────────────────────
   if (model && result.claimedFiles.length > 0) {

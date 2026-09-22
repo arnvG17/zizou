@@ -329,6 +329,18 @@ export interface ProjectContext {
    * Undefined = use the model provider's default.
    */
   maxOutputTokens?: number;
+
+  /**
+   * Whether the verifier may derive and run a check the step never declared.
+   *
+   * On by default, because a step that changed code and ran nothing is the
+   * case this exists for. Off is an escape hatch for a project where the
+   * relevant script is slow enough that paying it on every step is worse than
+   * the risk it covers — set ZIZOU_NO_AUTO_VERIFY=1. It does not disable
+   * verification, only the DERIVED part: a step's own declared check still
+   * runs, and so does every other check in verifyStep.
+   */
+  autoVerify?: boolean;
 }
 
 // ─── Scope hint ─────────────────────────────────────────────────────────────

@@ -76,6 +76,13 @@ export interface ToolCallRecord {
   input: unknown;
   output: unknown;
   ok: boolean;
+  /**
+   * True when the harness declined the call rather than the tool failing it —
+   * an edit to a file that was never read, or that changed since it was.
+   * Recorded so the log shows it, excluded from toolFailures because nothing
+   * went wrong.
+   */
+  harnessRefusal?: boolean;
   durationMs: number;
   /** True when the call came from the pseudo-call text parser, not the API. */
   viaFallback: boolean;
@@ -433,7 +440,9 @@ export class RunJournal {
   /** Records a completed, already-paired tool call plus its observed diffs. */
   toolCall(rec: ToolCallRecord): void {
     this.totals.toolCalls++;
-    if (!rec.ok) this.totals.toolFailures++;
+    // A precondition refusal is recorded (ok is false, and the log shows it)
+    // but is not counted as a failure — see the wrapTools note on isRefusal.
+    if (!rec.ok && !rec.harnessRefusal) this.totals.toolFailures++;
     if (rec.viaFallback) this.totals.fallbackParses++;
 
     for (const d of rec.fileChanges) {
@@ -611,6 +620,16 @@ export class RunJournal {
             if (diff.kind !== "unchanged") fileChanges.push(diff);
           }
 
+          // A HARNESS REFUSAL IS NOT A TOOL FAILURE. When the task-state layer
+          // declines an edit because the file was never read, or has changed
+          // since, nothing malfunctioned — a guarantee held. Counting it as a
+          // failure would inflate toolFailures in the totals and fail the
+          // `noToolFailures` eval assertion on runs that behaved exactly as
+          // designed. The call is still RECORDED below with ok:false, so the
+          // log shows the refusal; it just does not read as a defect.
+          const isRefusal =
+            !!output && typeof output === "object" && (output as any).harnessRefusal === true;
+
           const ok =
             !threw &&
             !(output && typeof output === "object" && (output as any).success === false) &&
@@ -622,6 +641,7 @@ export class RunJournal {
             input: args,
             output,
             ok,
+            harnessRefusal: isRefusal,
             durationMs,
             viaFallback: false,
             fileChanges,

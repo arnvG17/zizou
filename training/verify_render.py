@@ -42,14 +42,14 @@ from render_utils import (
 )
 
 
-def main() -> int:
-    ap = argparse.ArgumentParser()
-    ap.add_argument("--model", default="unsloth/Qwen3-4B-Instruct-2507")
-    ap.add_argument("--reference", default="./reference_renders.json")
-    ap.add_argument("--show", type=int, default=2, help="how many diffs to print in full")
-    args = ap.parse_args()
+def verify(model: str, reference: str, show: int = 2) -> int:
+    """
+    Runs the comparison. Returns a process-style exit code: 0 = pass.
 
-    ref_path = Path(args.reference)
+    Exposed as a function so colab_run.py can call it in-process and abort the
+    pipeline on failure, rather than shelling out and parsing stdout.
+    """
+    ref_path = Path(reference)
     if not ref_path.exists():
         print(
             f"No reference at {ref_path}.\n"
@@ -60,10 +60,12 @@ def main() -> int:
         return 2
 
     records = json.loads(ref_path.read_text(encoding="utf-8"))
-    tokenizer = AutoTokenizer.from_pretrained(args.model)
+    tokenizer = AutoTokenizer.from_pretrained(model)
+
+    args = argparse.Namespace(show=show)
 
     print(f"Comparing {len(records)} records: HuggingFace template vs Ollama template")
-    print(f"Model: {args.model}\n")
+    print(f"Model: {model}\n")
 
     exact, span_only, mismatched = 0, 0, []
 
@@ -129,6 +131,15 @@ def main() -> int:
         "  - Do not 'fix' this by loosening normalize()."
     )
     return 1
+
+
+def main() -> int:
+    ap = argparse.ArgumentParser()
+    ap.add_argument("--model", default="unsloth/Qwen3-4B-Instruct-2507")
+    ap.add_argument("--reference", default="./reference_renders.json")
+    ap.add_argument("--show", type=int, default=2, help="how many diffs to print in full")
+    args = ap.parse_args()
+    return verify(args.model, args.reference, args.show)
 
 
 if __name__ == "__main__":

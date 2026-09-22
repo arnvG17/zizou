@@ -49,7 +49,12 @@ test("the planner is not told how to write or edit files", async () => {
   const planner = await buildSystemPrompt(workspace, "planner");
 
   expect(planner).toContain("READ-ONLY");
-  expect(planner).not.toContain("editFile recovery strategy");
+  // Anchored to a section that exists in the executor prompt, so this stays a
+  // real check. It previously asserted the absence of "editFile recovery
+  // strategy", a string no prompt contains any more — which passes for the
+  // wrong reason and would keep passing if the planner were handed the
+  // executor's rules wholesale.
+  expect(planner).not.toContain("EXECUTION — pick the right tool");
   expect(planner).toContain("grep");
 });
 
@@ -57,7 +62,23 @@ test("the executor is told how to write and edit files", async () => {
   const executor = await buildSystemPrompt(workspace, "executor");
 
   expect(executor).toContain("writeFile");
-  expect(executor).toContain("editFile recovery strategy");
+  expect(executor).toContain("editFile");
+});
+
+test("the executor prompt does not restate what the harness now enforces", async () => {
+  // editFile's recovery mechanics — near_line, and the two-strike fallback to
+  // writeFile — used to be spelled out here, thousands of tokens before they
+  // could matter. They live in the tool's own description and its structured
+  // error codes now, and the read-before-edit rule is enforced outright by
+  // agent/observe-tools.ts rather than asked for.
+  //
+  // This is pinned because the failure mode is silent: the rules would be
+  // re-added "for safety", and nothing would fail — the prompt would just get
+  // longer and say each thing twice.
+  const executor = await buildSystemPrompt(workspace, "executor");
+
+  expect(executor).not.toContain("near_line");
+  expect(executor).not.toContain("editFile recovery strategy");
 });
 
 test("ZIZOU.md conventions reach the prompt but its settings block does not", async () => {
@@ -188,8 +209,14 @@ test("project conventions land after the placement rules that defer to them", as
 });
 
 test("the executor is told to look for an existing file before creating one", async () => {
+  // The rule outlived its heading. It used to be a block called "EDIT, DON'T
+  // RECREATE"; asserting on the substance rather than the banner means a
+  // rewrite of the prompt cannot quietly drop the rule while still passing,
+  // and cannot fail merely for rephrasing it.
   const prompt = await buildSystemPrompt(workspace, "executor");
-  expect(prompt).toContain("EDIT, DON'T RECREATE");
+
+  expect(prompt).toContain("Before creating a file");
+  expect(prompt).toContain("already does this job");
 });
 
 test("the ask role is told to open files rather than paste them", async () => {

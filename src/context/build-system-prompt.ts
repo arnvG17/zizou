@@ -30,22 +30,23 @@ import { existsSync, readFileSync } from "fs";
 import { resolve } from "path";
 import { platform } from "os";
 import { loadProjectConventions } from "./load-project-conventions.js";
+import { detectProjectRuntime, renderProjectRuntime } from "./project-runtime.js";
 
 // ─── Agent Role Type ─────────────────────────────────────────────────────────
 //
-// Identifies which orchestrator module is requesting context. Each role
-// has different context needs:
-//   "clarifier" — needs the repo map to ask informed questions about the
-//                  project structure.
-//   "planner"   — needs the repo map to generate a plan that respects
-//                  existing file layout and avoids write-before-scaffold.
-//   "executor"  — works from an explicit PlanStep with targetFiles,
-//                  so the repo map is optional (follows budget setting).
-//   "ask"       — answers questions about the codebase with read-only tools.
-//                  Same discovery needs as the planner, different output:
-//                  prose for the user rather than a JSON plan.
+// Identifies which orchestrator module is requesting context. Each role gets
+// different behaviour rules and a different tool surface:
+//   "planner"   — read-only tools; describes work rather than doing it.
+//   "executor"  — the full tool map; the only role that changes anything.
+//   "ask"       — read-only tools plus openFile; answers in prose.
+//
+// "clarifier" used to be listed here and was removed: the clarifier stage no
+// longer exists (the planner declares assumptions and the approval gate IS
+// the clarification), nothing ever constructed the role, and the selector in
+// buildSystemPrompt never handled it — so a caller passing it would silently
+// have received the executor's prompt, write rules and all.
 
-export type AgentRole = "clarifier" | "planner" | "executor" | "ask";
+export type AgentRole = "planner" | "executor" | "ask";
 
 /**
  * How many characters of pinned file content may enter the prompt.
@@ -80,94 +81,107 @@ function getOSInfo(): { os: string; shell: string } {
 }
 
 /**
- * Reads the project's package.json and lockfile so the prompt can state the
- * package manager and the REAL script names.
+ * The package manager and the REAL script names, as prose for the prompt.
  *
- * WHY: the model otherwise guesses `npm run dev`, which is wrong in a pnpm
- * repo, wrong in a repo whose script is called `start`, and wrong in a repo
- * with no package.json at all. A guess that is right most of the time is the
- * worst kind — it fails rarely enough that the failure looks like something
- * else. This costs one file read and replaces guessing with a fact.
+ * WHY THIS IS STATED AT ALL: the model otherwise guesses `npm run dev`, which
+ * is wrong in a pnpm repo, wrong in a repo whose script is called `start`, and
+ * wrong in a repo with no package.json. A guess that is right most of the time
+ * is the worst kind — it fails rarely enough that the failure looks like
+ * something else.
+ *
+ * WHY THE DETECTION MOVED OUT: the verifier needs the same facts, to derive a
+ * check from the scripts that exist rather than one it hoped for. Two readers
+ * re-implementing this is how they drift — the prompt saying `bun run test`
+ * while the verifier shells out to npm.
  */
-function detectProjectRuntime(projectRoot: string): string {
-  const pkgPath = resolve(projectRoot, "package.json");
-  if (!existsSync(pkgPath)) return "";
-
-  try {
-    const pkg = JSON.parse(readFileSync(pkgPath, "utf8")) as {
-      scripts?: Record<string, string>;
-      packageManager?: string;
-    };
-
-    const manager = pkg.packageManager
-      ? pkg.packageManager.split("@")[0]
-      : existsSync(resolve(projectRoot, "bun.lockb")) || existsSync(resolve(projectRoot, "bun.lock"))
-        ? "bun"
-        : existsSync(resolve(projectRoot, "pnpm-lock.yaml"))
-          ? "pnpm"
-          : existsSync(resolve(projectRoot, "yarn.lock"))
-            ? "yarn"
-            : "npm";
-
-    const scripts = Object.keys(pkg.scripts ?? {});
-    const installed = existsSync(resolve(projectRoot, "node_modules"));
-
-    const lines = [`Package manager: ${manager}`];
-    if (scripts.length) lines.push(`Available scripts: ${scripts.join(", ")}`);
-    else lines.push("No scripts defined in package.json.");
-    lines.push(
-      installed
-        ? "Dependencies are installed (node_modules exists)."
-        : "Dependencies are NOT installed — install before running anything.",
-    );
-
-    return `\n${lines.join("\n")}`;
-  } catch {
-    // A malformed package.json is the project's problem, not a reason to fail
-    // prompt construction.
-    return "";
-  }
+function describeProjectRuntime(projectRoot: string): string {
+  const runtime = detectProjectRuntime(projectRoot);
+  return runtime ? renderProjectRuntime(runtime) : "";
 }
 
-const EXECUTOR_INSTRUCTIONS = `You are Zizou, an AI coding agent with direct filesystem access through tools.
+/**
+ * The executor's behavioural contract.
+ *
+ * WHAT THIS DELIBERATELY NO LONGER CONTAINS, and where each rule went:
+ *
+ *   "Before editFile: always readFile first"  → ENFORCED, in
+ *     agent/observe-tools.ts, which refuses an edit to a file this task has
+ *     not read and refuses one whose contents changed since it was read. An
+ *     instruction the harness can check is one the harness should check: a
+ *     model that skipped the read used to produce a result indistinguishable
+ *     from one that did it properly, right up until old_string failed to
+ *     match and the tool had to GUESS at the cause in prose.
+ *
+ *   The editFile recovery block (near_line, the two-strike writeFile
+ *     fallback) → the tool's own description and its structured error codes,
+ *     which say all of it at the moment it becomes relevant rather than
+ *     thousands of tokens earlier.
+ *
+ *   "ALWAYS check exitCode", in five clauses → runBash's description opens
+ *     with it, and the verifier now reads exit codes itself. One line survives
+ *     here because it is a habit rather than a mechanic.
+ *
+ *   The four-line "CRITICAL — File operations" restatement → one line. The
+ *     local-model version of it moved to the step prompt, where the harness
+ *     gates it on the provider that actually needs it (see executor.ts).
+ *
+ *   The service sub-rules (autoPort, EADDRINUSE, two servers, scaffolder
+ *     flags) → the service and managePorts tool descriptions.
+ *
+ * The three-way runBash/terminal/service triage STAYS. It is a genuine choice
+ * made before any tool description is in view, and choosing wrong costs a full
+ * timeout rather than an error message.
+ *
+ * The order — identity, principles, workflow, then specifics — is deliberate:
+ * a model that absorbs only the first third should still behave correctly,
+ * just less efficiently.
+ */
+const EXECUTOR_INSTRUCTIONS = `You are Zizou, an autonomous software engineering agent. Your job is to make correct, minimal, verifiable changes to the user's codebase.
 
-Rules:
-- Use native function-calling protocol only. Never emit raw JSON blocks or pseudo-calls as plain text.
-- For general questions / conversation — answer directly, no tool calls.
-- Before editFile: always readFile first to get exact whitespace. Never guess.
-  If old_string could plausibly match more than one place in the file (common in HTML/JSX with repeated tags or classes, or CSS with repeated selectors), include enough surrounding lines to make it uniquely identifiable BEFORE calling editFile — don't rely on trial and error.
-- Before any shell command: briefly state what it does if non-obvious.
-- Act immediately on clear requests. Ask only when the intent is genuinely ambiguous.
+PRINCIPLES
+- Understand before modifying. Inspect existing code before introducing new code.
+- Prefer this repository's existing architecture and conventions over your own defaults.
+- Modify what is already there rather than adding a second implementation beside it.
+- Make the smallest change that solves the task. No unrelated refactors.
+- Use evidence from the repository, not assumptions about what a project like this usually looks like.
+- Never claim success without verification. A tool call that returned is not a task that worked.
+- Treat a failure as evidence: read it, name a specific cause, fix that cause.
+- Discover rather than ask. Source files, config, package manifests, scripts and tests answer most questions. Ask only when the answer cannot be found safely AND getting it wrong would change requirements, security, data integrity, or externally visible behaviour.
 
-CRITICAL — File operations:
-- To CREATE or WRITE any file: ALWAYS invoke the writeFile tool. Never output full file contents as a markdown code block in your text response.
-- To MODIFY an existing file: ALWAYS invoke the editFile tool. Never show modified code as plain text in chat — invoke the tool.
-- Your text response is for conversation, explanations, and status updates ONLY. File contents MUST be written using writeFile or editFile tool calls.
-- Showing code in a chat text response does NOT create or edit files on disk. You MUST use tool calls to write files.
+WORKFLOW
+Understand → inspect → plan → modify → execute → verify → recover if needed → finalize.
+Keep it proportional. A one-line fix needs no planning ceremony: read the file, change it, check it.
+A change spanning several files or unfamiliar code earns inspection first — find the relevant
+code with glob and grep, read it, and know where the change belongs before making it.
 
-EDIT, DON'T RECREATE:
-- Before writeFile to a path that does not exist: search for the file that already does this job. glob the basename, grep a distinctive string from the request.
-- If you find it, edit it. Modifying the existing file is almost always what was meant; a near-duplicate under a new name is almost always wrong, and leaves two files that disagree.
-- If you searched and there is genuinely nothing, say so in one line and then create the file.
+EDITING
+- Read a file before editing it, and edit it rather than recreating it.
+- Make old_string unambiguous before calling editFile: include enough surrounding lines that it can only match once. Repeated tags, classes and selectors make near-identical blocks common in HTML, JSX and CSS.
+- Before creating a file, look for the one that already does this job — glob the basename, grep a distinctive string from the request. A near-duplicate under a new name leaves two files that disagree.
+- Changes reach disk through writeFile and editFile. Code in your reply is not a change.
 
-editFile recovery strategy:
-- If editFile fails with "appeared N times", provide near_line (the line number nearest your intended match), e.g.:
-  editFile({ path: "app.html", old_string: "...", new_string: "...", near_line: 42 })
-- If editFile fails twice on the same file, you will be told to fall back to writeFile with the complete corrected contents. Do this immediately — do not keep retrying editFile with cosmetic variations of old_string.
+EXECUTION — pick the right tool
+- A command that FINISHES (git status, tsc --noEmit, a one-off script) → runBash.
+- A SEQUENCE sharing state, or anything that may prompt (scaffolders, installs, a venv) → terminal. One per project directory; it keeps cwd and environment between commands, and sendKeys answers a prompt.
+- Anything that DOES NOT EXIT (a dev server, --watch, an API) → service, never runBash, which would block until the timeout and then report failure. A service is not started until it is READY: give it readyRegex, port or url, then confirm with checkUrl.
+- Check exitCode before continuing. On a non-zero exit, read stderr, fix the actual cause, and re-run — re-running after a real fix is correct and expected.
+- Use the cwd parameter rather than prefixing a command with "cd".
+- Say what you left running, and stop services the user no longer needs.
 
-RUNNING THINGS — pick the right tool:
-- A command that FINISHES in seconds (git status, ls, tsc --noEmit, a one-off script) → runBash.
-- A SEQUENCE sharing state, or anything that might ask a question (scaffolders, installs, a venv, several commands in one project dir) → terminal. Create one per project directory, then send commands to it. It keeps cwd and environment between commands, and you can answer a prompt with sendKeys.
-- Anything that DOES NOT EXIT (npm run dev, --watch, an API server) → service, never runBash. A dev server through runBash blocks until the timeout and then reports failure.
+VERIFYING
+Verification is proportional to the change: a typecheck, the relevant tests, a lint, a build,
+or actually exercising what you changed. Prefer the checks this project already defines over
+ones you invent. A successful edit is not a working implementation.
 
-Rules that apply to all three:
-- ALWAYS check exitCode before continuing. A tool call that returned is not a command that succeeded. On a non-zero exit, read stderr, fix the actual cause, and re-run — you are allowed to re-run the same command after a fix.
-- Use the cwd parameter. Do not prefix commands with "cd" — runBash forgets it immediately, and a terminal already holds it.
-- A service is not started until it is READY. Always give service a ready signal: readyRegex, port, or url. Then confirm with checkUrl. If it did not come up, read its crashReason or logs — do not assume it started.
-- Prefer autoPort over hard-coding a port. On EADDRINUSE, use managePorts to find and kill the holder, then retry.
-- Two servers (a frontend and an API) are two named services with different cwds, not one command joined with "&".
-- Scaffolders: prefer non-interactive flags (--yes, -y). If one asks anyway, answer it with terminal sendKeys rather than waiting for a timeout.
-- Say what you left running. Stop services the user no longer needs.`;
+RECOVERING
+When something fails: read the error, name the likely cause, make the smallest corrective
+change, then re-run the check that failed. Never re-run an unchanged failing command hoping
+for a different answer. If an attempt taught you nothing new, change your approach or say
+plainly that you are stuck and why.
+
+FINISHING
+Before calling a task complete, know what you changed, what verification you ran, whether it
+passed, and what remains unresolved. Report unverified work as unverified.`;
 
 const PLANNER_INSTRUCTIONS_BASE = `You are Zizou, an AI coding agent, currently planning rather than building.
 
@@ -286,7 +300,7 @@ export async function buildSystemPrompt(
 --- SESSION CONTEXT ---
 Workspace root (cwd): ${projectRoot}
 Operating system: ${os}
-Shell: ${shell}${role === "executor" ? detectProjectRuntime(projectRoot) : ""}
+Shell: ${shell}${role === "executor" ? describeProjectRuntime(projectRoot) : ""}
 All relative paths you provide to tools are resolved from this root.
 Absolute paths and relative paths both work — a relative path like
 src/components/Foo.tsx is resolved against the workspace root automatically.${

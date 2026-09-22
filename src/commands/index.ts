@@ -137,6 +137,14 @@ export type LogEntry =
   | { kind: "step-progress"; stepIndex: number; totalSteps: number; description: string; modelTier?: "hosted" | "local" }
   | { kind: "verification"; stepIndex: number; verified: boolean; findings: Finding[]; mismatches: string[]; verboseFeedback?: string; modelTier?: "hosted" | "local" | undefined }
   | { kind: "step-retry"; stepIndex: number; reason: string; attempt: number }
+  | {
+      kind: "recovery-exhausted";
+      stepIndex: number;
+      reason: string;
+      attempts: number;
+      /** "no-progress" when a retry failed identically; else the budget ran out. */
+      cause: "no-progress" | "attempts-exhausted";
+    }
   | { kind: "scope-hint"; text: string }
   | { kind: "mode-switch"; mode: Mode; reason: string };
 
@@ -238,6 +246,18 @@ function coerceLogEntry(raw: unknown): LogEntry | null {
         stepIndex: typeof raw.stepIndex === "number" ? raw.stepIndex : 0,
         reason: str(raw.reason),
         attempt: typeof raw.attempt === "number" ? raw.attempt : 1,
+      } as LogEntry;
+
+    case "recovery-exhausted":
+      return {
+        ...raw,
+        kind: "recovery-exhausted",
+        stepIndex: typeof raw.stepIndex === "number" ? raw.stepIndex : 0,
+        reason: str(raw.reason),
+        attempts: typeof raw.attempts === "number" ? raw.attempts : 1,
+        // Rendered by indexing a phrase table, so an unknown value here would
+        // be exactly the undefined-property crash this coercer exists to stop.
+        cause: raw.cause === "no-progress" ? "no-progress" : "attempts-exhausted",
       } as LogEntry;
 
     case "mode-switch":

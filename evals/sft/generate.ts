@@ -33,6 +33,7 @@ import { randomUUID } from "node:crypto";
 import { asSchema } from "ai";
 import { buildToolMap } from "../../src/tools/index.js";
 import { listServices, stopService } from "../../src/tools/service-registry.js";
+import { closeAllTerminals } from "../../src/tools/terminal-registry.js";
 import { buildSystemPrompt, clearPinnedFiles } from "../../src/context/build-system-prompt.js";
 import {
   WORKSPACE_PLACEHOLDER,
@@ -208,13 +209,31 @@ export function scrubPaths(value: string, workspace: string): string {
  * would erase the relationship the record exists to teach.
  */
 export function scrubVolatile(json: string): string {
-  return json
-    // "pid":16060  →  "pid":1000
-    .replace(/"pid"\s*:\s*\d+/g, '"pid":1000')
-    // ISO timestamps, however they are escaped inside a JSON string.
-    .replace(/\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}\.\d{3}Z/g, "2025-01-01T00:00:00.000Z")
-    // Durations and uptimes reported in ms or s.
-    .replace(/"(uptime|durationMs|elapsedMs)"\s*:\s*\d+/g, '"$1":0');
+  return (
+    json
+      // "pid":16060  →  "pid":1000
+      .replace(/"pid"\s*:\s*\d+/g, '"pid":1000')
+      // ISO timestamps, however they are escaped inside a JSON string.
+      .replace(/\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}\.\d{3}Z/g, "2025-01-01T00:00:00.000Z")
+      // Durations and uptimes reported in ms or s.
+      .replace(/"(uptime|durationMs|elapsedMs)"\s*:\s*\d+/g, '"$1":0')
+      // An OS-allocated port from `service start --autoPort`, and the url
+      // built from it. Both normalize to the SAME fixed value, so a later
+      // checkUrl step whose argument came from this result still matches it
+      // afterwards — that correspondence is the whole lesson of those records.
+      //
+      // FIVE digits only, deliberately. Ephemeral ports are >= 10000, while
+      // the ports a scenario WRITES are 3000/5173/8080 — four digits. Scrub
+      // those and the managePorts records would claim a result for a port
+      // their own arguments never asked about.
+      .replace(/"port"\s*:\s*\d{5}/g, '"port":45678')
+      .replace(/(localhost|127\.0\.0\.1):\d{5}/g, "$1:45678")
+      // The same port again, in prose rather than as a field:
+      //   "readySignal":"port 52190 is listening"
+      // Easy to miss because the field-name pattern above cannot see it, and
+      // one unscrubbed occurrence is enough to make the dataset irreproducible.
+      .replace(/port \d{5}\b/g, "port 45678")
+  );
 }
 
 // ─── Generation ──────────────────────────────────────────────────────────────
@@ -237,18 +256,47 @@ export class ScenarioError extends Error {
  */
 export const TASK_ID_PLACEHOLDER = "{{taskId}}";
 
-/** Substitutes the most recent taskId into any placeholder in the args. */
+/**
+ * Placeholders for values a service only has once it is running.
+ *
+ * `service start --autoPort` asks the OS for a free port, so the url cannot
+ * be known when the scenario is written. A checkUrl step that followed would
+ * either hardcode a port that is probably in use by something else, or teach
+ * the model to invent one — when the lesson is precisely the opposite: read
+ * the url out of the result you just got.
+ */
+export const SERVICE_URL_PLACEHOLDER = "{{serviceUrl}}";
+export const SERVICE_PORT_PLACEHOLDER = "{{servicePort}}";
+
+/** What a scenario has learned so far from the results of its own steps. */
+interface RuntimeValues {
+  taskId: string | null;
+  serviceUrl: string | null;
+  servicePort: number | null;
+}
+
+/** Substitutes runtime-discovered values into a step's arguments. */
 function resolveArgs(
   args: Record<string, unknown>,
-  lastTaskId: string | null,
+  runtime: RuntimeValues,
 ): Record<string, unknown> {
   const out: Record<string, unknown> = {};
   for (const [key, value] of Object.entries(args)) {
     if (value === TASK_ID_PLACEHOLDER) {
-      if (!lastTaskId) {
+      if (!runtime.taskId) {
         throw new Error(`${TASK_ID_PLACEHOLDER} used before any runBackground step`);
       }
-      out[key] = lastTaskId;
+      out[key] = runtime.taskId;
+    } else if (value === SERVICE_URL_PLACEHOLDER) {
+      if (!runtime.serviceUrl) {
+        throw new Error(`${SERVICE_URL_PLACEHOLDER} used before a service reported a url`);
+      }
+      out[key] = runtime.serviceUrl;
+    } else if (value === SERVICE_PORT_PLACEHOLDER) {
+      if (runtime.servicePort === null) {
+        throw new Error(`${SERVICE_PORT_PLACEHOLDER} used before a service reported a port`);
+      }
+      out[key] = runtime.servicePort;
     } else {
       out[key] = value;
     }
@@ -262,7 +310,7 @@ async function executeStep(
   step: ScenarioStep,
   workspace: string,
   args: Record<string, unknown>,
-): Promise<string> {
+): Promise<{ recorded: string; raw: any }> {
   const toolInstance = (TOOLS as Record<string, any>)[step.tool];
   if (!toolInstance) {
     throw new ScenarioError(scenario.id, `unknown tool "${step.tool}"`);
@@ -288,7 +336,21 @@ async function executeStep(
     );
   }
 
-  return scrubVolatile(scrubPaths(JSON.stringify(result), workspace));
+  // Both forms are returned on purpose.
+  //
+  // `recorded` is what goes in the dataset: paths and volatile values
+  // normalized. `raw` is what the tool actually returned, and it is what a
+  // later step's placeholder must read — a service's real url carries the
+  // real OS-allocated port, while the recorded one has been rewritten to a
+  // fixed placeholder for determinism.
+  //
+  // Reading a placeholder from the RECORDED form was a real bug: checkUrl
+  // was handed http://localhost:45678 — the scrubbed port — and spent 30
+  // seconds failing to connect to a port nothing was ever listening on.
+  return {
+    recorded: scrubVolatile(scrubPaths(JSON.stringify(result), workspace)),
+    raw: result,
+  };
 }
 
 /**
@@ -320,11 +382,11 @@ export async function generateRecord(scenario: Scenario): Promise<TrainingRecord
     const messages: TrainingMessage[] = [{ role: "user", content: scenario.prompt }];
     const toolsUsed: string[] = [];
 
-    let lastTaskId: string | null = null;
+    const runtime: RuntimeValues = { taskId: null, serviceUrl: null, servicePort: null };
 
     for (const [i, step] of scenario.steps.entries()) {
       const callId = `call_${scenario.id}_${i}`;
-      const args = resolveArgs(step.args, lastTaskId);
+      const args = resolveArgs(step.args, runtime);
 
       const toolCall: ToolCallMessage = {
         id: callId,
@@ -333,7 +395,13 @@ export async function generateRecord(scenario: Scenario): Promise<TrainingRecord
           name: step.tool,
           // JSON string, matching the wire format and what the chat template
           // interpolates. An object here renders as [object Object].
-          arguments: JSON.stringify(args),
+          //
+          // Scrubbed with the SAME function as the results. An argument that
+          // came from a placeholder holds a runtime value — an ephemeral port,
+          // a localhost url — and if only the result were normalized, the two
+          // would disagree and the record would show the model calling
+          // checkUrl on a url the service never reported.
+          arguments: scrubVolatile(JSON.stringify(args)),
         },
       };
 
@@ -345,19 +413,24 @@ export async function generateRecord(scenario: Scenario): Promise<TrainingRecord
 
       // THE REAL CALL. Everything downstream depends on this being the tool's
       // actual output rather than a plausible-looking string.
-      const content = await executeStep(scenario, step, workspace, args);
-      messages.push({ role: "tool", tool_call_id: callId, name: step.tool, content });
+      const { recorded, raw } = await executeStep(scenario, step, workspace, args);
+      messages.push({ role: "tool", tool_call_id: callId, name: step.tool, content: recorded });
       toolsUsed.push(step.tool);
 
-      // Capture a spawned task's id so a later kill/logs step can use the
-      // real one.
-      if (step.tool === "runBackground") {
-        try {
-          const parsed = JSON.parse(content);
-          if (typeof parsed?.taskId === "string") lastTaskId = parsed.taskId;
-        } catch {
-          // Handled by the step's own success assertion.
-        }
+      // Capture what this step discovered, so a later step can use the REAL
+      // value rather than a hardcoded guess.
+      //
+      // From `raw`, NOT from `recorded`. The recorded form has had volatile
+      // values normalized — a service's url comes back as the fixed
+      // placeholder port — so resolving a placeholder from it hands the next
+      // step an address nothing is listening on. That cost 30 seconds per
+      // scenario of checkUrl retrying into a port that never existed.
+      if (step.tool === "runBackground" && typeof raw?.taskId === "string") {
+        runtime.taskId = raw.taskId;
+      }
+      if (step.tool === "service") {
+        if (typeof raw?.url === "string") runtime.serviceUrl = raw.url;
+        if (typeof raw?.port === "number") runtime.servicePort = raw.port;
       }
     }
 
@@ -399,6 +472,16 @@ export async function generateRecord(scenario: Scenario): Promise<TrainingRecord
       } catch {
         // Already gone, or never ours. Either way nothing to do.
       }
+    }
+
+    // Terminals are separate from services and leak the same way: each one
+    // holds an open shell process that outlives the scenario unless closed.
+    // A scenario that throws between `create` and `close` would leave one
+    // behind, and 1000 scenarios can leave a lot behind.
+    try {
+      closeAllTerminals();
+    } catch {
+      // Best effort, exactly like the services above.
     }
 
     process.chdir(originalCwd);

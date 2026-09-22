@@ -6,6 +6,7 @@
 
 import type { ModelMessage } from "ai";
 import type { Mode } from "../agent/mode.js";
+import type { PersistedTaskState } from "../agent/task-state.js";
 
 export interface SessionMeta {
   id: string;          // uuid
@@ -39,8 +40,9 @@ export interface TokenStats {
  * v2: mode gained "chat"; orchestrator flow moved behind a reducer.
  * v3: clarification state removed; plans carry assumptions instead.
  * v4: mode gained "auto" (now the default) and "ask".
+ * v5: taskState added — what the last request read, changed, ran and verified.
  */
-export const SESSION_SCHEMA_VERSION = 4;
+export const SESSION_SCHEMA_VERSION = 5;
 
 export interface SessionState {
   /** Absent on sessions written before versioning existed (treated as v1). */
@@ -61,6 +63,18 @@ export interface SessionState {
     originalPrompt?: string;
     completedStepIndices?: number[];  // Indices of steps that have been executed
   };
+  /**
+   * What the most recent request established: the files it read and changed,
+   * the commands it ran with their exit codes, what verification found, and
+   * how many recovery attempts it took.
+   *
+   * THIS IS THE CHECKPOINT'S OTHER HALF, and it is not git-based. The trace
+   * ledger already records what changed on disk, keyed by turnId. taskId here
+   * IS that turnId, so the two join without a new storage system: the ledger
+   * says which bytes moved, this says what the agent was trying to do, what it
+   * had verified, and what was still failing when it stopped.
+   */
+  taskState?: PersistedTaskState;
   pinnedFiles: string[];
   createdAt: string;
   lastActiveAt: string;

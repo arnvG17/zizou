@@ -1,0 +1,880 @@
+{
+  "reports": [
+    {
+      "startedAt": "2026-09-22T20:26:21.407Z",
+      "finishedAt": "2026-09-22T20:55:54.960Z",
+      "gitSha": "b6acd50",
+      "zizouVersion": "1.3.2",
+      "cell": {
+        "provider": "openai",
+        "effort": "balanced",
+        "modelId": "gpt-5-mini"
+      },
+      "tasks": [
+        {
+          "id": "build-create-file",
+          "intent": "Build mode can create one file end-to-end. Fails if tool-calling breaks.",
+          "runs": [
+            {
+              "runIndex": 0,
+              "passed": true,
+              "assertions": [
+                {
+                  "name": "exists: hello.txt",
+                  "passed": true,
+                  "detail": "found at C:\\Users\\Arnv\\ZIZOUv1\\evals\\.artifacts\\openai-balanced--build-create-file--run1-1790108781408\\workspace\\hello.txt"
+                },
+                {
+                  "name": "matches /Hello,?\\s*World!?/i: hello.txt",
+                  "passed": true,
+                  "detail": "pattern found in 13 bytes"
+                },
+                {
+                  "name": "touched: hello.txt",
+                  "passed": true,
+                  "detail": "all present. run touched: hello.txt"
+                },
+                {
+                  "name": "touched nothing but: hello.txt",
+                  "passed": true,
+                  "detail": "no collateral changes"
+                },
+                {
+                  "name": "native tool-calling only",
+                  "passed": true,
+                  "detail": "no pseudo-call parsing needed",
+                  "advisory": true
+                }
+              ],
+              "totals": {
+                "durationMs": 19545,
+                "llmCalls": 0,
+                "toolCalls": 3,
+                "toolFailures": 0,
+                "fallbackParses": 0,
+                "duplicatesBlocked": 0,
+                "filesCreated": 1,
+                "filesModified": 0,
+                "filesDeleted": 0,
+                "linesAdded": 1,
+                "linesRemoved": 0,
+                "usage": {
+                  "inputTokens": 0,
+                  "outputTokens": 0,
+                  "cachedInputTokens": 0,
+                  "reasoningTokens": 0
+                },
+                "filesTouched": [
+                  "hello.txt"
+                ]
+              },
+              "costUsd": 0.00093675,
+              "journalPath": "C:\\Users\\Arnv\\ZIZOUv1\\evals\\.artifacts\\openai-balanced--build-create-file--run1-1790108781408\\openai-balanced--build-create-file--run1-1790108781408.log"
+            }
+          ],
+          "passRate": 1
+        },
+        {
+          "id": "build-fix-off-by-one",
+          "intent": "Find and fix an off-by-one bug in existing code without collateral damage.",
+          "runs": [
+            {
+              "runIndex": 0,
+              "passed": true,
+              "assertions": [
+                {
+                  "name": "exits 0: node test.js",
+                  "passed": true,
+                  "detail": "exit 0"
+                },
+                {
+                  "name": "lacks \"numbers.length - 1\": calc.js",
+                  "passed": true,
+                  "detail": "correctly absent"
+                },
+                {
+                  "name": "contains \"sum([1, 2, 3]), 6\": test.js",
+                  "passed": true,
+                  "detail": "present"
+                },
+                {
+                  "name": "touched nothing but: calc.js",
+                  "passed": true,
+                  "detail": "no collateral changes"
+                },
+                {
+                  "name": "no failed tool calls",
+                  "passed": true,
+                  "detail": "0 of 4 tool calls failed",
+                  "advisory": true
+                }
+              ],
+              "totals": {
+                "durationMs": 22389,
+                "llmCalls": 0,
+                "toolCalls": 4,
+                "toolFailures": 0,
+                "fallbackParses": 0,
+                "duplicatesBlocked": 0,
+                "filesCreated": 0,
+                "filesModified": 1,
+                "filesDeleted": 0,
+                "linesAdded": 1,
+                "linesRemoved": 1,
+                "usage": {
+                  "inputTokens": 0,
+                  "outputTokens": 0,
+                  "cachedInputTokens": 0,
+                  "reasoningTokens": 0
+                },
+                "filesTouched": [
+                  "calc.js"
+                ]
+              },
+              "costUsd": 0.000779,
+              "journalPath": "C:\\Users\\Arnv\\ZIZOUv1\\evals\\.artifacts\\openai-balanced--build-fix-off-by-one--run1-1790108808986\\openai-balanced--build-fix-off-by-one--run1-1790108808986.log"
+            }
+          ],
+          "passRate": 1
+        },
+        {
+          "id": "plan-dependency-ordering",
+          "intent": "Plan mode decomposes a two-file feature and builds the dependency before its consumer.",
+          "runs": [
+            {
+              "runIndex": 0,
+              "passed": false,
+              "assertions": [
+                {
+                  "name": "plan has >= 2 steps",
+                  "passed": true,
+                  "detail": "plan had 3 steps"
+                },
+                {
+                  "name": "exists: utils.ts",
+                  "passed": false,
+                  "detail": "not found at C:\\Users\\Arnv\\ZIZOUv1\\evals\\.artifacts\\openai-balanced--plan-dependency-ordering--run1-1790108839476\\workspace\\utils.ts"
+                },
+                {
+                  "name": "matches /export\\s+(function|const)\\s+greet/: utils.ts",
+                  "passed": false,
+                  "detail": "cannot read utils.ts"
+                },
+                {
+                  "name": "exists: app.ts",
+                  "passed": false,
+                  "detail": "not found at C:\\Users\\Arnv\\ZIZOUv1\\evals\\.artifacts\\openai-balanced--plan-dependency-ordering--run1-1790108839476\\workspace\\app.ts"
+                },
+                {
+                  "name": "matches /import\\s+.*greet.*from\\s+['\"]\\.\\/utils/: app.ts",
+                  "passed": false,
+                  "detail": "cannot read app.ts"
+                },
+                {
+                  "name": "matches /greet\\s*\\(\\s*['\"]World['\"]\\s*\\)/: app.ts",
+                  "passed": false,
+                  "detail": "cannot read app.ts"
+                },
+                {
+                  "name": "touched: utils.ts, app.ts",
+                  "passed": false,
+                  "detail": "missing utils.ts, app.ts. run touched: src/app.ts, src/utils.ts"
+                },
+                {
+                  "name": "all steps verified",
+                  "passed": true,
+                  "detail": "6/6 verified",
+                  "advisory": true
+                }
+              ],
+              "failureCategory": "assertion",
+              "failureDetail": "exists: utils.ts: not found at C:\\Users\\Arnv\\ZIZOUv1\\evals\\.artifacts\\openai-balanced--plan-dependency-ordering--run1-1790108839476\\workspace\\utils.ts; matches /export\\s+(function|const)\\s+greet/: utils.ts: cannot read utils.ts; exists: app.ts: not found at C:\\Users\\Arnv\\ZIZOUv1\\evals\\.artifacts\\openai-balanced--plan-dependency-ordering--run1-1790108839476\\workspace\\app.ts; matches /import\\s+.*greet.*from\\s+['\"]\\.\\/utils/: app.ts: cannot read app.ts; matches /greet\\s*\\(\\s*['\"]World['\"]\\s*\\)/: app.ts: cannot read app.ts; touched: utils.ts, app.ts: missing utils.ts, app.ts. run touched: src/app.ts, src/utils.ts",
+              "totals": {
+                "durationMs": 67899,
+                "llmCalls": 0,
+                "toolCalls": 7,
+                "toolFailures": 0,
+                "fallbackParses": 0,
+                "duplicatesBlocked": 0,
+                "filesCreated": 2,
+                "filesModified": 0,
+                "filesDeleted": 0,
+                "linesAdded": 8,
+                "linesRemoved": 0,
+                "usage": {
+                  "inputTokens": 0,
+                  "outputTokens": 0,
+                  "cachedInputTokens": 0,
+                  "reasoningTokens": 0
+                },
+                "filesTouched": [
+                  "src/app.ts",
+                  "src/utils.ts"
+                ]
+              },
+              "costUsd": 0.005956,
+              "journalPath": "C:\\Users\\Arnv\\ZIZOUv1\\evals\\.artifacts\\openai-balanced--plan-dependency-ordering--run1-1790108839476\\openai-balanced--plan-dependency-ordering--run1-1790108839476.log",
+              "workspaceDir": "C:\\Users\\Arnv\\ZIZOUv1\\evals\\.artifacts\\openai-balanced--plan-dependency-ordering--run1-1790108839476\\workspace"
+            }
+          ],
+          "passRate": 0
+        },
+        {
+          "id": "plan-ambiguous-assumptions",
+          "intent": "An underspecified prompt still yields a runnable plan, with the judgement calls stated so the user can reject them at the y/n gate.",
+          "runs": [
+            {
+              "runIndex": 0,
+              "passed": false,
+              "assertions": [
+                {
+                  "name": "plan has >= 1 steps",
+                  "passed": true,
+                  "detail": "plan had 12 steps"
+                },
+                {
+                  "name": "stated >= 1 assumption(s)",
+                  "passed": true,
+                  "detail": "stated 9: Add a backend authentication system (not a frontend UI); implement as a Node.js + Express app because the repository is empty | Use SQLite (file-based) for user storage to avoid external services; DB file will be ./data/db.sqlite | Use bcrypt for password hashing and JWTs for access tokens; use refresh tokens persisted in the database | Tokens will be returned in JSON responses (not via cookies) and Authorization: Bearer <token> header will be used to protect routes | Environment variables (JWT_SECRET, REFRESH_TOKEN_SECRET, PORT, DB_FILE) will be used; provide .env.example | Keep implementation in plain JavaScript (CommonJS) for maximum simplicity and compatibility | Dev tooling: nodemon for convenience (devDependency); scripts will include start and dev | Access token lifetime: short (e.g. 15m) and refresh token lifetime: longer (e.g. 7d) — concrete values documented in README | No external authentication provider (OAuth, SSO) — simple email/password registration + JWT refresh flow only"
+                }
+              ],
+              "failureCategory": "budget",
+              "failureDetail": "tool calls 107 > budget 25",
+              "totals": {
+                "durationMs": 738712,
+                "llmCalls": 0,
+                "toolCalls": 107,
+                "toolFailures": 2,
+                "fallbackParses": 0,
+                "duplicatesBlocked": 0,
+                "filesCreated": 11,
+                "filesModified": 8,
+                "filesDeleted": 0,
+                "linesAdded": 523,
+                "linesRemoved": 11,
+                "usage": {
+                  "inputTokens": 0,
+                  "outputTokens": 0,
+                  "cachedInputTokens": 0,
+                  "reasoningTokens": 0
+                },
+                "filesTouched": [
+                  ".env.example",
+                  ".gitignore",
+                  "README.md",
+                  "package.json",
+                  "src/app.js",
+                  "src/controllers/authController.js",
+                  "src/db.js",
+                  "src/index.js",
+                  "src/middleware/authMiddleware.js",
+                  "src/models/userModel.js",
+                  "src/routes/auth.js"
+                ]
+              },
+              "costUsd": 0.030276499999999998,
+              "journalPath": "C:\\Users\\Arnv\\ZIZOUv1\\evals\\.artifacts\\openai-balanced--plan-ambiguous-assumptions--run1-1790108915395\\openai-balanced--plan-ambiguous-assumptions--run1-1790108915395.log",
+              "workspaceDir": "C:\\Users\\Arnv\\ZIZOUv1\\evals\\.artifacts\\openai-balanced--plan-ambiguous-assumptions--run1-1790108915395\\workspace"
+            }
+          ],
+          "passRate": 0
+        },
+        {
+          "id": "build-edit-missing-file",
+          "intent": "Asked to edit a file that is not there, the agent must either create it correctly or fail visibly. What it must not do is report success having done nothing.",
+          "runs": [
+            {
+              "runIndex": 0,
+              "passed": true,
+              "assertions": [
+                {
+                  "name": "any of: recovered by creating the file, or surfaced the failure",
+                  "passed": true,
+                  "detail": "satisfied by \"matches /\"version\"\\s*:\\s*\"1\\.0\\.0\"/: config.json\" (pattern found in 25 bytes)"
+                }
+              ],
+              "totals": {
+                "durationMs": 19971,
+                "llmCalls": 0,
+                "toolCalls": 4,
+                "toolFailures": 0,
+                "fallbackParses": 0,
+                "duplicatesBlocked": 0,
+                "filesCreated": 1,
+                "filesModified": 0,
+                "filesDeleted": 0,
+                "linesAdded": 4,
+                "linesRemoved": 0,
+                "usage": {
+                  "inputTokens": 0,
+                  "outputTokens": 0,
+                  "cachedInputTokens": 0,
+                  "reasoningTokens": 0
+                },
+                "filesTouched": [
+                  "config.json"
+                ]
+              },
+              "costUsd": 0.000691,
+              "journalPath": "C:\\Users\\Arnv\\ZIZOUv1\\evals\\.artifacts\\openai-balanced--build-edit-missing-file--run1-1790109662305\\openai-balanced--build-edit-missing-file--run1-1790109662305.log"
+            }
+          ],
+          "passRate": 1
+        },
+        {
+          "id": "auto-route-chat",
+          "intent": "Auto sends a bare greeting to chat, without writing anything.",
+          "runs": [
+            {
+              "runIndex": 0,
+              "passed": false,
+              "assertions": [
+                {
+                  "name": "routed to chat",
+                  "passed": false,
+                  "detail": "routed to build (mode=build reason=Auto → build: router unavailable: The model `gpt-4o-mini` does not exist or you do not have ac)"
+                },
+                {
+                  "name": "nothing written at the workspace root",
+                  "passed": true,
+                  "detail": "all new files placed in a directory"
+                },
+                {
+                  "name": "touched nothing but: ",
+                  "passed": true,
+                  "detail": "no collateral changes"
+                }
+              ],
+              "failureCategory": "assertion",
+              "failureDetail": "routed to chat: routed to build (mode=build reason=Auto → build: router unavailable: The model `gpt-4o-mini` does not exist or you do not have ac)",
+              "totals": {
+                "durationMs": 5115,
+                "llmCalls": 0,
+                "toolCalls": 0,
+                "toolFailures": 0,
+                "fallbackParses": 0,
+                "duplicatesBlocked": 0,
+                "filesCreated": 0,
+                "filesModified": 0,
+                "filesDeleted": 0,
+                "linesAdded": 0,
+                "linesRemoved": 0,
+                "usage": {
+                  "inputTokens": 0,
+                  "outputTokens": 0,
+                  "cachedInputTokens": 0,
+                  "reasoningTokens": 0
+                },
+                "filesTouched": []
+              },
+              "costUsd": null,
+              "journalPath": "C:\\Users\\Arnv\\ZIZOUv1\\evals\\.artifacts\\openai-balanced--auto-route-chat--run1-1790109690298\\openai-balanced--auto-route-chat--run1-1790109690298.log",
+              "workspaceDir": "C:\\Users\\Arnv\\ZIZOUv1\\evals\\.artifacts\\openai-balanced--auto-route-chat--run1-1790109690298\\workspace"
+            }
+          ],
+          "passRate": 0
+        },
+        {
+          "id": "auto-route-ask",
+          "intent": "Auto sends a codebase question to ask, which reads but never writes.",
+          "runs": [
+            {
+              "runIndex": 0,
+              "passed": false,
+              "assertions": [
+                {
+                  "name": "routed to ask",
+                  "passed": false,
+                  "detail": "routed to build (mode=build reason=Auto → build: router unavailable: The model `gpt-4o-mini` does not exist or you do not have ac)"
+                },
+                {
+                  "name": "touched nothing but: ",
+                  "passed": true,
+                  "detail": "no collateral changes"
+                }
+              ],
+              "failureCategory": "assertion",
+              "failureDetail": "routed to ask: routed to build (mode=build reason=Auto → build: router unavailable: The model `gpt-4o-mini` does not exist or you do not have ac)",
+              "totals": {
+                "durationMs": 30275,
+                "llmCalls": 0,
+                "toolCalls": 6,
+                "toolFailures": 1,
+                "fallbackParses": 0,
+                "duplicatesBlocked": 0,
+                "filesCreated": 0,
+                "filesModified": 0,
+                "filesDeleted": 0,
+                "linesAdded": 0,
+                "linesRemoved": 0,
+                "usage": {
+                  "inputTokens": 0,
+                  "outputTokens": 0,
+                  "cachedInputTokens": 0,
+                  "reasoningTokens": 0
+                },
+                "filesTouched": []
+              },
+              "costUsd": null,
+              "journalPath": "C:\\Users\\Arnv\\ZIZOUv1\\evals\\.artifacts\\openai-balanced--auto-route-ask--run1-1790109703422\\openai-balanced--auto-route-ask--run1-1790109703422.log",
+              "workspaceDir": "C:\\Users\\Arnv\\ZIZOUv1\\evals\\.artifacts\\openai-balanced--auto-route-ask--run1-1790109703422\\workspace"
+            }
+          ],
+          "passRate": 0
+        },
+        {
+          "id": "auto-route-build",
+          "intent": "Auto sends a small concrete change to build, even phrased as a question.",
+          "runs": [
+            {
+              "runIndex": 0,
+              "passed": true,
+              "assertions": [
+                {
+                  "name": "routed to build",
+                  "passed": true,
+                  "detail": "routed to build"
+                },
+                {
+                  "name": "contains \"TODO: tests\": src/retry.ts",
+                  "passed": true,
+                  "detail": "present"
+                },
+                {
+                  "name": "touched nothing but: src/retry.ts",
+                  "passed": true,
+                  "detail": "no collateral changes"
+                }
+              ],
+              "totals": {
+                "durationMs": 17576,
+                "llmCalls": 0,
+                "toolCalls": 3,
+                "toolFailures": 0,
+                "fallbackParses": 0,
+                "duplicatesBlocked": 0,
+                "filesCreated": 0,
+                "filesModified": 1,
+                "filesDeleted": 0,
+                "linesAdded": 1,
+                "linesRemoved": 0,
+                "usage": {
+                  "inputTokens": 0,
+                  "outputTokens": 0,
+                  "cachedInputTokens": 0,
+                  "reasoningTokens": 0
+                },
+                "filesTouched": [
+                  "src/retry.ts"
+                ]
+              },
+              "costUsd": 0.00081525,
+              "journalPath": "C:\\Users\\Arnv\\ZIZOUv1\\evals\\.artifacts\\openai-balanced--auto-route-build--run1-1790109741807\\openai-balanced--auto-route-build--run1-1790109741807.log"
+            }
+          ],
+          "passRate": 1
+        },
+        {
+          "id": "auto-route-plan",
+          "intent": "Auto sends ordered multi-file work to plan, and the plan decomposes it.",
+          "runs": [
+            {
+              "runIndex": 0,
+              "passed": false,
+              "assertions": [
+                {
+                  "name": "routed to plan",
+                  "passed": false,
+                  "detail": "routed to build (mode=build reason=Auto → build: router unavailable: The model `gpt-4o-mini` does not exist or you do not have ac)"
+                },
+                {
+                  "name": "plan has >= 3 steps",
+                  "passed": false,
+                  "detail": "no plan event in journal"
+                },
+                {
+                  "name": "stated >= 1 assumption(s)",
+                  "passed": false,
+                  "detail": "none stated",
+                  "advisory": true
+                }
+              ],
+              "failureCategory": "assertion",
+              "failureDetail": "routed to plan: routed to build (mode=build reason=Auto → build: router unavailable: The model `gpt-4o-mini` does not exist or you do not have ac); plan has >= 3 steps: no plan event in journal",
+              "totals": {
+                "durationMs": 272200,
+                "llmCalls": 0,
+                "toolCalls": 31,
+                "toolFailures": 3,
+                "fallbackParses": 0,
+                "duplicatesBlocked": 0,
+                "filesCreated": 4,
+                "filesModified": 2,
+                "filesDeleted": 0,
+                "linesAdded": 160,
+                "linesRemoved": 4,
+                "usage": {
+                  "inputTokens": 0,
+                  "outputTokens": 0,
+                  "cachedInputTokens": 0,
+                  "reasoningTokens": 0
+                },
+                "filesTouched": [
+                  "assets/theme.js",
+                  "index.html",
+                  "settings.html",
+                  "styles.css"
+                ]
+              },
+              "costUsd": 0.0073875,
+              "journalPath": "C:\\Users\\Arnv\\ZIZOUv1\\evals\\.artifacts\\openai-balanced--auto-route-plan--run1-1790109767505\\openai-balanced--auto-route-plan--run1-1790109767505.log",
+              "workspaceDir": "C:\\Users\\Arnv\\ZIZOUv1\\evals\\.artifacts\\openai-balanced--auto-route-plan--run1-1790109767505\\workspace"
+            }
+          ],
+          "passRate": 0
+        },
+        {
+          "id": "auto-route-plan-underspecified",
+          "intent": "A new artifact with its behaviour unstated goes to plan, even as a single file.",
+          "runs": [
+            {
+              "runIndex": 0,
+              "passed": false,
+              "assertions": [
+                {
+                  "name": "routed to plan",
+                  "passed": false,
+                  "detail": "routed to build (mode=build reason=Auto → build: router unavailable: The model `gpt-4o-mini` does not exist or you do not have ac)"
+                },
+                {
+                  "name": "stated >= 1 assumption(s)",
+                  "passed": false,
+                  "detail": "none stated"
+                }
+              ],
+              "failureCategory": "assertion",
+              "failureDetail": "routed to plan: routed to build (mode=build reason=Auto → build: router unavailable: The model `gpt-4o-mini` does not exist or you do not have ac); stated >= 1 assumption(s): none stated",
+              "totals": {
+                "durationMs": 48035,
+                "llmCalls": 0,
+                "toolCalls": 3,
+                "toolFailures": 0,
+                "fallbackParses": 0,
+                "duplicatesBlocked": 0,
+                "filesCreated": 1,
+                "filesModified": 0,
+                "filesDeleted": 0,
+                "linesAdded": 157,
+                "linesRemoved": 0,
+                "usage": {
+                  "inputTokens": 0,
+                  "outputTokens": 0,
+                  "cachedInputTokens": 0,
+                  "reasoningTokens": 0
+                },
+                "filesTouched": [
+                  "todoapp.html"
+                ]
+              },
+              "costUsd": 0.0023287499999999997,
+              "journalPath": "C:\\Users\\Arnv\\ZIZOUv1\\evals\\.artifacts\\openai-balanced--auto-route-plan-underspecified--run1-1790110047873\\openai-balanced--auto-route-plan-underspecified--run1-1790110047873.log",
+              "workspaceDir": "C:\\Users\\Arnv\\ZIZOUv1\\evals\\.artifacts\\openai-balanced--auto-route-plan-underspecified--run1-1790110047873\\workspace"
+            }
+          ],
+          "passRate": 0
+        },
+        {
+          "id": "auto-route-build-specified",
+          "intent": "A new file whose contents are fully specified stays a build — nothing is open.",
+          "runs": [
+            {
+              "runIndex": 0,
+              "passed": true,
+              "assertions": [
+                {
+                  "name": "routed to build",
+                  "passed": true,
+                  "detail": "routed to build"
+                },
+                {
+                  "name": "matches /Hello,?\\s*World!?/i: hello.txt",
+                  "passed": true,
+                  "detail": "pattern found in 13 bytes"
+                },
+                {
+                  "name": "touched nothing but: hello.txt",
+                  "passed": true,
+                  "detail": "no collateral changes"
+                }
+              ],
+              "totals": {
+                "durationMs": 19309,
+                "llmCalls": 0,
+                "toolCalls": 3,
+                "toolFailures": 0,
+                "fallbackParses": 0,
+                "duplicatesBlocked": 0,
+                "filesCreated": 1,
+                "filesModified": 0,
+                "filesDeleted": 0,
+                "linesAdded": 1,
+                "linesRemoved": 0,
+                "usage": {
+                  "inputTokens": 0,
+                  "outputTokens": 0,
+                  "cachedInputTokens": 0,
+                  "reasoningTokens": 0
+                },
+                "filesTouched": [
+                  "hello.txt"
+                ]
+              },
+              "costUsd": 0.000752,
+              "journalPath": "C:\\Users\\Arnv\\ZIZOUv1\\evals\\.artifacts\\openai-balanced--auto-route-build-specified--run1-1790110104058\\openai-balanced--auto-route-build-specified--run1-1790110104058.log"
+            }
+          ],
+          "passRate": 1
+        },
+        {
+          "id": "build-file-placement",
+          "intent": "A new app goes in a directory of its own, not loose in the workspace root.",
+          "runs": [
+            {
+              "runIndex": 0,
+              "passed": true,
+              "assertions": [
+                {
+                  "name": "nothing written at the workspace root",
+                  "passed": true,
+                  "detail": "all new files placed in a directory"
+                }
+              ],
+              "totals": {
+                "durationMs": 100932,
+                "llmCalls": 0,
+                "toolCalls": 9,
+                "toolFailures": 0,
+                "fallbackParses": 0,
+                "duplicatesBlocked": 0,
+                "filesCreated": 3,
+                "filesModified": 0,
+                "filesDeleted": 0,
+                "linesAdded": 186,
+                "linesRemoved": 0,
+                "usage": {
+                  "inputTokens": 0,
+                  "outputTokens": 0,
+                  "cachedInputTokens": 0,
+                  "reasoningTokens": 0
+                },
+                "filesTouched": [
+                  "apps/tictactoe/app.js",
+                  "apps/tictactoe/index.html",
+                  "apps/tictactoe/style.css"
+                ]
+              },
+              "costUsd": 0.0064315,
+              "journalPath": "C:\\Users\\Arnv\\ZIZOUv1\\evals\\.artifacts\\openai-balanced--build-file-placement--run1-1790110131760\\openai-balanced--build-file-placement--run1-1790110131760.log"
+            }
+          ],
+          "passRate": 1
+        },
+        {
+          "id": "build-edit-not-recreate",
+          "intent": "Asked to change something, the agent edits the existing file instead of making a twin.",
+          "runs": [
+            {
+              "runIndex": 0,
+              "passed": true,
+              "assertions": [
+                {
+                  "name": "contains \"Hi, \": src/lib/greet.ts",
+                  "passed": true,
+                  "detail": "present"
+                },
+                {
+                  "name": "lacks \"Hello, \": src/lib/greet.ts",
+                  "passed": true,
+                  "detail": "correctly absent"
+                },
+                {
+                  "name": "touched nothing but: src/lib/greet.ts",
+                  "passed": true,
+                  "detail": "no collateral changes"
+                }
+              ],
+              "totals": {
+                "durationMs": 29224,
+                "llmCalls": 0,
+                "toolCalls": 7,
+                "toolFailures": 2,
+                "fallbackParses": 0,
+                "duplicatesBlocked": 0,
+                "filesCreated": 0,
+                "filesModified": 1,
+                "filesDeleted": 0,
+                "linesAdded": 1,
+                "linesRemoved": 1,
+                "usage": {
+                  "inputTokens": 0,
+                  "outputTokens": 0,
+                  "cachedInputTokens": 0,
+                  "reasoningTokens": 0
+                },
+                "filesTouched": [
+                  "src/lib/greet.ts"
+                ]
+              },
+              "costUsd": 0.00089975,
+              "journalPath": "C:\\Users\\Arnv\\ZIZOUv1\\evals\\.artifacts\\openai-balanced--build-edit-not-recreate--run1-1790110240740\\openai-balanced--build-edit-not-recreate--run1-1790110240740.log"
+            }
+          ],
+          "passRate": 1
+        },
+        {
+          "id": "build-long-conversation",
+          "intent": "A conversation past the history-trimming threshold stays sendable. Guards the collapsed-tool-result corruption that killed every turn from the fourth on.",
+          "runs": [
+            {
+              "runIndex": 0,
+              "passed": true,
+              "assertions": [
+                {
+                  "name": "conversation remained a valid prompt",
+                  "passed": true,
+                  "detail": "no message-schema rejections"
+                },
+                {
+                  "name": "run completed without throwing",
+                  "passed": true,
+                  "detail": "no error events"
+                },
+                {
+                  "name": "contains \"alpha\": notes.md",
+                  "passed": true,
+                  "detail": "present"
+                },
+                {
+                  "name": "contains \"delta\": notes.md",
+                  "passed": true,
+                  "detail": "present"
+                },
+                {
+                  "name": "contains \"echo\": notes.md",
+                  "passed": true,
+                  "detail": "present"
+                },
+                {
+                  "name": "touched nothing but: notes.md",
+                  "passed": true,
+                  "detail": "no collateral changes"
+                }
+              ],
+              "totals": {
+                "durationMs": 103402,
+                "llmCalls": 0,
+                "toolCalls": 18,
+                "toolFailures": 0,
+                "fallbackParses": 0,
+                "duplicatesBlocked": 0,
+                "filesCreated": 0,
+                "filesModified": 5,
+                "filesDeleted": 0,
+                "linesAdded": 5,
+                "linesRemoved": 0,
+                "usage": {
+                  "inputTokens": 0,
+                  "outputTokens": 0,
+                  "cachedInputTokens": 0,
+                  "reasoningTokens": 0
+                },
+                "filesTouched": [
+                  "notes.md"
+                ]
+              },
+              "costUsd": 0.0035575,
+              "journalPath": "C:\\Users\\Arnv\\ZIZOUv1\\evals\\.artifacts\\openai-balanced--build-long-conversation--run1-1790110278041\\openai-balanced--build-long-conversation--run1-1790110278041.log"
+            }
+          ],
+          "passRate": 1
+        },
+        {
+          "id": "build-run-and-verify-server",
+          "intent": "The agent starts a long-running server and confirms it actually serves, rather than reporting success because a process was spawned.",
+          "runs": [
+            {
+              "runIndex": 0,
+              "passed": false,
+              "assertions": [
+                {
+                  "name": "run completed without throwing",
+                  "passed": true,
+                  "detail": "no error events"
+                },
+                {
+                  "name": "matches /\\b200\\b/: status.txt",
+                  "passed": true,
+                  "detail": "pattern found in 3 bytes"
+                },
+                {
+                  "name": "no failed tool calls",
+                  "passed": false,
+                  "detail": "2 of 28 tool calls failed",
+                  "advisory": true
+                }
+              ],
+              "failureCategory": "budget",
+              "failureDetail": "tool calls 28 > budget 25",
+              "totals": {
+                "durationMs": 165438,
+                "llmCalls": 0,
+                "toolCalls": 28,
+                "toolFailures": 2,
+                "fallbackParses": 0,
+                "duplicatesBlocked": 0,
+                "filesCreated": 1,
+                "filesModified": 2,
+                "filesDeleted": 0,
+                "linesAdded": 3,
+                "linesRemoved": 2,
+                "usage": {
+                  "inputTokens": 0,
+                  "outputTokens": 0,
+                  "cachedInputTokens": 0,
+                  "reasoningTokens": 0
+                },
+                "filesTouched": [
+                  "server.js",
+                  "status.txt"
+                ]
+              },
+              "costUsd": 0.005537,
+              "journalPath": "C:\\Users\\Arnv\\ZIZOUv1\\evals\\.artifacts\\openai-balanced--build-run-and-verify-server--run1-1790110389473\\openai-balanced--build-run-and-verify-server--run1-1790110389473.log",
+              "workspaceDir": "C:\\Users\\Arnv\\ZIZOUv1\\evals\\.artifacts\\openai-balanced--build-run-and-verify-server--run1-1790110389473\\workspace"
+            }
+          ],
+          "passRate": 0
+        }
+      ],
+      "integrityOk": false
+    }
+  ],
+  "summaries": [
+    {
+      "cell": {
+        "provider": "openai",
+        "effort": "balanced",
+        "modelId": "gpt-5-mini"
+      },
+      "passRate": 0.5333333333333333,
+      "tasksPassed": 8,
+      "tasksTotal": 15,
+      "avgToolCalls": 15.533333333333333,
+      "avgTokens": 0,
+      "avgDurationMs": 110668.13333333333,
+      "avgCostUsd": null,
+      "fallbackParses": 0,
+      "toolFailures": 10
+    }
+  ]
+}

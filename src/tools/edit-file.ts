@@ -22,6 +22,16 @@
  * SAFETY: Requires user confirmation via the ConfirmFn injected at creation
  * time. Shows a warning dialog before editing a file so the user can approve
  * or deny the operation.
+ *
+ * STRUCTURED FAILURES: every unsuccessful return carries a machine-readable
+ * `code` alongside the prose. The prose is what the model reads and is worth
+ * keeping — the per-match context block and the whitespace hint are how it
+ * recovers. The code is what the harness branches on, and a prefix parsed out
+ * of an English sentence is not a contract.
+ *
+ * NOTE ON PRECONDITIONS: whether the file was read first, and whether it has
+ * changed since, are enforced OUTSIDE this file — see agent/observe-tools.ts.
+ * They are facts about the task, and tools/ may not import from agent/.
  */
 
 import { readFileSync, writeFileSync } from "node:fs";
@@ -29,6 +39,25 @@ import { resolve } from "node:path";
 import { z } from "zod";
 import { tool } from "ai";
 import type { ConfirmFn } from "./types.js";
+
+// ─── Failure codes ───────────────────────────────────────────────────────────
+
+/**
+ * Why an edit did not happen.
+ *
+ * FILE_NOT_OBSERVED and STALE_CONTENTS are produced by the task-state wrapper
+ * rather than here, but they are named in the same union so there is one place
+ * that lists every way an edit can fail.
+ */
+export type EditErrorCode =
+  | "FILE_NOT_FOUND"
+  | "FILE_NOT_OBSERVED"
+  | "STALE_CONTENTS"
+  | "NOT_FOUND"
+  | "AMBIGUOUS_MATCH"
+  | "PERMISSION_DENIED"
+  | "FORCED_FALLBACK"
+  | "WRITE_FAILED";
 
 // ─── Helpers ─────────────────────────────────────────────────────────────────
 
@@ -43,6 +72,47 @@ function findAllOccurrences(haystack: string, needle: string): number[] {
     pos = haystack.indexOf(needle, pos + needle.length);
   }
   return positions;
+}
+
+/**
+ * Replaces the occurrence at a known offset.
+ *
+ * NOT String.replace. `String.prototype.replace` interprets `$&`, `` $` ``,
+ * `$'` and `$1` inside the REPLACEMENT, so a new_string containing a literal
+ * `$&` — routine in jQuery, shell expansions, regex source and Tailwind
+ * arbitrary values — was silently corrupted on the way in. The near_line path
+ * always spliced by offset and was immune; the single-match path did not, so
+ * the same edit behaved differently depending on how many times the target
+ * happened to appear. One function now, so they cannot disagree again.
+ */
+function spliceAt(contents: string, offset: number, length: number, replacement: string): string {
+  return contents.slice(0, offset) + replacement + contents.slice(offset + length);
+}
+
+/**
+ * The line ending this file predominantly uses.
+ *
+ * WHY: matching needs LF-normalised text, because old_string arrives from a
+ * model that has never seen a \r. Writing that normalised text back is a
+ * different thing entirely — on a CRLF file it rewrites every line in the
+ * file to change one, which turns a one-line edit into a whole-file diff in
+ * `/changes` and in git. The fix is to normalise for comparison and restore
+ * the original style on write.
+ *
+ * A file with MIXED endings is still normalised to its majority, so an edit
+ * to one line there does touch the others. That is a deliberate limit rather
+ * than an oversight: preserving mixed endings exactly would mean splicing
+ * into the raw text and mapping match offsets across the normalisation, which
+ * is real complexity for a file that is already inconsistent. The case worth
+ * fixing — every file with one consistent ending — is now exact.
+ */
+function detectLineEnding(original: string): "\r\n" | "\n" {
+  const crlf = (original.match(/\r\n/g) || []).length;
+  if (crlf === 0) return "\n";
+  // `lf` counts every \n, including the ones inside \r\n, so bare LFs are the
+  // difference. Majority wins.
+  const lf = (original.match(/\n/g) || []).length;
+  return crlf >= lf - crlf ? "\r\n" : "\n";
 }
 
 /**
@@ -113,7 +183,7 @@ export const createEditFileTool = (confirm: ConfirmFn) => {
       const absPath = resolve(process.cwd(), path);
       const normalizedPath = absPath.replace(/\\/g, "/").toLowerCase();
 
-      const recordFailure = (baseError: string) => {
+      const recordFailure = (code: EditErrorCode, baseError: string) => {
         const failCount = (editFailureTracker.get(normalizedPath) ?? 0) + 1;
         editFailureTracker.set(normalizedPath, failCount);
 
@@ -121,6 +191,10 @@ export const createEditFileTool = (confirm: ConfirmFn) => {
           editFailureTracker.delete(normalizedPath);
           return {
             success: false as const,
+            code: "FORCED_FALLBACK" as const,
+            // The code that actually caused this strike. Losing it would make
+            // the fallback look like the diagnosis when it is only the remedy.
+            cause: code,
             error:
               `editFile failed ${failCount} times on ${path}. FORCED FALLBACK: ` +
               `you must now call writeFile with the complete corrected file contents ` +
@@ -131,6 +205,7 @@ export const createEditFileTool = (confirm: ConfirmFn) => {
 
         return {
           success: false as const,
+          code,
           error: baseError,
         };
       };
@@ -142,17 +217,31 @@ export const createEditFileTool = (confirm: ConfirmFn) => {
         );
 
         if (!isApproved) {
+          // Deliberately NOT a strike: a denial says nothing about whether the
+          // edit was well-formed, and counting it would push a correct edit
+          // into the forced writeFile fallback for a reason the model cannot
+          // see or fix.
           return {
             success: false as const,
+            code: "PERMISSION_DENIED" as const,
             error: "User denied permission to edit this file.",
           };
         }
 
-        let contents = readFileSync(absPath, "utf-8");
+        const original = readFileSync(absPath, "utf-8");
+        const lineEnding = detectLineEnding(original);
 
-        // Normalize line endings to \n to avoid silent mismatch issues on Windows
-        contents = contents.replace(/\r\n/g, "\n");
+        // Normalised ONLY for matching — old_string comes from a model and
+        // never carries \r. What gets written back is restored to the file's
+        // own style below, so an edit does not rewrite every line in the file.
+        const contents = original.replace(/\r\n/g, "\n");
         old_string = old_string.replace(/\r\n/g, "\n");
+        new_string = new_string.replace(/\r\n/g, "\n");
+
+        /** Writes normalised text back in the file's original line-ending style. */
+        const writeBack = (updated: string): void => {
+          writeFileSync(absPath, lineEnding === "\r\n" ? updated.replace(/\n/g, "\r\n") : updated, "utf-8");
+        };
 
         // Find all occurrences
         const positions = findAllOccurrences(contents, old_string);
@@ -188,6 +277,7 @@ export const createEditFileTool = (confirm: ConfirmFn) => {
           }
 
           return recordFailure(
+            "NOT_FOUND",
             `NOT_FOUND: The exact string was not found in ${path}. The file may have changed ` +
               `since you last read it, or you may have missed some whitespace. ` +
               `Please read the file again or adjust your exact string.` +
@@ -214,11 +304,7 @@ export const createEditFileTool = (confirm: ConfirmFn) => {
 
             // Perform the replacement at the closest occurrence
             const targetPos = positions[closestIdx];
-            const updatedContents =
-              contents.slice(0, targetPos) +
-              new_string +
-              contents.slice(targetPos + old_string.length);
-            writeFileSync(absPath, updatedContents, "utf-8");
+            writeBack(spliceAt(contents, targetPos, old_string.length, new_string));
             editFailureTracker.delete(normalizedPath);
 
             return {
@@ -239,6 +325,7 @@ export const createEditFileTool = (confirm: ConfirmFn) => {
             .join("\n");
 
           return recordFailure(
+            "AMBIGUOUS_MATCH",
             `AMBIGUOUS_MATCH: old_string matches ${count} locations in ${path}. ` +
               `Add more surrounding lines (2-3 lines of context above and/or below the target) ` +
               `to make old_string unique before retrying. Do not guess which occurrence.\n` +
@@ -250,8 +337,7 @@ export const createEditFileTool = (confirm: ConfirmFn) => {
         }
 
         // ── Exactly 1 occurrence — perform the replacement ───────────────
-        const updatedContents = contents.replace(old_string, new_string);
-        writeFileSync(absPath, updatedContents, "utf-8");
+        writeBack(spliceAt(contents, positions[0], old_string.length, new_string));
         editFailureTracker.delete(normalizedPath);
 
         return {
@@ -261,7 +347,11 @@ export const createEditFileTool = (confirm: ConfirmFn) => {
       } catch (err) {
         const message =
           err instanceof Error ? err.message : "Unknown error editing file";
-        return recordFailure(message);
+        // A missing file is a different problem from a failed write, and
+        // "create it with writeFile" is only the right advice for one of them.
+        const code: EditErrorCode =
+          (err as NodeJS.ErrnoException)?.code === "ENOENT" ? "FILE_NOT_FOUND" : "WRITE_FAILED";
+        return recordFailure(code, message);
       }
     },
   });

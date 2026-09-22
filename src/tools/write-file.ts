@@ -115,6 +115,14 @@ export const createWriteFileTool = (confirm: ConfirmFn) => {
         // ADVISORY, like the scope hint: it informs the confirmation the user
         // is already being shown. It does not block the write, because a
         // similarly-named file is evidence, not proof.
+        //
+        // IT ALSO GOES TO THE MODEL, in the result below. This list used to
+        // reach the human and stop there — so the one actor that could act on
+        // it, by consolidating the two files instead of leaving them to
+        // disagree, was the only one never told. The system prompt asked the
+        // model to search for an existing implementation before creating a
+        // file; this is the harness doing that search and handing over what it
+        // found, rather than trusting that the instruction was followed.
         const siblings = fileExists ? [] : findSimilarFiles(absPath);
         const siblingNote = siblings.length
           ? "\n  Similar files already exist — edit one of these instead?\n" +
@@ -139,6 +147,15 @@ export const createWriteFileTool = (confirm: ConfirmFn) => {
         return {
           success: true as const,
           message: `Successfully wrote file to ${absPath}`,
+          ...(siblings.length
+            ? {
+                similarFiles: siblings,
+                note:
+                  `A new file was created, but these already exist and look like it: ${siblings.join(", ")}. ` +
+                  `If one of them is the file this work belonged in, consolidate — two files that ` +
+                  `disagree is worse than either alone.`,
+              }
+            : {}),
         };
       } catch (err) {
         const message =

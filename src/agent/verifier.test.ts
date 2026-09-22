@@ -304,3 +304,155 @@ test("mismatches stays populated as one-line renderings, for old persisted logs"
   expect(v.mismatches[0]).toContain("target-not-created");
   expect(v.mismatches[0]).toContain("nope.ts");
 });
+
+// ─── Derived verification ────────────────────────────────────────────────────
+//
+// The hole these cover: only a PLAN step carries a `check`. Build mode
+// synthesises its step from the raw user prompt with none, so runDeclaredCheck
+// did nothing on the route that runs most often — a TypeScript change could
+// touch three files, finish green, and never be compiled.
+
+/** A workspace that looks like a real project, so a check can be derived. */
+function project(scripts: Record<string, string>): string {
+  const cwd = workspace();
+  writeFileSync(join(cwd, "package.json"), JSON.stringify({ scripts }), "utf-8");
+  // deriveVerification refuses to run anything before an install, because the
+  // command could not succeed and the failure would be about the install.
+  mkdirSync(join(cwd, "node_modules"), { recursive: true });
+  return cwd;
+}
+
+test("a code change with no declared check is verified against the project's own script", async () => {
+  const cwd = project({ typecheck: "exit 1" });
+  writeFileSync(join(cwd, "app.ts"), "const a = 1;\n", "utf-8");
+  const s = step();
+
+  const v = await verify(s, result({ claimedFiles: ["app.ts"] }), cwd);
+
+  // Hard, so it flows into the existing repair loop as any other failed
+  // command would. A green tick on an uncompiled change is the thing this
+  // exists to prevent.
+  expect(v.verified).toBe(false);
+  const failure = v.findings.find((f) => f.code === "command-failed");
+  expect(failure?.severity).toBe("hard");
+  // The message has to say the check was the harness's idea, or the model
+  // will hunt for where the step asked for it.
+  expect(failure?.detail).toContain("run automatically");
+});
+
+test("a passing derived check leaves the step verified", async () => {
+  const cwd = project({ typecheck: "exit 0" });
+  writeFileSync(join(cwd, "app.ts"), "const a = 1;\n", "utf-8");
+
+  const v = await verify(step(), result({ claimedFiles: ["app.ts"] }), cwd);
+
+  expect(v.verified).toBe(true);
+});
+
+test("a documentation change derives no check", async () => {
+  // Running a project's test suite because a README changed is a tax, and a
+  // tax gets switched off — taking the useful case with it.
+  const cwd = project({ typecheck: "exit 1" });
+  writeFileSync(join(cwd, "README.md"), "# hi\n", "utf-8");
+
+  const v = await verify(step(), result({ claimedFiles: ["README.md"] }), cwd);
+
+  expect(v.verified).toBe(true);
+});
+
+test("a check the step already ran is not run a second time", async () => {
+  const cwd = project({ typecheck: "exit 1" });
+  writeFileSync(join(cwd, "app.ts"), "const a = 1;\n", "utf-8");
+
+  // The executor ran it and it PASSED as far as this step is concerned; the
+  // verifier must take that at face value rather than doubling the cost of
+  // every build step to ask again.
+  const r = result({
+    claimedFiles: ["app.ts"],
+    toolCallsMade: [call("runBash", { command: "bun run typecheck" }, { success: true, exitCode: 0 })],
+  });
+
+  const v = await verify(step(), r, cwd);
+
+  expect(v.findings.filter((f) => f.code === "command-failed")).toHaveLength(0);
+});
+
+test("a step with its own command check is not second-guessed", async () => {
+  // A declared check is the step's own statement of what success means.
+  // Deriving another on top of it would be the harness overruling the plan
+  // the user approved.
+  const cwd = project({ typecheck: "exit 1" });
+  writeFileSync(join(cwd, "app.ts"), "const a = 1;\n", "utf-8");
+  const s = step({ check: { kind: "command", command: "exit 0" } });
+
+  const v = await verify(s, result({ claimedFiles: ["app.ts"] }), cwd);
+
+  expect(v.verified).toBe(true);
+});
+
+test("autoVerify: false disables only the derived check", async () => {
+  const cwd = project({ typecheck: "exit 1" });
+  writeFileSync(join(cwd, "app.ts"), "const a = 1;\n", "utf-8");
+  const s = step();
+
+  const v = await verifyStep(s, result({ claimedFiles: ["app.ts"] }), cwd, capturePreSnapshot(s, cwd), undefined, false);
+
+  expect(v.verified).toBe(true);
+  expect(v.findings.filter((f) => f.code === "command-failed")).toHaveLength(0);
+});
+
+test("a step that changed nothing runs no derived check", async () => {
+  const cwd = project({ typecheck: "exit 1" });
+  const v = await verify(step(), result(), cwd);
+  expect(v.verified).toBe(true);
+});
+
+// ─── Harness refusals ────────────────────────────────────────────────────────
+
+test("a precondition refusal the step recovered from does not fail it", async () => {
+  // The task-state layer declines an edit to a file that was never read. The
+  // expected next move is that the model reads it and edits again — which it
+  // usually does, inside the same step.
+  //
+  // Counting the refusal as a failed tool call would fail verification on a
+  // step that recovered perfectly well, and burn a whole repair attempt
+  // rediscovering that nothing was wrong.
+  const cwd = workspace();
+  writeFileSync(join(cwd, "app.ts"), "const a = 2;\n", "utf-8");
+
+  const r = result({
+    claimedFiles: ["app.ts"],
+    toolCallsMade: [
+      call("editFile", { path: "app.ts" }, {
+        success: false,
+        harnessRefusal: true,
+        code: "FILE_NOT_OBSERVED",
+        error: "You have not read app.ts during this task",
+      }),
+      call("readFile", { path: "app.ts" }, { success: true, contents: "const a = 1;\n" }),
+      call("editFile", { path: "app.ts" }, { success: true, message: "Successfully replaced 1 occurrence" }),
+    ],
+  });
+
+  const v = await verify(step(), r, cwd);
+
+  expect(v.verified).toBe(true);
+  expect(v.findings.filter((f) => f.code === "tool-error")).toHaveLength(0);
+});
+
+test("a genuine tool failure is still hard", async () => {
+  // The exclusion above must key off the refusal marker specifically, not on
+  // editFile failures in general — a write that actually broke still has to
+  // fail the step.
+  const cwd = workspace();
+
+  const r = result({
+    claimedFiles: ["app.ts"],
+    toolCallsMade: [call("editFile", { path: "app.ts" }, { success: false, error: "EACCES: permission denied" })],
+  });
+
+  const v = await verify(step(), r, cwd);
+
+  expect(v.verified).toBe(false);
+  expect(v.findings.find((f) => f.code === "tool-error")?.severity).toBe("hard");
+});
