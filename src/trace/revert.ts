@@ -19,6 +19,7 @@ import type { FileEdit } from "./types.js";
 
 export interface RevertResult {
   ok: boolean;
+  /** The file, spelled as the user recognises it. */
   path: string;
   /** Set when ok is false — why it was refused, in words meant for the user. */
   reason?: string;
@@ -63,7 +64,7 @@ function move(
   if (!hasBlob(targetBlob)) {
     return {
       ok: false,
-      path: edit.path,
+      path: edit.displayPath ?? edit.path,
       reason: "the stored content for this change is missing from the trace store",
     };
   }
@@ -74,7 +75,7 @@ function move(
     if (current !== expected) {
       return {
         ok: false,
-        path: edit.path,
+        path: edit.displayPath ?? edit.path,
         reason:
           current === null
             ? "the file no longer exists — it was changed outside this trace"
@@ -85,14 +86,14 @@ function move(
 
   restore(abs, getBlob(targetBlob));
   setReverted(edit.id, direction === "revert" ? new Date().toISOString() : null);
-  return { ok: true, path: edit.path };
+  return { ok: true, path: edit.displayPath ?? edit.path };
 }
 
 /** Reverts a single edit by id. */
 export function revertEdit(editId: string, root: string, force = false): RevertResult {
   const edit = readEdits().find((e) => e.id === editId);
   if (!edit) return { ok: false, path: editId, reason: "no such change in the trace" };
-  if (edit.revertedAt) return { ok: false, path: edit.path, reason: "already reverted" };
+  if (edit.revertedAt) return { ok: false, path: edit.displayPath ?? edit.path, reason: "already reverted" };
   return move(edit, root, "revert", force);
 }
 
@@ -100,7 +101,7 @@ export function revertEdit(editId: string, root: string, force = false): RevertR
 export function redoEdit(editId: string, root: string, force = false): RevertResult {
   const edit = readEdits().find((e) => e.id === editId);
   if (!edit) return { ok: false, path: editId, reason: "no such change in the trace" };
-  if (!edit.revertedAt) return { ok: false, path: edit.path, reason: "not reverted" };
+  if (!edit.revertedAt) return { ok: false, path: edit.displayPath ?? edit.path, reason: "not reverted" };
   return move(edit, root, "redo", force);
 }
 

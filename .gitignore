@@ -41,3 +41,9 @@ evals/.artifacts/
 
 # interactive debug journals (ZIZOU_DEBUG=1)
 .zizou/
+
+# SFT dataset: generated output, ~14MB, rebuilt in ~80s by `bun run sft:build`.
+# The scenarios and the generator ARE committed — they are the source. The
+# manifest is committed too, for the same reason eval reports are: a claim
+# about what the dataset contains should be reviewable in a diff.
+evals/sft/data/*.jsonl

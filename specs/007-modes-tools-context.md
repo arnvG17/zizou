@@ -1,5 +1,23 @@
 # Zizou Modes, Tools & Context — Deep Dive
 
+> [!CAUTION]
+> **SUPERSEDED — kept for history. Do not treat this as current.**
+>
+> See [008-auto-mode-and-routing.md](./008-auto-mode-and-routing.md) instead.
+>
+> The following are described here and no longer exist:
+> - **Two modes (build/plan).** There are now five pinned modes and four
+>   executable routes, with `auto` as the default.
+> - **No upfront LLM classification.** That is exactly what auto mode does
+>   now — see 008 for how the original cost objection is answered.
+> - **Three context budgets** (`/context light|default|max`) and the repo map
+>   they gated. Both removed; roles discover the codebase with glob/grep.
+> - **Three reasoning levels** (`/reasoning`, `/expert`). Replaced by the
+>   single `/effort` dial.
+> - **The clarifier stage.** The planner states assumptions instead, and the
+>   plan gate is the clarification.
+> - **Build → plan escalation.** Removed; routing is decided once, up front.
+
 This document explains exactly how Zizou's different operating modes and reasoning levels handle tools, context injection, system prompts, and LLM interactions. Every claim links back to the actual source code.
 
 ---

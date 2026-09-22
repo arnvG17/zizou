@@ -79,6 +79,56 @@ function getOSInfo(): { os: string; shell: string } {
   return { os: "Linux", shell: "bash" };
 }
 
+/**
+ * Reads the project's package.json and lockfile so the prompt can state the
+ * package manager and the REAL script names.
+ *
+ * WHY: the model otherwise guesses `npm run dev`, which is wrong in a pnpm
+ * repo, wrong in a repo whose script is called `start`, and wrong in a repo
+ * with no package.json at all. A guess that is right most of the time is the
+ * worst kind — it fails rarely enough that the failure looks like something
+ * else. This costs one file read and replaces guessing with a fact.
+ */
+function detectProjectRuntime(projectRoot: string): string {
+  const pkgPath = resolve(projectRoot, "package.json");
+  if (!existsSync(pkgPath)) return "";
+
+  try {
+    const pkg = JSON.parse(readFileSync(pkgPath, "utf8")) as {
+      scripts?: Record<string, string>;
+      packageManager?: string;
+    };
+
+    const manager = pkg.packageManager
+      ? pkg.packageManager.split("@")[0]
+      : existsSync(resolve(projectRoot, "bun.lockb")) || existsSync(resolve(projectRoot, "bun.lock"))
+        ? "bun"
+        : existsSync(resolve(projectRoot, "pnpm-lock.yaml"))
+          ? "pnpm"
+          : existsSync(resolve(projectRoot, "yarn.lock"))
+            ? "yarn"
+            : "npm";
+
+    const scripts = Object.keys(pkg.scripts ?? {});
+    const installed = existsSync(resolve(projectRoot, "node_modules"));
+
+    const lines = [`Package manager: ${manager}`];
+    if (scripts.length) lines.push(`Available scripts: ${scripts.join(", ")}`);
+    else lines.push("No scripts defined in package.json.");
+    lines.push(
+      installed
+        ? "Dependencies are installed (node_modules exists)."
+        : "Dependencies are NOT installed — install before running anything.",
+    );
+
+    return `\n${lines.join("\n")}`;
+  } catch {
+    // A malformed package.json is the project's problem, not a reason to fail
+    // prompt construction.
+    return "";
+  }
+}
+
 const EXECUTOR_INSTRUCTIONS = `You are Zizou, an AI coding agent with direct filesystem access through tools.
 
 Rules:
@@ -103,7 +153,21 @@ EDIT, DON'T RECREATE:
 editFile recovery strategy:
 - If editFile fails with "appeared N times", provide near_line (the line number nearest your intended match), e.g.:
   editFile({ path: "app.html", old_string: "...", new_string: "...", near_line: 42 })
-- If editFile fails twice on the same file, you will be told to fall back to writeFile with the complete corrected contents. Do this immediately — do not keep retrying editFile with cosmetic variations of old_string.`;
+- If editFile fails twice on the same file, you will be told to fall back to writeFile with the complete corrected contents. Do this immediately — do not keep retrying editFile with cosmetic variations of old_string.
+
+RUNNING THINGS — pick the right tool:
+- A command that FINISHES in seconds (git status, ls, tsc --noEmit, a one-off script) → runBash.
+- A SEQUENCE sharing state, or anything that might ask a question (scaffolders, installs, a venv, several commands in one project dir) → terminal. Create one per project directory, then send commands to it. It keeps cwd and environment between commands, and you can answer a prompt with sendKeys.
+- Anything that DOES NOT EXIT (npm run dev, --watch, an API server) → service, never runBash. A dev server through runBash blocks until the timeout and then reports failure.
+
+Rules that apply to all three:
+- ALWAYS check exitCode before continuing. A tool call that returned is not a command that succeeded. On a non-zero exit, read stderr, fix the actual cause, and re-run — you are allowed to re-run the same command after a fix.
+- Use the cwd parameter. Do not prefix commands with "cd" — runBash forgets it immediately, and a terminal already holds it.
+- A service is not started until it is READY. Always give service a ready signal: readyRegex, port, or url. Then confirm with checkUrl. If it did not come up, read its crashReason or logs — do not assume it started.
+- Prefer autoPort over hard-coding a port. On EADDRINUSE, use managePorts to find and kill the holder, then retry.
+- Two servers (a frontend and an API) are two named services with different cwds, not one command joined with "&".
+- Scaffolders: prefer non-interactive flags (--yes, -y). If one asks anyway, answer it with terminal sendKeys rather than waiting for a timeout.
+- Say what you left running. Stop services the user no longer needs.`;
 
 const PLANNER_INSTRUCTIONS_BASE = `You are Zizou, an AI coding agent, currently planning rather than building.
 
@@ -222,7 +286,7 @@ export async function buildSystemPrompt(
 --- SESSION CONTEXT ---
 Workspace root (cwd): ${projectRoot}
 Operating system: ${os}
-Shell: ${shell}
+Shell: ${shell}${role === "executor" ? detectProjectRuntime(projectRoot) : ""}
 All relative paths you provide to tools are resolved from this root.
 Absolute paths and relative paths both work — a relative path like
 src/components/Foo.tsx is resolved against the workspace root automatically.${

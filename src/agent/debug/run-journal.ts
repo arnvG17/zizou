@@ -3,9 +3,9 @@
 // LAYER: agent/debug
 //
 // The run journal: one structured, append-only record of everything a single
-// run did. It replaces TurnLogger (which was 80 lines of `// Silenced` no-op
-// methods that still got called on every event) and sits alongside
-// SessionLogger, which records verbatim prompts.
+// run did. It replaces both predecessors — TurnLogger, which was 80 lines of
+// `// Silenced` no-op methods that still got called on every event, and
+// SessionLogger, whose post-mortem is in specs/002-debug.md.
 //
 // It writes TWO files per run, from one event stream:
 //
@@ -66,7 +66,7 @@ const MUTATING_TOOLS: Record<string, PathExtractor> = {
  * otherwise touched, and the log says so rather than implying full coverage —
  * an honest partial answer beats a confident empty one.
  */
-const OPAQUE_TOOLS = new Set(["runBash", "runBackground"]);
+const OPAQUE_TOOLS = new Set(["runBash", "runBackground", "terminal", "service"]);
 
 // ─── Event shapes ────────────────────────────────────────────────────────────
 
@@ -94,6 +94,15 @@ export interface UsageRecord {
 }
 
 /**
+ * Which part of a turn is speaking.
+ *
+ * "router" and "chat" joined the original three when auto mode landed: a phase
+ * list that cannot name the router leaves its calls filed under whatever ran
+ * next, which is exactly the confusion the journal exists to remove.
+ */
+export type JournalPhase = "router" | "planner" | "executor" | "verifier" | "chat";
+
+/**
  * One event's own fields, without the envelope.
  *
  * Kept separate from JournalEvent because `Omit<Union, k>` does not distribute
@@ -102,7 +111,11 @@ export interface UsageRecord {
  */
 export type JournalPayload =
   | { kind: "run-start"; runId: string; label: string; cwd: string; prompt: string; mode: string; provider?: string; modelId?: string; meta?: Record<string, unknown> }
-  | { kind: "phase"; phase: "planner" | "executor" | "verifier"; detail: string; stepIndex?: number }
+  | { kind: "phase"; phase: JournalPhase; detail: string; stepIndex?: number }
+  | { kind: "route"; route: string; confidence?: number | string; reason?: string }
+  | { kind: "prompt"; role: string; system?: string; user?: string; stepIndex?: number }
+  | { kind: "note"; label: string; text: string }
+  | { kind: "step-end"; stepIndex: number; claimedFiles: string[]; toolNames: string[]; text?: string }
   | { kind: "plan"; steps: Array<{ index: number; description: string; targetFiles?: string[] }>; assumptions?: string[] }
   | { kind: "llm-call"; role: string; modelId?: string; finishReason?: string; usage?: UsageRecord; steps?: number }
   | { kind: "assistant-text"; text: string }
@@ -181,6 +194,18 @@ export interface RunJournalOptions {
   root?: string;
   /** When false, every method is a no-op and no files are created. */
   enabled?: boolean;
+  /**
+   * Whether to record verbatim system and user prompts.
+   *
+   * Off by default, and this is the whole reason SessionLogger was unusable in
+   * practice: it wrote the full system prompt on EVERY step, unconditionally.
+   * The executor prompt is ~3.7k tokens of tool schemas, so a ten-step plan
+   * produced a log where the same boilerplate appeared eleven times and the
+   * three lines describing what actually went wrong were buried in it.
+   *
+   * Turn it on with ZIZOU_DEBUG=prompts when the prompt itself is the suspect.
+   */
+  capturePrompts?: boolean;
 }
 
 export class RunJournal {
@@ -192,6 +217,7 @@ export class RunJournal {
   private readonly startedAt = Date.now();
   private readonly root: string;
   private readonly enabled: boolean;
+  private readonly capturePrompts: boolean;
 
   /** Every path the run has referenced, so opaque tools have something to re-check. */
   private readonly knownPaths = new Set<string>();
@@ -218,6 +244,7 @@ export class RunJournal {
     this.runId = opts.runId;
     this.root = opts.root ?? process.cwd();
     this.enabled = opts.enabled !== false;
+    this.capturePrompts = opts.capturePrompts === true;
     this.jsonlPath = join(opts.dir, `${opts.runId}.jsonl`);
     this.logPath = join(opts.dir, `${opts.runId}.log`);
 
@@ -298,11 +325,61 @@ export class RunJournal {
     );
   }
 
-  phase(phase: "planner" | "executor" | "verifier", detail: string, stepIndex?: number): void {
+  phase(phase: JournalPhase, detail: string, stepIndex?: number): void {
     const label = stepIndex === undefined
       ? `PHASE: ${phase.toUpperCase()}`
       : `PHASE: ${phase.toUpperCase()} (step ${stepIndex + 1})`;
     this.emit({ kind: "phase", phase, detail, stepIndex }, heading(label) + `  ${detail}\n`);
+  }
+
+  /** Auto mode's routing decision, recorded before anything runs. */
+  route(route: string, confidence?: number | string, reason?: string): void {
+    this.emit(
+      { kind: "route", route, confidence, reason },
+      `\n  [ROUTE] -> ${route}` +
+        `${confidence !== undefined ? ` (confidence ${confidence})` : ""}\n` +
+        `${reason ? `    ${reason}\n` : ""}`,
+    );
+  }
+
+  /**
+   * The verbatim prompts sent for one call. No-op unless capturePrompts is on.
+   *
+   * Gated rather than truncated because a truncated system prompt is the worst
+   * of both options: still long enough to bury the rest of the log, and cut off
+   * before the part you needed to see.
+   */
+  prompt(info: { role: string; system?: string; user?: string; stepIndex?: number }): void {
+    if (!this.capturePrompts) return;
+    this.emit(
+      { kind: "prompt", ...info },
+      `\n  ${rule()}\n  PROMPT (${info.role}${info.stepIndex !== undefined ? ` step ${info.stepIndex + 1}` : ""})\n` +
+        `${info.system ? `  [system]\n${indent(info.system, "      ")}\n` : ""}` +
+        `${info.user ? `  [user]\n${indent(info.user, "      ")}\n` : ""}` +
+        `  ${rule()}\n`,
+    );
+  }
+
+  /** A one-line observation with no richer event of its own. */
+  note(label: string, text: string): void {
+    this.emit({ kind: "note", label, text }, `\n  [${label.toUpperCase()}] ${text}\n`);
+  }
+
+  /**
+   * What one executor step ended up doing.
+   *
+   * `claimedFiles` is what the model SAYS it touched. Compare it against the
+   * run-end `files touched` list, which comes from observed diffs: a file named
+   * here and absent there is a claim the filesystem did not support, and that
+   * gap is usually the bug.
+   */
+  stepEnd(info: { stepIndex: number; claimedFiles: string[]; toolNames: string[]; text?: string }): void {
+    this.emit(
+      { kind: "step-end", ...info },
+      `\n  [STEP ${info.stepIndex + 1} END]\n` +
+        `    claimed files: ${info.claimedFiles.join(", ") || "(none)"}\n` +
+        `    tools used   : ${info.toolNames.join(", ") || "(none)"}\n`,
+    );
   }
 
   plan(

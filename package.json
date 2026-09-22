@@ -1,6 +1,6 @@
 {
   "name": "zizou-ai",
-  "version": "1.3.1",
+  "version": "1.3.2",
   "type": "module",
   "description": "An open-source AI coding agent CLI tool",
   "bin": {
@@ -16,6 +16,9 @@
     "test": "bun test src/ evals/",
     "build": "bun run build.ts",
     "eval": "bun run evals/run-evals.ts",
+    "sft:build": "bun run evals/sft/build.ts",
+    "sft:check": "bun run evals/sft/build.ts --dry-run",
+    "sft:render": "bun run evals/sft/render.ts",
     "prepublishOnly": "npm run build"
   },
   "dependencies": {

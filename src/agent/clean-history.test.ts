@@ -12,15 +12,29 @@
 
 import { test, expect } from "bun:test";
 import type { ModelMessage } from "ai";
-import { cleanHistoryForNextTurn, FULL_DETAIL_ROUNDS } from "./executor.js";
+import { cleanHistoryForNextTurn, repairHistory, FULL_DETAIL_ROUNDS } from "./executor.js";
 
 const BIG = "X".repeat(50_000);
 
 /** One assistant tool-call round plus its result, in AI SDK v7 shape. */
+/**
+ * Builds a round in the shape the AI SDK actually produces.
+ *
+ * NOTE THE `{ type: "json", value }` WRAPPER. These helpers previously stored
+ * the bare payload in `output`, cast through `as any`. That made every test
+ * here assert against a shape the SDK never emits and the ModelMessage schema
+ * rejects — which is how the collapser came to write that invalid shape into
+ * real history, with a green suite the whole time.
+ */
 function round(callId: string, toolName: string, input: unknown, output: unknown): ModelMessage[] {
   return [
     { role: "assistant", content: [{ type: "tool-call", toolCallId: callId, toolName, input }] } as any,
-    { role: "tool", content: [{ type: "tool-result", toolCallId: callId, toolName, output }] } as any,
+    {
+      role: "tool",
+      content: [
+        { type: "tool-result", toolCallId: callId, toolName, output: { type: "json", value: output } },
+      ],
+    } as any,
   ];
 }
 
@@ -31,7 +45,13 @@ function filler(count: number): ModelMessage[] {
   ).flat();
 }
 
+/** The tool result's PAYLOAD — i.e. output.value, not the tagged wrapper. */
 function toolOutput(messages: ModelMessage[], callId: string): any {
+  return rawToolOutput(messages, callId)?.value;
+}
+
+/** The tagged wrapper itself, for asserting the shape is preserved. */
+function rawToolOutput(messages: ModelMessage[], callId: string): any {
   for (const msg of messages) {
     if (!Array.isArray(msg.content)) continue;
     for (const part of msg.content as any[]) {
@@ -185,4 +205,121 @@ test("plain text messages pass through untouched", () => {
   const out = cleanHistoryForNextTurn(history);
   expect(out[0]).toEqual({ role: "user", content: "hello" });
   expect(out[1]).toEqual({ role: "assistant", content: "hi there" });
+});
+
+// ─── The message-schema regression ───────────────────────────────────────────
+//
+// These pin the bug that killed real sessions with
+//   "Invalid prompt: The messages do not match the ModelMessage[] schema."
+// It only struck long runs, because collapsing applies solely to rounds older
+// than FULL_DETAIL_ROUNDS — a short chat never reached the broken path, and
+// any sustained agentic session did.
+
+test("a collapsed tool result keeps the SDK's tagged output shape", () => {
+  const history: ModelMessage[] = [
+    { role: "user", content: "go" },
+    ...round("c1", "readFile", { path: "big.ts" }, { success: true, contents: BIG }),
+    ...filler(FULL_DETAIL_ROUNDS + 1),
+  ];
+
+  const wrapper = rawToolOutput(cleanHistoryForNextTurn(history), "c1");
+
+  // Writing the bare payload here is what produced an unsendable message.
+  expect(wrapper.type).toBe("json");
+  expect(wrapper).toHaveProperty("value");
+  expect(typeof wrapper.value).toBe("object");
+});
+
+test("a collapsed FAILURE is not relabelled as a success", () => {
+  // Reading `success` off the wrapper instead of off `.value` found nothing on
+  // any result, so `success !== false` was always true: a failed command came
+  // back to the model as "Command completed successfully".
+  const history: ModelMessage[] = [
+    { role: "user", content: "go" },
+    ...round(
+      "c1",
+      "runBash",
+      { command: "npm run build" },
+      { success: false, exitCode: 1, stderr: "error TS2304" },
+    ),
+    ...filler(FULL_DETAIL_ROUNDS + 1),
+  ];
+
+  const out = toolOutput(cleanHistoryForNextTurn(history), "c1");
+  expect(out.success).toBe(false);
+  expect(out.message).toBe("Command failed");
+  expect(out.exitCode).toBe(1);
+  expect(out.stderr).toContain("TS2304");
+});
+
+// ─── repairHistory ───────────────────────────────────────────────────────────
+
+test("an untagged tool output from an older session is re-tagged on load", () => {
+  // Sessions written before the fix hold the broken shape on disk. Without
+  // repair they could never be reopened — the turn dies before anything runs.
+  const broken: ModelMessage[] = [
+    { role: "user", content: "go" },
+    { role: "assistant", content: [{ type: "tool-call", toolCallId: "c1", toolName: "runBash", input: {} }] } as any,
+    {
+      role: "tool",
+      content: [
+        { type: "tool-result", toolCallId: "c1", toolName: "runBash", output: { success: true, message: "done" } },
+      ],
+    } as any,
+  ];
+
+  const wrapper = rawToolOutput(repairHistory(broken), "c1");
+  expect(wrapper.type).toBe("json");
+  expect(wrapper.value.message).toBe("done");
+});
+
+test("an already-tagged output is left exactly as it is", () => {
+  const good: ModelMessage[] = [
+    { role: "user", content: "go" },
+    ...round("c1", "readFile", { path: "a.ts" }, { success: true, contents: "x" }),
+  ];
+
+  expect(repairHistory(good)).toEqual(good);
+});
+
+test("a tool call nothing ever answered is dropped", () => {
+  // Every provider requires a call to be followed by its result. An aborted
+  // turn leaves one behind, and the session can never be sent again.
+  const orphaned: ModelMessage[] = [
+    { role: "user", content: "go" },
+    {
+      role: "assistant",
+      content: [
+        { type: "text", text: "starting" },
+        { type: "tool-call", toolCallId: "never-answered", toolName: "runBash", input: {} },
+      ],
+    } as any,
+  ];
+
+  const repaired = repairHistory(orphaned);
+  const parts = (repaired[1].content as any[]).map((p) => p.type);
+
+  expect(parts).not.toContain("tool-call");
+  // The text around it is still worth keeping.
+  expect(parts).toContain("text");
+});
+
+test("an assistant message left empty by the repair is removed entirely", () => {
+  const orphaned: ModelMessage[] = [
+    { role: "user", content: "go" },
+    {
+      role: "assistant",
+      content: [{ type: "tool-call", toolCallId: "never-answered", toolName: "runBash", input: {} }],
+    } as any,
+  ];
+
+  const repaired = repairHistory(orphaned);
+  expect(repaired).toHaveLength(1);
+  expect(repaired[0].role).toBe("user");
+});
+
+test("repairing an empty or malformed conversation does not throw", () => {
+  expect(repairHistory([])).toEqual([]);
+  expect(repairHistory(null as any)).toEqual([]);
+  expect(repairHistory([null, undefined] as any)).toEqual([]);
 });

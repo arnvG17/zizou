@@ -1,107 +1,182 @@
 /**
- * run-bash.ts — Tool definition for safely executing shell commands.
+ * run-bash.ts — One-shot blocking shell command.
  *
  * Layer: tools
  * Allowed imports: config, types
  *
- * This tool executes a shell command but requires user confirmation via the
- * ConfirmFn injected at creation time. It implements safety limits:
- * - 120-second timeout (enough for npm install, npx create-*, etc.)
- * - 1MB max buffer
- * - Truncates output sent back to the LLM to 5000 chars to save context window.
+ * WHAT CHANGED AND WHY:
+ *   This used to wrap promisify(exec), which REJECTS on a non-zero exit code.
+ *   The catch block kept only `err.message` and dropped `err.code`,
+ *   `err.stdout` and `err.stderr` on the floor. The practical effect: a failed
+ *   `npm run build` came back as the string "Command failed: npm run build"
+ *   with no compiler output at all. The model cannot fix what it cannot see,
+ *   so it would either retry verbatim or declare success.
  *
- * Platform handling:
- * - Windows: uses PowerShell (absolute path) for better compatibility
- * - macOS/Linux: uses the default shell (/bin/sh)
+ *   Now we spawn directly and always report the same shape — exit code,
+ *   stdout and stderr — whether the command succeeded or failed. A non-zero
+ *   exit is DATA, not an exception.
+ *
+ * SCOPE: this tool is for commands that FINISH. A dev server run through here
+ * blocks the turn until the timeout and then reports failure; that is what the
+ * `service` tool is for.
  */
 
-import { exec } from "node:child_process";
-import { promisify } from "node:util";
-import { join } from "node:path";
+import { spawn } from "node:child_process";
 import { z } from "zod";
 import { tool } from "ai";
 import { ConfirmFn } from "./types.js";
+import {
+  getShellConfig,
+  resolveCwd,
+  stripAnsi,
+  truncateHead,
+  truncateTail,
+  wrapForExitCode,
+} from "./shell.js";
 
-const execAsync = promisify(exec);
+const DEFAULT_TIMEOUT_MS = 120_000;
+const MAX_TIMEOUT_MS = 600_000;
+
+/** Per-stream output caps. stdout gets more room; stderr is what we truncate least carefully. */
+const MAX_STDOUT = 5_000;
+const MAX_STDERR = 3_000;
+
+export interface RunBashResult {
+  success: boolean;
+  exitCode: number | null;
+  stdout: string;
+  stderr: string;
+  timedOut: boolean;
+  cwd: string;
+  command: string;
+  error?: string;
+}
 
 /**
- * Returns the platform-appropriate shell configuration for exec().
- * On Windows, cmd.exe is the default but it's very limited — PowerShell
- * handles modern tooling (npm, npx, etc.) much better.
- * We resolve the absolute path to powershell.exe to ensure compatibility.
+ * Runs a command to completion and reports what happened.
+ * Never throws on a non-zero exit — that is a normal, reportable outcome.
  */
-function getShellConfig(): { shell: string } | {} {
-  if (process.platform === "win32") {
-    const systemRoot = process.env.SystemRoot || "C:\\Windows";
-    const powershellPath = join(systemRoot, "System32\\WindowsPowerShell\\v1.0\\powershell.exe");
-    return { shell: powershellPath };
+export async function execCommand(
+  command: string,
+  opts: { cwd?: string; timeoutMs?: number; root?: string } = {},
+): Promise<RunBashResult> {
+  const timeoutMs = Math.min(opts.timeoutMs ?? DEFAULT_TIMEOUT_MS, MAX_TIMEOUT_MS);
+
+  let cwd: string;
+  try {
+    cwd = resolveCwd(opts.cwd, opts.root);
+  } catch (err) {
+    return {
+      success: false,
+      exitCode: null,
+      stdout: "",
+      stderr: "",
+      timedOut: false,
+      cwd: opts.cwd ?? process.cwd(),
+      command,
+      error: err instanceof Error ? err.message : String(err),
+    };
   }
-  return {}; // use default shell on macOS/Linux
+
+  return new Promise<RunBashResult>((res) => {
+    let stdout = "";
+    let stderr = "";
+    let timedOut = false;
+    let settled = false;
+
+    const child = spawn(wrapForExitCode(command), {
+      ...getShellConfig(),
+      cwd,
+      stdio: ["ignore", "pipe", "pipe"],
+    });
+
+    const timer = setTimeout(() => {
+      timedOut = true;
+      child.kill("SIGKILL");
+    }, timeoutMs);
+
+    child.stdout?.setEncoding("utf-8");
+    child.stdout?.on("data", (c: string) => {
+      stdout += c;
+    });
+    child.stderr?.setEncoding("utf-8");
+    child.stderr?.on("data", (c: string) => {
+      stderr += c;
+    });
+
+    const finish = (exitCode: number | null, spawnError?: string) => {
+      if (settled) return;
+      settled = true;
+      clearTimeout(timer);
+      res({
+        // A timeout is a failure even if the process happened to exit 0 as it died.
+        success: !timedOut && !spawnError && exitCode === 0,
+        exitCode,
+        // stdout keeps its head (output starts with what matters),
+        // stderr keeps its TAIL (errors end with what matters).
+        stdout: truncateHead(stripAnsi(stdout), MAX_STDOUT),
+        stderr: truncateTail(stripAnsi(stderr), MAX_STDERR),
+        timedOut,
+        cwd,
+        command,
+        ...(spawnError
+          ? { error: spawnError }
+          : timedOut
+            ? { error: `Command timed out after ${timeoutMs}ms and was killed.` }
+            : {}),
+      });
+    };
+
+    child.on("error", (err) => finish(null, err.message));
+    child.on("close", (code) => finish(code));
+  });
 }
 
 export const createRunBashTool = (confirm: ConfirmFn) => {
   return tool({
     description:
-      "Execute a shell command. " +
-      "This requires user confirmation, so only use it when necessary. " +
-      "Commands run with a 120-second timeout. Output is truncated if too long. " +
-      "On Windows this runs in PowerShell; on macOS/Linux it uses the default shell.",
+      "Run a shell command and wait for it to finish. " +
+      "Returns exitCode, stdout and stderr — ALWAYS check exitCode before assuming it worked. " +
+      "Use this for commands that terminate (git, ls, tsc --noEmit, a one-off script). " +
+      "Do NOT use it for dev servers, watchers, or anything that does not exit — use the 'service' tool for those, " +
+      "or this will simply block until the timeout. " +
+      "For a sequence of commands that share state (cd, env vars, a venv), use the 'terminal' tool instead. " +
+      "Requires user confirmation. On Windows this runs in PowerShell; on macOS/Linux, the default shell.",
     inputSchema: z.object({
       command: z.string().describe("The shell command to execute"),
+      cwd: z
+        .string()
+        .optional()
+        .describe(
+          "Directory to run in, relative to the workspace root (e.g. 'frontend/todo-app'). " +
+            "Use this instead of prefixing the command with 'cd'.",
+        ),
+      timeoutMs: z
+        .number()
+        .optional()
+        .describe(
+          `How long to wait before killing the command. Default ${DEFAULT_TIMEOUT_MS}, max ${MAX_TIMEOUT_MS}. ` +
+            "Raise it for slow installs.",
+        ),
     }),
-    execute: async ({ command }) => {
-      // Step 1: User confirmation
+    execute: async ({ command, cwd, timeoutMs }) => {
+      const where = cwd ? ` (in ${cwd})` : "";
       const isApproved = await confirm(
-        `The agent wants to run the following command:\n  ${command}\nAllow?`
+        `The agent wants to run the following command:\n  ${command}${where}\nAllow?`,
       );
 
       if (!isApproved) {
         return {
           success: false as const,
+          exitCode: null,
+          stdout: "",
+          stderr: "",
+          timedOut: false,
           error: "User denied permission to run this command.",
         };
       }
 
-      // Step 2: Execute safely
-      try {
-        const { stdout, stderr } = await execAsync(command, {
-          timeout: 120_000, // 120 seconds — enough for npm install, npx create-*, etc.
-          maxBuffer: 1024 * 1024, // 1 MB
-          cwd: process.cwd(), // explicit: run from the project root
-          ...getShellConfig(),
-        });
-
-        const rawOutput = `STDOUT:\n${stdout}\nSTDERR:\n${stderr}`;
-
-        // Truncate to ~5000 characters
-        const MAX_LEN = 5000;
-        const finalOutput =
-          rawOutput.length > MAX_LEN
-            ? rawOutput.slice(0, MAX_LEN) + "\n...[OUTPUT TRUNCATED]"
-            : rawOutput;
-
-        return {
-          success: true as const,
-          output: finalOutput,
-        };
-      } catch (err) {
-        // execAsync throws on non-zero exit codes, timeouts, or buffer limits
-        let message = "Unknown error running command";
-        if (err instanceof Error) {
-          message = err.message;
-        }
-
-        // Truncate error messages too, just in case
-        const MAX_LEN = 5000;
-        if (message.length > MAX_LEN) {
-          message = message.slice(0, MAX_LEN) + "\n...[ERROR TRUNCATED]";
-        }
-
-        return {
-          success: false as const,
-          error: message,
-        };
-      }
+      return execCommand(command, { cwd, timeoutMs });
     },
   });
 };

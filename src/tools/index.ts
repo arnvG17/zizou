@@ -21,6 +21,9 @@ import { openFile } from "./open-file.js";
 import { addFileToContext } from "./add-context.js";
 import { createRunBashTool } from "./run-bash.js";
 import { createRunBackgroundTool } from "./run-background.js";
+import { createTerminalTool } from "./terminal.js";
+import { createServiceTool } from "./service.js";
+import { checkUrl } from "./check-url.js";
 import { manageTasks } from "./manage-tasks.js";
 import { managePorts } from "./manage-ports.js";
 import { createFileOperationsTool } from "./file-operations.js";
@@ -88,6 +91,15 @@ export function buildToolMap(onConfirm: ConfirmFn): Record<string, any> {
     openFile,
     addFileToContext,
     runBash: createRunBashTool(onConfirm),
+    // The process layer, in the order the model should reach for it:
+    //   terminal — a sequence sharing state, or anything that may prompt
+    //   service  — anything that does not exit (dev servers, watchers)
+    //   checkUrl — proof that a server actually serves
+    terminal: createTerminalTool(onConfirm),
+    service: createServiceTool(onConfirm),
+    checkUrl,
+    // Kept for stored transcripts and the trace/journal OPAQUE_TOOLS sets,
+    // which key off these names as strings.
     runBackground: createRunBackgroundTool(onConfirm),
     manageTasks,
     managePorts,
@@ -103,8 +115,11 @@ export { grep } from "./grep.js";
 export { listDir } from "./list-dir.js";
 export { openFile } from "./open-file.js";
 export { addFileToContext } from "./add-context.js";
-export { createRunBashTool } from "./run-bash.js";
+export { createRunBashTool, execCommand } from "./run-bash.js";
 export { createRunBackgroundTool } from "./run-background.js";
+export { createTerminalTool } from "./terminal.js";
+export { createServiceTool } from "./service.js";
+export { checkUrl } from "./check-url.js";
 export { manageTasks } from "./manage-tasks.js";
 export { managePorts } from "./manage-ports.js";
 export { createFileOperationsTool } from "./file-operations.js";

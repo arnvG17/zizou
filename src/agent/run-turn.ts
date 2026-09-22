@@ -21,7 +21,11 @@
 import { streamText, stepCountIs, type ModelMessage, type LanguageModel } from "ai";
 import { buildToolMap, buildReadOnlyToolMap, type ConfirmFn } from "../tools/index.js";
 import { extractRawToolCall, auditResponse } from "./fallback-tool-parse.js";
+import { randomUUID } from "node:crypto";
 import { getActiveJournal, type RunJournal, type UsageRecord } from "./debug/index.js";
+import { recordUsage } from "../telemetry/index.js";
+import { wrapToolsWithTrace } from "../trace/wrap-tools.js";
+import { getActiveSessionId } from "../session/registry.js";
 
 // ─── Event types emitted to whatever UI is listening ─────────────────────────
 //
@@ -77,6 +81,15 @@ export interface RunTurnOptions {
    * no plumbing. The eval harness passes one per task run instead.
    */
   journal?: RunJournal;
+  /**
+   * Groups every file change this turn makes into one undoable unit.
+   *
+   * One user prompt is one turnId, even when plan mode runs several steps to
+   * satisfy it — `/undo` should undo what the user asked for, not one internal
+   * step of it. Absent means this turn is not part of a larger orchestration,
+   * so it still gets a group of its own.
+   */
+  turnId?: string;
   /** Label for this turn in the journal, e.g. "executor" or "chat". */
   journalRole?: string;
   /**
@@ -122,6 +135,9 @@ export async function* runTurn(
 ): AsyncGenerator<AgentEvent, ModelMessage[]> {
   const { history, model, provider, onConfirm, systemPrompt, maxSteps = 15, toolMode = "full", temperature, maxOutputTokens, abortSignal } = options;
 
+  // Every file change this turn makes is grouped under this id. See trace/.
+  const turnId = options.turnId ?? randomUUID();
+
   // Where this turn gets recorded. See debug/run-journal.ts — the journal is
   // write-only, so an absent one degrades to a no-op rather than a branch.
   const journal = options.journal ?? getActiveJournal();
@@ -129,6 +145,23 @@ export async function* runTurn(
   const modelId = typeof model === "string" ? model : (model as any)?.modelId;
 
   // ── Duplicate tool call tracker within this turn loop ────────────────
+  //
+  // The guard below refuses a tool call that already failed with identical
+  // arguments. That is right for editFile, where an unchanged retry is thrash.
+  // It is WRONG for commands: `npm run build` after fixing the error it
+  // reported has identical arguments by definition, so the guard was refusing
+  // the normal shape of a fix-and-retry loop — and refusing it silently, as a
+  // synthetic failure the model could only read as "the build is still broken".
+  const RETRYABLE_TOOLS = new Set([
+    "runBash",
+    "runBackground",
+    "terminal",
+    "service",
+    "manageTasks",
+    "managePorts",
+    "checkUrl",
+  ]);
+
   const callHashes = new Map<string, { attempts: number; failed: boolean }>();
 
   const wrapToolForDuplicateDetection = (toolName: string, originalTool: any) => {
@@ -138,7 +171,7 @@ export async function* runTurn(
       execute: async (args: any, context: any) => {
         const hash = `${toolName}:${JSON.stringify(args)}`;
         const existing = callHashes.get(hash);
-        if (existing && existing.failed && existing.attempts >= 1) {
+        if (!RETRYABLE_TOOLS.has(toolName) && existing && existing.failed && existing.attempts >= 1) {
           existing.attempts++;
           journal.duplicateBlocked(toolName, args);
           return {
@@ -175,14 +208,24 @@ export async function* runTurn(
   // Order matters. The journal wraps the OUTSIDE, so it records what the model
   // actually got back — including a duplicate-block refusal, which is a real
   // event the log should show rather than an invisible substitution.
+  //
+  // The TRACE wrapper goes outside the journal's. Both snapshot the filesystem
+  // around execute(), and the outer one must see the same before-state the
+  // tool itself will act on. Being outermost also means a duplicate-block
+  // refusal never reaches it as a file change, which is correct — nothing was
+  // written. Unlike the journal, this one is always on: undo cannot depend on
+  // whether the user happened to set ZIZOU_DEBUG.
   const tools = rawTools
-    ? journal.wrapTools(
-        Object.fromEntries(
-          Object.entries(rawTools).map(([name, toolInstance]) => [
-            name,
-            wrapToolForDuplicateDetection(name, toolInstance),
-          ])
-        )
+    ? wrapToolsWithTrace(
+        journal.wrapTools(
+          Object.fromEntries(
+            Object.entries(rawTools).map(([name, toolInstance]) => [
+              name,
+              wrapToolForDuplicateDetection(name, toolInstance),
+            ])
+          )
+        ),
+        { turnId, sessionId: getActiveSessionId() ?? null, root: process.cwd() },
       )
     : undefined;
 
@@ -262,15 +305,25 @@ export async function* runTurn(
         // One LLM round trip. Usage is journaled PER STEP and never again at
         // the end: result.usage is the sum over steps, so recording both would
         // double every token count in the totals.
-        case "step-finish":
+        case "step-finish": {
+          const stepUsage = toUsageRecord(part.usage);
           journal.llmCall({
             role: journalRole,
             modelId,
             finishReason: part.finishReason ?? "unknown",
-            usage: toUsageRecord(part.usage),
+            usage: stepUsage,
             steps: stepIndex,
           });
+          // Same per-step reasoning applies here: recording result.usage as
+          // well would double-count, since it is the sum over these steps.
+          recordUsage({
+            role: journalRole === "chat" ? "chat" : "executor",
+            provider: provider ?? "unknown",
+            modelId: modelId ?? "unknown",
+            usage: stepUsage,
+          });
           break;
+        }
 
         case "text-delta":
           assistantText += part.text;

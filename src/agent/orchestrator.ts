@@ -78,15 +78,16 @@ import type {
   ProjectContext,
   ScopeHint,
   PlanRevision,
+  Finding,
 } from "./types.js";
 import { plan } from "./planner.js";
 import { routePrompt, type RouteDecision } from "./router.js";
 import { executeStep } from "./executor.js";
 import { buildSystemPrompt } from "../context/build-system-prompt.js";
-import { capturePreSnapshot, verifyStep } from "./verifier.js";
+import { capturePreSnapshot, verifyStep, renderRepairContext } from "./verifier.js";
 import { type AgentEvent } from "./run-turn.js";
-import { SessionLogger } from "./debug/index.js";
-import { createCheckpoint } from "../checkpoint/manager.js";
+import { getActiveJournal } from "./debug/index.js";
+import { randomUUID } from "node:crypto";
 import { getActiveSessionId } from "../session/registry.js";
 import { resolve } from "path";
 
@@ -137,6 +138,10 @@ export type OrchestratorEvent =
   // The UI shows whether verification passed or failed.
   | { kind: "step-verified"; step: PlanStep; verification: VerificationResult; modelTier?: "hosted" | "local" }
 
+  // A step failed on something real and is being tried again with the actual
+  // error fed back. Carries only the HARD findings — the reason for the retry.
+  | { kind: "step-retry"; step: PlanStep; findings: Finding[]; attempt: number }
+
   // Emitted when the conversation history is updated (e.g. at the end of a build-mode step)
   | { kind: "history-updated"; history: ModelMessage[] }
 
@@ -168,30 +173,6 @@ async function* streamStep(
   return result.value;
 }
 
-/**
- * Records a verified step in the checkpoint history.
- *
- * ONE call site's worth of logic, called from both modes. Build and plan mode
- * each had their own near-identical copy of this block, and each wrote to TWO
- * stores: the checkpoint history and a separate undo/redo snapshot stack that
- * knew nothing about it. There is now a single chain; /undo and /redo move a
- * head pointer along it (see checkpoint/manager.ts).
- */
-function recordStepCheckpoint(step: PlanStep, stepResult: StepResult): void {
-  try {
-    createCheckpoint(
-      step.description,
-      stepResult.claimedFiles,
-      stepResult.oldFileStates,
-      getActiveSessionId() ?? undefined,
-    );
-  } catch (error) {
-    // A failed checkpoint must not fail the step — the work on disk is real
-    // either way, we just lose the ability to undo it.
-    console.warn("Failed to create checkpoint for step:", error);
-  }
-}
-
 // ─── Scope assessment ────────────────────────────────────────────────────────
 //
 // Deterministic (non-LLM) check for whether a build-mode step turned out
@@ -219,12 +200,115 @@ function assessStepScope(
     return { reason: "touched-many-files", fileCount: result.claimedFiles.length };
   }
 
-  if (!verification.verified) {
+  // Only a HARD finding earns a mention. Soft findings are predictions that
+  // did not pan out — nagging about those is what made this hint noise.
+  if (verification.findings.some((f) => f.severity === "hard")) {
     return { reason: "verification-failed", fileCount: result.claimedFiles.length };
   }
 
   // Appropriately scoped — say nothing.
   return null;
+}
+
+// ─── Step execution with repair ──────────────────────────────────────────────
+//
+// One place where a step is run, verified, and — if it genuinely failed —
+// tried once more with the real error in hand.
+//
+// WHY A REPAIR PASS EXISTS AT ALL:
+//   There was previously no retry anywhere in the loop. Plan mode explicitly
+//   continued past a failure, build mode was a straight line. So a step whose
+//   build broke reported the failure and then handed the next step a broken
+//   tree, and the only actor who could do anything about it was the user.
+//
+// WHY EXACTLY ONE:
+//   One attempt covers the overwhelmingly common case — a typo'd import, a
+//   missing dependency, a wrong path — where the error message contains the
+//   fix. Beyond that a model tends to thrash, and each pass writes more edits
+//   on top of a tree already in an unexpected state. If one repair with the
+//   full stderr does not do it, a human should look.
+
+const MAX_REPAIR_ATTEMPTS = 1;
+
+interface RunStepArgs {
+  step: PlanStep;
+  context: ProjectContext;
+  model: LanguageModel;
+  onConfirm: ConfirmFn;
+  provider?: string;
+  priorSteps?: StepDigest[];
+  history?: ModelMessage[];
+  abortSignal?: AbortSignal;
+  turnId: string;
+  totalSteps: number;
+}
+
+interface RunStepOutcome {
+  result: StepResult;
+  verification: VerificationResult;
+}
+
+/**
+ * Executes one step, verifies it, and retries once on a HARD failure.
+ *
+ * Soft findings never trigger a retry — they are predictions that did not pan
+ * out, not evidence that anything went wrong.
+ */
+async function* runStepWithVerification(
+  args: RunStepArgs,
+): AsyncGenerator<OrchestratorEvent, RunStepOutcome> {
+  const { step, context, model, onConfirm, provider, abortSignal, turnId, totalSteps } = args;
+
+  let attempt = 0;
+  let repairContext = "";
+  let outcome!: RunStepOutcome;
+
+  for (;;) {
+    const modelTier: "hosted" | "local" = provider === "ollama" ? "local" : "hosted";
+    if (attempt === 0) {
+      yield { kind: "step-start", step, totalSteps, modelTier };
+    }
+
+    const preSnapshots = capturePreSnapshot(step, context.projectRoot);
+
+    const result = yield* streamStep(
+      executeStep({
+        step,
+        context,
+        model,
+        onConfirm,
+        provider,
+        priorSteps: args.priorSteps,
+        conversationHistory: args.history,
+        abortSignal,
+        turnId,
+        repairContext: repairContext || undefined,
+      }),
+    );
+
+    if (result.conversationHistory) {
+      yield { kind: "history-updated", history: result.conversationHistory };
+    }
+
+    const verification = await verifyStep(step, result, context.projectRoot, preSnapshots, model);
+    outcome = { result, verification };
+
+    const hardFindings = verification.findings.filter((f) => f.severity === "hard");
+    const canRetry = hardFindings.length > 0 && attempt < MAX_REPAIR_ATTEMPTS && !abortSignal?.aborted;
+
+    if (!canRetry) {
+      yield { kind: "step-verified", step, verification, modelTier: result.modelTier };
+      return outcome;
+    }
+
+    // Report the attempt as failed before retrying, so the user sees WHY a
+    // retry is happening rather than watching the step silently run twice.
+    yield { kind: "step-verified", step, verification, modelTier: result.modelTier };
+    yield { kind: "step-retry", step, findings: hardFindings, attempt: attempt + 1 };
+
+    repairContext = renderRepairContext(verification.findings);
+    attempt++;
+  }
 }
 
 // ─── Dependency Ordering ─────────────────────────────────────────────────────
@@ -312,55 +396,26 @@ async function* runBuildMode(
     dependsOn: [],
   };
 
-  // Signal that we're starting the (only) step
-  const startModelTier: "hosted" | "local" = provider === "ollama" ? "local" : "hosted";
-  yield { kind: "step-start", step: syntheticStep, totalSteps: 1, modelTier: startModelTier };
+  // One id for every file change this request makes, so `/undo` reverts the
+  // whole request rather than one step of it.
+  //
+  // Generated per invocation rather than carried across plan-approval
+  // re-entries, which is safe because the earlier invocations only produce a
+  // plan — files are written solely by the invocation that executes it.
+  const turnId = randomUUID();
 
-  // Capture pre-execution filesystem state.
-  // In build mode, targetFiles is empty, so this captures nothing upfront.
-  // The verifier will still check claimedFiles from the StepResult.
-  const preSnapshots = capturePreSnapshot(syntheticStep, context.projectRoot);
-
-  // Capture old file states for checkpoint creation and undo/redo
-  // We need to capture content before execution to create proper patches
-  const oldFileStates = new Map<string, string | null>();
-  // In build mode, we don't know targetFiles upfront, so we capture an empty before state
-  // The snapshot will be built after execution using claimedFiles
-  const beforeStates = new Map<string, string | null>();
-  
-  // Execute the step, streaming its events to the UI as they happen.
-  const stepResult = yield* streamStep(
-    executeStep({
-      step: syntheticStep,
-      context,
-      model,
-      onConfirm,
-      provider,
-      conversationHistory: history,
-      abortSignal,
-    }),
-  );
-
-  // Yield the updated conversation history to preserve memory
-  if (stepResult.conversationHistory) {
-    yield { kind: "history-updated", history: stepResult.conversationHistory };
-  }
-
-  // Verify the execution result against filesystem state
-  const verification = await verifyStep(
-    syntheticStep,
-    stepResult,
-    context.projectRoot,
-    preSnapshots,
+  // Execute, verify, and repair once if something actually broke.
+  const { result: stepResult, verification } = yield* runStepWithVerification({
+    step: syntheticStep,
+    context,
     model,
-  );
-
-  // Report verification result
-  yield { kind: "step-verified", step: syntheticStep, verification, modelTier: stepResult.modelTier };
-
-  if (verification.verified) {
-    recordStepCheckpoint(syntheticStep, stepResult);
-  }
+    onConfirm,
+    provider,
+    history,
+    abortSignal,
+    turnId,
+    totalSteps: 1,
+  });
 
   // ── Scope hint ────────────────────────────────────────────
   //
@@ -369,11 +424,11 @@ async function* runBuildMode(
   // switch modes — that is the user's call and only the user's.
   const hint = assessStepScope(stepResult, verification);
   if (hint) {
-    SessionLogger.logScopeHint(hint.reason);
+    getActiveJournal().note("scope-hint", hint.reason);
     yield { kind: "scope-hint", hint };
   }
 
-  SessionLogger.logSessionComplete();
+  getActiveJournal().runEnd(true);
   yield { kind: "complete" };
 }
 
@@ -411,6 +466,10 @@ async function* runPlanMode(
 ): AsyncGenerator<OrchestratorEvent> {
   // Emit mode info
   yield { kind: "mode-info", mode: "plan", reason };
+
+  // Every step of an approved plan shares one id, so `/undo` reverts the
+  // request the user made rather than only its last step.
+  const turnId = randomUUID();
 
   let steps: PlanStep[];
 
@@ -457,10 +516,10 @@ async function* runPlanMode(
     // Skip steps that have already been completed and verified
     if (completedStepIndices.includes(step.index)) {
       yield { kind: "step-start", step, totalSteps };
-      yield { 
-        kind: "step-verified", 
-        step, 
-        verification: { verified: true, mismatches: [] },
+      yield {
+        kind: "step-verified",
+        step,
+        verification: { verified: true, findings: [], mismatches: [] },
         modelTier: "hosted" // Default for skipped steps
       };
       // A skipped step still produced files in an earlier run, so later steps
@@ -474,39 +533,24 @@ async function* runPlanMode(
       continue;
     }
 
-    // Signal step start
-    const stepModelTier: "hosted" | "local" = provider === "ollama" ? "local" : "hosted";
-    yield { kind: "step-start", step, totalSteps, modelTier: stepModelTier };
-
-    // Capture pre-execution filesystem state for this step's target files
-    const preSnapshots = capturePreSnapshot(step, context.projectRoot);
-
-    // Execute the step, streaming its events to the UI as they happen.
-    const stepResult = yield* streamStep(
-      executeStep({ step, context, model, onConfirm, provider, priorSteps, conversationHistory: history, abortSignal }),
-    );
-
-    // Verify the step's execution
-    const verification = await verifyStep(
-      step,
-      stepResult,
-      context.projectRoot,
-      preSnapshots,
-      model,
-    );
-
-    // Report verification result — in plan mode we continue even if
-    // verification fails (the user already approved the plan), but we
-    // still report the result so they can see what went wrong.
-    yield { kind: "step-verified", step, verification, modelTier: stepResult.modelTier };
-
-    // ── Checkpoint creation on successful verification ─────────────────
+    // Execute, verify, and repair once if something actually broke.
     //
-    // If verification succeeded, create a checkpoint for this step.
-    // This tracks the changes locally via the file-based checkpoint system.
-    if (verification.verified) {
-      recordStepCheckpoint(step, stepResult);
-    }
+    // After the repair attempt we still CONTINUE on failure — the user
+    // approved this plan, and stopping halfway leaves a half-built tree with
+    // no explanation. The difference from before is that "failure" now means
+    // a hard finding that survived a retry, rather than a guessed path.
+    const { result: stepResult, verification } = yield* runStepWithVerification({
+      step,
+      context,
+      model,
+      onConfirm,
+      provider,
+      priorSteps,
+      history,
+      abortSignal,
+      turnId,
+      totalSteps,
+    });
 
     // Record what this step did, for the steps that follow. claimedFiles is
     // what the executor actually touched, which is more honest than the
@@ -519,7 +563,7 @@ async function* runPlanMode(
     });
   }
 
-  SessionLogger.logSessionComplete();
+  getActiveJournal().runEnd(true);
   yield { kind: "complete" };
 }
 
@@ -773,7 +817,12 @@ export async function* runOrchestrator(
 
   // Only log session start on the very first entry of the conversation turn
   if (!isMidFlow) {
-    SessionLogger.logSessionStart(userPrompt, modeContext.mode, context.projectRoot);
+    getActiveJournal().runStart({
+      prompt: userPrompt,
+      mode: modeContext.mode,
+      provider,
+      meta: { projectRoot: context.projectRoot },
+    });
   }
 
   // ── Routing ──────────────────────────────────────────────────────────
@@ -792,7 +841,7 @@ export async function* runOrchestrator(
   });
 
   if (decision) {
-    SessionLogger.logRouteDecision(decision.route, decision.reason, decision.confidence, decision.source);
+    getActiveJournal().route(decision.route, decision.confidence, `${decision.reason} (via ${decision.source})`);
     yield { kind: "route-decided", decision };
   }
 

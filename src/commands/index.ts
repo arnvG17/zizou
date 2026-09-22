@@ -32,31 +32,15 @@ import {
   getActiveSessionId,
 } from "../session/registry.js";
 import {
-  listCheckpoints,
-  restoreCheckpoint,
-  createBranch,
-  switchBranch,
-  listBranches,
-  getActiveBranch,
-  diffCheckpoints,
-  deleteCheckpoint,
-  getLocalChanges,
-  revertLocalChanges,
-  computeLineDiff,
-  getSessionChanges,
-  revertSessionChanges,
-  hasSessionBaseline,
-  formatColoredDiff,
-  undoCheckpoint,
-  redoCheckpoint,
-  getUndoDepth,
-  getRedoDepth,
-} from "../checkpoint/manager.js";
+  handleChanges,
+  redoLastTurn,
+  undoLastTurn,
+} from "./changes.js";
 import { exportTranscript } from "./export-transcript.js";
+import { runEvals, runTests } from "./evals.js";
 import type { ConfirmFn } from "../tools/index.js";
 import { sessionPermissions } from "../tools/index.js";
-import type { FilePatch } from "../checkpoint/types.js";
-import type { PlanStep } from "../agent/types.js";
+import type { Finding, PlanStep } from "../agent/types.js";
 import type { Mode } from "../agent/mode.js";
 import {
   EFFORT_LEVELS,
@@ -91,10 +75,12 @@ export const SLASH_COMMANDS: SlashCommandInfo[] = [
   { command: "/skills", description: "List available custom agent skills" },
   { command: "/clear", description: "Reset conversation history & start new session" },
   { command: "/session", description: "Session management (new, list, switch, delete)" },
-  { command: "/checkpoint", description: "Checkpoint management (list, diff, restore, branch, switch, delete, revert)" },
-  { command: "/undo", description: "Undo the last step's file changes" },
-  { command: "/redo", description: "Redo the last undone step" },
+  { command: "/changes", description: "Show and revert the files the agent changed (diff, revert)" },
+  { command: "/undo", description: "Revert every file the last request changed" },
+  { command: "/redo", description: "Re-apply the last undone request" },
   { command: "/export", description: "Export conversation transcript to markdown" },
+  { command: "/evals", description: "Benchmark the agent on the golden tasks (try: /evals smoke, /evals report)" },
+  { command: "/test", description: "Run the project's unit tests" },
   { command: "/permissions", description: "View or clear active session permissions" },
   { command: "/help", description: "Show available commands & active provider" },
   { command: "/exit", description: "Close Zizou" },
@@ -149,7 +135,8 @@ export type LogEntry =
       projectRoot?: string;
     }
   | { kind: "step-progress"; stepIndex: number; totalSteps: number; description: string; modelTier?: "hosted" | "local" }
-  | { kind: "verification"; stepIndex: number; verified: boolean; mismatches: string[]; verboseFeedback?: string; modelTier?: "hosted" | "local" | undefined }
+  | { kind: "verification"; stepIndex: number; verified: boolean; findings: Finding[]; mismatches: string[]; verboseFeedback?: string; modelTier?: "hosted" | "local" | undefined }
+  | { kind: "step-retry"; stepIndex: number; reason: string; attempt: number }
   | { kind: "scope-hint"; text: string }
   | { kind: "mode-switch"; mode: Mode; reason: string };
 
@@ -230,7 +217,27 @@ function coerceLogEntry(raw: unknown): LogEntry | null {
         kind: "verification",
         stepIndex: typeof raw.stepIndex === "number" ? raw.stepIndex : 0,
         verified: raw.verified === true,
+        // A log written before findings existed has only mismatch strings.
+        // Rebuild minimal findings from them so the renderer has one shape to
+        // handle — and treat them as hard, which is what they meant then.
+        findings: Array.isArray(raw.findings)
+          ? (raw.findings as Finding[])
+          : arr<string>(raw.mismatches).map((m) => ({
+              code: "tool-error" as const,
+              severity: "hard" as const,
+              detail: m,
+            })),
         mismatches: arr<string>(raw.mismatches),
+        verboseFeedback: typeof raw.verboseFeedback === "string" ? raw.verboseFeedback : undefined,
+      } as LogEntry;
+
+    case "step-retry":
+      return {
+        ...raw,
+        kind: "step-retry",
+        stepIndex: typeof raw.stepIndex === "number" ? raw.stepIndex : 0,
+        reason: str(raw.reason),
+        attempt: typeof raw.attempt === "number" ? raw.attempt : 1,
       } as LogEntry;
 
     case "mode-switch":
@@ -535,8 +542,9 @@ Use /build when you want changes made.`,
   /prompt                   Dump the full system prompt sent to the LLM
   /skills                   List available custom agent skills
   /clear                    Reset conversation history & start new session
-  /undo                     Undo the last step's file changes
-  /redo                     Redo the last undone step
+  /changes                  List the files the agent changed; diff or revert one
+  /undo                     Revert every file the last request changed
+  /redo                     Re-apply the last undone request
   /export                   Export conversation transcript to markdown
   /exit                     Close Zizou
 
@@ -1036,13 +1044,13 @@ ${cmdList}
 
       try {
         const session = createSession(sessionArg);
-        // NOTE: undo history is deliberately NOT cleared here.
+        // NOTE: the file trace is deliberately NOT cleared here.
         //
-        // It used to be, because the undo stack was a separate store that
-        // knew nothing about the checkpoint history and could desync from it.
-        // Undo is now a head pointer on the project's checkpoint chain, and
-        // creating a session changes nothing on disk — so the previous step
-        // is still there and still correctly undoable.
+        // The ledger is per project and append-only, so nothing is lost by
+        // starting a session. But /changes and /undo scope themselves to the
+        // ACTIVE session, so the previous session's changes stop appearing
+        // once this one starts — they remain on disk in the ledger, just out
+        // of view. See trace/query.ts.
         ctx.onSessionChange?.(session.name);
         ctx.setLog((l: LogEntry[]) => [
           ...l,
@@ -1148,406 +1156,41 @@ ${cmdList}
     return true;
   }
 
-  // ── /checkpoint — checkpoint management ─────────────────────────────────────
-  if (command === "checkpoint") {
-    const subCommand = args[0]?.toLowerCase();
-    const target = args[1];
-    const target2 = args[2];
-
-    if (subCommand === "list") {
-      const checkpoints = listCheckpoints();
-      const branches = listBranches();
-      const activeBranch = getActiveBranch();
-
-      if (checkpoints.length === 0) {
-        ctx.setLog((l: LogEntry[]) => [
-          ...l,
-          { kind: "user", text },
-          { kind: "assistant", text: "No checkpoints found." },
-        ]);
-        return true;
-      }
-
-      let output = "Checkpoints:\n\n";
-      for (const checkpoint of checkpoints) {
-        const branch = branches.find(b => b.id === checkpoint.branchId);
-        const branchName = branch?.name || "unknown";
-        const isActive = activeBranch?.id === checkpoint.branchId ? " [ACTIVE]" : "";
-        output += `  Step ${checkpoint.stepIndex}: ${checkpoint.description}\n    ID: ${checkpoint.id.slice(0, 8)}\n    Branch: ${branchName}${isActive}\n    Time: ${new Date(checkpoint.timestamp).toLocaleString()}\n`;
-      }
-      
+  // ── /changes — what the agent changed, and how to take it back ────────────
+  //
+  // Replaces /checkpoint. The old command exposed branches, restore points and
+  // a head pointer over a history that was frequently empty: changes were only
+  // recorded when a step passed verification, and the "before" snapshot raced
+  // the write it was meant to precede. Tracing now happens inside the tool call
+  // itself (trace/wrap-tools.ts), so this command can show a plain list of
+  // files and revert them one at a time.
+  if (command === "changes") {
+    try {
+      const output = handleChanges(process.cwd(), args);
       ctx.setLog((l: LogEntry[]) => [
         ...l,
         { kind: "user", text },
         { kind: "assistant", text: output },
       ]);
-      return true;
-    }
-
-    if (subCommand === "diff") {
-      const checkpoints = listCheckpoints();
-
-      // Check if --full or -f is specified anywhere in the checkpoint args
-      const showFull = args.some(arg => arg.toLowerCase() === "--full" || arg.toLowerCase() === "-f");
-      const cleanArgs = args.filter(arg => arg.toLowerCase() !== "--full" && arg.toLowerCase() !== "-f");
-      const target = cleanArgs[1];
-      const target2 = cleanArgs[2];
-
-      if (!target || target === "session") {
-        // Show local changes
-        const isFullSession = target === "session";
-        const changes = isFullSession ? getSessionChanges() : getLocalChanges();
-        const activeBranch = getActiveBranch();
-        const headId = activeBranch?.headCheckpointId ? activeBranch.headCheckpointId.slice(0, 8) : "none";
-        const branchName = activeBranch ? activeBranch.name : "unknown";
-        
-        if (changes.length === 0) {
-          // Distinguish "nothing changed" from "no baseline to compare against".
-          const noBaseline = isFullSession && !hasSessionBaseline();
-          ctx.setLog((l: LogEntry[]) => [
-            ...l,
-            { kind: "user", text },
-            { kind: "assistant", text: noBaseline
-                ? `No session baseline recorded for branch "${branchName}", so a full-session diff isn't available. Use '/checkpoint diff' to see changes since the head checkpoint.`
-                : isFullSession
-                ? `No changes found in the entire session for branch "${branchName}".`
-                : `No uncommitted local changes since checkpoint ${headId}.`
-            },
-          ]);
-          return true;
-        }
-
-        let output = isFullSession
-          ? `Complete changes for the full session on branch "${branchName}":\n\n`
-          : `Uncommitted local changes since checkpoint ${headId}:\n\n`;
-          
-        for (const change of changes) {
-          output += `=== ${change.operation.toUpperCase()}: ${change.filePath} ===\n`;
-          const diff = formatColoredDiff(change.filePath, change.operation, change.oldContent, change.newContent, showFull);
-          output += diff + "\n\n";
-        }
-
-        ctx.setLog((l: LogEntry[]) => [
-          ...l,
-          { kind: "user", text },
-          { kind: "assistant", text: output.trim() },
-        ]);
-        return true;
-      }
-
-      if (checkpoints.length === 0) {
-        ctx.setLog((l: LogEntry[]) => [
-          ...l,
-          { kind: "user", text },
-          { kind: "error", text: "No checkpoints found." },
-        ]);
-        return true;
-      }
-
-      // Find checkpoint by ID or step index
-      let fromCheckpoint: typeof checkpoints[0] | undefined;
-      let toCheckpoint: typeof checkpoints[0] | undefined;
-
-      if (target2) {
-        // Two targets provided: diff between them
-        fromCheckpoint = checkpoints.find(c => c.id.startsWith(target) || c.stepIndex.toString() === target);
-        toCheckpoint = checkpoints.find(c => c.id.startsWith(target2) || c.stepIndex.toString() === target2);
-      } else {
-        // One target: diff from its parent to this target
-        toCheckpoint = checkpoints.find(c => c.id.startsWith(target) || c.stepIndex.toString() === target);
-        if (toCheckpoint) {
-          const targetCheckpoint = toCheckpoint;
-          fromCheckpoint = checkpoints.find(c => c.id === targetCheckpoint.parentId);
-        }
-      }
-
-      if (!toCheckpoint) {
-        ctx.setLog((l: LogEntry[]) => [
-          ...l,
-          { kind: "user", text },
-          { kind: "error", text: `Checkpoint ${target} not found.` },
-        ]);
-        return true;
-      }
-
-      try {
-        let patches: FilePatch[] = [];
-        let fromDesc = "root";
-        if (fromCheckpoint) {
-          patches = diffCheckpoints(fromCheckpoint.id, toCheckpoint.id);
-          fromDesc = fromCheckpoint.id.slice(0, 8);
-        } else {
-          patches = toCheckpoint.patches;
-        }
-
-        let output = `Changes from ${fromDesc} to ${toCheckpoint.id.slice(0, 8)} (${toCheckpoint.description}):\n\n`;
-        if (patches.length === 0) {
-          output += "  No changes found.\n";
-        } else {
-          for (const patch of patches) {
-            output += `=== ${patch.operation.toUpperCase()}: ${patch.filePath} ===\n`;
-            const diff = formatColoredDiff(patch.filePath, patch.operation, patch.oldContent, patch.newContent, showFull);
-            output += diff + "\n\n";
-          }
-        }
-        
-        ctx.setLog((l: LogEntry[]) => [
-          ...l,
-          { kind: "user", text },
-          { kind: "assistant", text: output.trim() },
-        ]);
-      } catch (err: any) {
-        ctx.setLog((l: LogEntry[]) => [
-          ...l,
-          { kind: "user", text },
-          { kind: "error", text: err.message },
-        ]);
-      }
-      return true;
-    }
-
-    if (subCommand === "revert") {
-      const isFullSession = target?.toLowerCase() === "session";
-      const changes = isFullSession ? getSessionChanges() : getLocalChanges();
-      
-      if (changes.length === 0) {
-        const noBaseline = isFullSession && !hasSessionBaseline();
-        ctx.setLog((l: LogEntry[]) => [
-          ...l,
-          { kind: "user", text },
-          { kind: noBaseline ? "error" : "assistant", text: noBaseline
-              ? "No session baseline recorded, so there is no known state to revert to. Use '/checkpoint revert' (without 'session') to revert to the head checkpoint instead."
-              : isFullSession
-              ? "No changes in the session to revert."
-              : "No uncommitted local changes to revert."
-          },
-        ]);
-        return true;
-      }
-
-      try {
-        if (isFullSession) {
-          revertSessionChanges();
-        } else {
-          revertLocalChanges();
-        }
-        ctx.setLog((l: LogEntry[]) => [
-          ...l,
-          { kind: "user", text },
-          { kind: "assistant", text: isFullSession
-              ? `Successfully reverted all ${changes.length} change(s) from the full session back to its start.`
-              : `Successfully reverted ${changes.length} file change(s) in the workspace back to the head checkpoint.`
-          },
-        ]);
-      } catch (err: any) {
-        ctx.setLog((l: LogEntry[]) => [
-          ...l,
-          { kind: "user", text },
-          { kind: "error", text: `Failed to revert changes: ${err.message}` },
-        ]);
-      }
-      return true;
-    }
-
-    if (subCommand === "restore") {
-      if (!target) {
-        ctx.setLog((l: LogEntry[]) => [
-          ...l,
-          { kind: "user", text },
-          { kind: "error", text: "Usage: /checkpoint restore <checkpoint-id>" },
-        ]);
-        return true;
-      }
-
-      const checkpoints = listCheckpoints();
-      const checkpoint = checkpoints.find(c => c.id.startsWith(target) || c.stepIndex.toString() === target);
-
-      if (!checkpoint) {
-        ctx.setLog((l: LogEntry[]) => [
-          ...l,
-          { kind: "user", text },
-          { kind: "error", text: `Checkpoint ${target} not found.` },
-        ]);
-        return true;
-      }
-
-      try {
-        restoreCheckpoint(checkpoint.id);
-        ctx.setLog((l: LogEntry[]) => [
-          ...l,
-          { kind: "user", text },
-          { kind: "assistant", text: `Restored to checkpoint: ${checkpoint.description}` },
-        ]);
-      } catch (err: any) {
-        ctx.setLog((l: LogEntry[]) => [
-          ...l,
-          { kind: "user", text },
-          { kind: "error", text: err.message },
-        ]);
-      }
-      return true;
-    }
-
-    if (subCommand === "branch") {
-      if (!target) {
-        ctx.setLog((l: LogEntry[]) => [
-          ...l,
-          { kind: "user", text },
-          { kind: "error", text: "Usage: /checkpoint branch <name> [from-checkpoint-id]" },
-        ]);
-        return true;
-      }
-
-      const checkpoints = listCheckpoints();
-      const fromCheckpointId = target2 
-        ? checkpoints.find(c => c.id.startsWith(target2) || c.stepIndex.toString() === target2)?.id
-        : (getActiveBranch()?.headCheckpointId || checkpoints[checkpoints.length - 1]?.id);
-
-      if (!fromCheckpointId) {
-        ctx.setLog((l: LogEntry[]) => [
-          ...l,
-          { kind: "user", text },
-          { kind: "error", text: "No checkpoint to branch from." },
-        ]);
-        return true;
-      }
-
-      try {
-        const branch = createBranch(target, fromCheckpointId);
-        ctx.setLog((l: LogEntry[]) => [
-          ...l,
-          { kind: "user", text },
-          { kind: "assistant", text: `Created branch "${branch.name}" from checkpoint ${fromCheckpointId.slice(0, 8)}` },
-        ]);
-      } catch (err: any) {
-        ctx.setLog((l: LogEntry[]) => [
-          ...l,
-          { kind: "user", text },
-          { kind: "error", text: err.message },
-        ]);
-      }
-      return true;
-    }
-
-    if (subCommand === "switch") {
-      if (!target) {
-        ctx.setLog((l: LogEntry[]) => [
-          ...l,
-          { kind: "user", text },
-          { kind: "error", text: "Usage: /checkpoint switch <branch-name>" },
-        ]);
-        return true;
-      }
-
-      const branches = listBranches();
-      const branch = branches.find(b => b.name === target || b.id.startsWith(target));
-
-      if (!branch) {
-        ctx.setLog((l: LogEntry[]) => [
-          ...l,
-          { kind: "user", text },
-          { kind: "error", text: `Branch ${target} not found.` },
-        ]);
-        return true;
-      }
-
-      try {
-        switchBranch(branch.id);
-        ctx.setLog((l: LogEntry[]) => [
-          ...l,
-          { kind: "user", text },
-          { kind: "assistant", text: `Switched to branch "${branch.name}"` },
-        ]);
-      } catch (err: any) {
-        ctx.setLog((l: LogEntry[]) => [
-          ...l,
-          { kind: "user", text },
-          { kind: "error", text: err.message },
-        ]);
-      }
-      return true;
-    }
-
-    if (subCommand === "delete") {
-      if (!target) {
-        ctx.setLog((l: LogEntry[]) => [
-          ...l,
-          { kind: "user", text },
-          { kind: "error", text: "Usage: /checkpoint delete <checkpoint-id>" },
-        ]);
-        return true;
-      }
-
-      const checkpoints = listCheckpoints();
-      const checkpoint = checkpoints.find(c => c.id.startsWith(target) || c.stepIndex.toString() === target);
-
-      if (!checkpoint) {
-        ctx.setLog((l: LogEntry[]) => [
-          ...l,
-          { kind: "user", text },
-          { kind: "error", text: `Checkpoint ${target} not found.` },
-        ]);
-        return true;
-      }
-
-      try {
-        deleteCheckpoint(checkpoint.id);
-        ctx.setLog((l: LogEntry[]) => [
-          ...l,
-          { kind: "user", text },
-          { kind: "assistant", text: `Deleted checkpoint: ${checkpoint.description}` },
-        ]);
-      } catch (err: any) {
-        ctx.setLog((l: LogEntry[]) => [
-          ...l,
-          { kind: "user", text },
-          { kind: "error", text: err.message },
-        ]);
-      }
-      return true;
-    }
-
-    // Show usage if no subcommand
-    ctx.setLog((l: LogEntry[]) => [
-      ...l,
-      { kind: "user", text },
-      { kind: "assistant", text: "Usage:\n  /checkpoint list              List all checkpoints\n  /checkpoint diff               Show local uncommitted changes\n  /checkpoint diff <id>         Show changes in checkpoint\n  /checkpoint diff <from> <to>  Compare two checkpoints\n  /checkpoint restore <id>      Restore to checkpoint\n  /checkpoint branch <name>     Create new branch\n  /checkpoint switch <branch>   Switch to branch\n  /checkpoint delete <id>       Delete checkpoint\n  /checkpoint revert            Revert all uncommitted changes" },
-    ]);
-    return true;
-  }
-
-  // ── /undo — undo the last step's file changes ───────────────────────────────
-  if (command === "undo") {
-    // Undo is a POINTER MOVE along the checkpoint chain, not a separate stack.
-    // There used to be a parallel undo/redo store that knew nothing about the
-    // checkpoint history, so /undo left history.json claiming the undone
-    // content was still current and /checkpoint revert would re-apply it.
-    if (getUndoDepth() === 0) {
+    } catch (error) {
       ctx.setLog((l: LogEntry[]) => [
         ...l,
         { kind: "user", text },
-        { kind: "assistant", text: "Nothing to undo — no checkpoints have been recorded yet." },
+        { kind: "error", text: `Failed to read changes: ${error instanceof Error ? error.message : "Unknown error"}` },
       ]);
-      return true;
     }
+    return true;
+  }
 
+  // ── /undo — revert every file the last request touched ────────────────────
+  if (command === "undo") {
     try {
-      const undone = undoCheckpoint();
-      if (undone) {
-        const files = undone.patches.map((patch) => patch.filePath);
-        const fileList = files.length > 0 ? files.join(", ") : "(no file changes)";
-        ctx.setLog((l: LogEntry[]) => [
-          ...l,
-          { kind: "user", text },
-          {
-            kind: "assistant",
-            text:
-              `Undid "${undone.description}".\n` +
-              `Reverted ${files.length} file(s): ${fileList}\n` +
-              `${getRedoDepth()} step(s) can be redone.`,
-          },
-        ]);
-      }
+      const output = undoLastTurn(process.cwd(), args.includes("--force"));
+      ctx.setLog((l: LogEntry[]) => [
+        ...l,
+        { kind: "user", text },
+        { kind: "assistant", text: output },
+      ]);
     } catch (error) {
       ctx.setLog((l: LogEntry[]) => [
         ...l,
@@ -1558,33 +1201,15 @@ ${cmdList}
     return true;
   }
 
-  // ── /redo — move the head forward again ──────────────────────────────
+  // ── /redo — re-apply the last undone request ──────────────────────────────
   if (command === "redo") {
-    if (getRedoDepth() === 0) {
+    try {
+      const output = redoLastTurn(process.cwd(), args.includes("--force"));
       ctx.setLog((l: LogEntry[]) => [
         ...l,
         { kind: "user", text },
-        { kind: "assistant", text: "Nothing to redo — no steps have been undone." },
+        { kind: "assistant", text: output },
       ]);
-      return true;
-    }
-
-    try {
-      const redone = redoCheckpoint();
-      if (redone) {
-        const files = redone.patches.map((patch) => patch.filePath);
-        const fileList = files.length > 0 ? files.join(", ") : "(no file changes)";
-        ctx.setLog((l: LogEntry[]) => [
-          ...l,
-          { kind: "user", text },
-          {
-            kind: "assistant",
-            text:
-              `Redid "${redone.description}".\n` +
-              `Reapplied ${files.length} file(s): ${fileList}`,
-          },
-        ]);
-      }
     } catch (error) {
       ctx.setLog((l: LogEntry[]) => [
         ...l,
@@ -1594,6 +1219,7 @@ ${cmdList}
     }
     return true;
   }
+
 
   // ── /export — export conversation transcript to markdown ───────────────────
   if (command === "export") {
@@ -1611,6 +1237,55 @@ ${cmdList}
         ...l,
         { kind: "user", text },
         { kind: "error", text: `Failed to export: ${error instanceof Error ? error.message : "Unknown error"}` },
+      ]);
+    }
+    return true;
+  }
+
+  // ── /evals and /test ──────────────────────────────────────────────────
+  //
+  // Both run a child process that can take minutes. The command handler awaits
+  // it, so the input box stays busy for the duration — which is correct: typing
+  // a new prompt while a suite is chdir'ing through throwaway workspaces would
+  // interleave two agents over one working directory.
+  //
+  // Progress is appended as it arrives rather than buffered to the end, so a
+  // long run visibly moves instead of looking hung.
+  if (command === "evals" || command === "eval") {
+    const emit = (line: string) =>
+      ctx.setLog((l: LogEntry[]) => [...l, { kind: "assistant", text: line }]);
+
+    ctx.setLog((l: LogEntry[]) => [...l, { kind: "user", text }]);
+    try {
+      const summary = await runEvals({ projectRoot: process.cwd(), args, emit });
+      ctx.setLog((l: LogEntry[]) => [...l, { kind: "assistant", text: summary }]);
+    } catch (error) {
+      ctx.setLog((l: LogEntry[]) => [
+        ...l,
+        {
+          kind: "error",
+          text: `Eval run failed: ${error instanceof Error ? error.message : String(error)}`,
+        },
+      ]);
+    }
+    return true;
+  }
+
+  if (command === "test" || command === "tests") {
+    const emit = (line: string) =>
+      ctx.setLog((l: LogEntry[]) => [...l, { kind: "assistant", text: line }]);
+
+    ctx.setLog((l: LogEntry[]) => [...l, { kind: "user", text }]);
+    try {
+      const summary = await runTests({ projectRoot: process.cwd(), args, emit });
+      ctx.setLog((l: LogEntry[]) => [...l, { kind: "assistant", text: summary }]);
+    } catch (error) {
+      ctx.setLog((l: LogEntry[]) => [
+        ...l,
+        {
+          kind: "error",
+          text: `Test run failed: ${error instanceof Error ? error.message : String(error)}`,
+        },
       ]);
     }
     return true;

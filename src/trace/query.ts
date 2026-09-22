@@ -19,6 +19,8 @@ import type { CoverageGap, EditKind, FileEdit } from "./types.js";
 /** Every edit to one file, collapsed into a single row. */
 export interface FileRollup {
   path: string;
+  /** The spelling to show the user. See paths.ts. */
+  displayPath: string;
   /** Oldest first. Reverting the rollup means reverting these in reverse. */
   edits: FileEdit[];
   /** Net effect across all of them, not the sum of the individual diffs. */
@@ -70,6 +72,7 @@ export function rollupByFile(edits: FileEdit[], root: string): FileRollup[] {
 
     out.push({
       path,
+      displayPath: last.displayPath ?? path,
       edits: list,
       kind,
       added: diff.added,

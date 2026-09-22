@@ -74,3 +74,53 @@ test("build mode is unaffected", () => {
   expect(prompt).not.toContain("Earlier in this plan");
   expect(prompt).toContain("fix the typo");
 });
+
+// ─── Repair attempts ─────────────────────────────────────────────────────────
+
+test("a repair attempt is told the concrete error, near the top of the prompt", () => {
+  // The repair brief goes FIRST, right under the task. Buried under the file
+  // list it competes with instructions the model has already followed once,
+  // and the likely outcome is a cosmetic retry of the same broken action.
+  const repair =
+    "\n\nTHE PREVIOUS ATTEMPT AT THIS STEP FAILED. What actually went wrong:\n" +
+    "- A command failed:\n  `npm run build` exited 1\nerror TS2304: Cannot find name 'Foo'.";
+
+  const prompt = buildStepPrompt(step, undefined, priors, repair);
+
+  expect(prompt).toContain("TS2304");
+  expect(prompt).toContain("PREVIOUS ATTEMPT");
+  expect(prompt.indexOf("PREVIOUS ATTEMPT")).toBeLessThan(prompt.indexOf("Earlier in this plan"));
+});
+
+test("a first attempt carries no repair text", () => {
+  const prompt = buildStepPrompt(step, undefined, priors);
+  expect(prompt).not.toContain("PREVIOUS ATTEMPT");
+});
+
+// ─── Declared checks ─────────────────────────────────────────────────────────
+
+test("a step is told the command it will be judged by", () => {
+  // Telling the model the success condition up front beats checking it
+  // afterwards and reporting a failure it was never told to avoid.
+  const withCheck: PlanStep = {
+    ...step,
+    check: { kind: "command", command: "npm run build", cwd: "frontend" },
+  };
+
+  const prompt = buildStepPrompt(withCheck, undefined, []);
+  expect(prompt).toContain("npm run build");
+  expect(prompt).toContain("frontend");
+  expect(prompt).toContain("exit code 0");
+});
+
+test("a step verified by a URL is told to confirm it with checkUrl", () => {
+  const withCheck: PlanStep = {
+    ...step,
+    targetFiles: [],
+    check: { kind: "url", url: "http://localhost:5173" },
+  };
+
+  const prompt = buildStepPrompt(withCheck, undefined, []);
+  expect(prompt).toContain("http://localhost:5173");
+  expect(prompt).toContain("checkUrl");
+});

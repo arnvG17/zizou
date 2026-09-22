@@ -104,6 +104,7 @@ import { getActiveModelId } from "./sdk/resolve-model.js";
 import { primeOllamaCache } from "./sdk/ollama.js";
 import { join } from "node:path";
 import { RunJournal, setActiveJournal } from "./agent/debug/index.js";
+import { reconcileOrphans } from "./tools/service-registry.js";
 
 // ─── Debug journal ───────────────────────────────────────────────────────────
 //
@@ -114,16 +115,30 @@ import { RunJournal, setActiveJournal } from "./agent/debug/index.js";
 //
 // Off unless asked for: the journal records file contents and diffs, and a tool
 // that silently writes the user's source into a log file on every run is not
-// something to enable by default. ZIZOU_DEBUG=1 turns it on.
-if (process.env.ZIZOU_DEBUG === "1" || process.env.ZIZOU_DEBUG === "true") {
+// something to enable by default.
+//
+//   ZIZOU_DEBUG=1        events, tool calls and real file diffs
+//   ZIZOU_DEBUG=prompts  the above, plus every system and user prompt verbatim
+//
+// The two levels exist because the prompts are ~3.7k tokens of tool schemas per
+// call. Recording them unconditionally is what made the old SessionLogger
+// output unreadable: the boilerplate repeated once per step and buried the few
+// lines that explained the failure. Ask for them when the prompt is the suspect.
+const debugFlag = (process.env.ZIZOU_DEBUG ?? "").toLowerCase();
+if (debugFlag && debugFlag !== "0" && debugFlag !== "false") {
+  const capturePrompts = debugFlag === "prompts" || debugFlag === "verbose";
   const journal = new RunJournal({
     dir: join(process.cwd(), ".zizou", "journal"),
     runId: `session-${new Date().toISOString().replace(/[:.]/g, "-")}`,
     label: "interactive",
     root: process.cwd(),
+    capturePrompts,
   });
   setActiveJournal(journal);
-  console.log(`zizou: debug journal -> ${journal.logPath}`);
+  console.log(
+    `zizou: debug journal -> ${journal.logPath}` +
+      (capturePrompts ? " (with verbatim prompts)" : ""),
+  );
 }
 
 // Read the local model catalogue before the first render.
@@ -135,6 +150,22 @@ if (process.env.ZIZOU_DEBUG === "1" || process.env.ZIZOU_DEBUG === "true") {
 // installed. Fails soft: Ollama being off is not a reason not to start.
 if (getDefaultProvider() === "ollama") {
   await primeOllamaCache();
+}
+
+// Report services a PREVIOUS session left running.
+//
+// Services are killed on exit by default, so normally there is nothing here.
+// But a `persist: true` service outlives us, and without this the next
+// session has no way to explain why a port is taken — it would just collide
+// and blame the user's own machine. Reporting beats guessing.
+const orphans = reconcileOrphans().filter((o) => o.alive);
+if (orphans.length > 0) {
+  for (const o of orphans) {
+    console.log(
+      `zizou: "${o.name}" is still running from an earlier session ` +
+        `(pid ${o.pid}${o.url ? `, ${o.url}` : ""}) — ${o.command}`,
+    );
+  }
 }
 
 const instance = render(

@@ -42,8 +42,10 @@ import { runTurn, type AgentEvent } from "./run-turn.js";
 import { extractRawToolCall } from "./fallback-tool-parse.js";
 import type { ConfirmFn } from "../tools/types.js";
 import type { PlanStep, StepResult, StepDigest, ToolCall, ProjectContext } from "./types.js";
-import { SessionLogger } from "./debug/index.js";
-import { captureFileState } from "../checkpoint/patcher.js";
+import { getActiveJournal } from "./debug/index.js";
+import { wrapToolsWithTrace } from "../trace/wrap-tools.js";
+import { getActiveSessionId } from "../session/registry.js";
+import { randomUUID } from "node:crypto";
 import { buildToolMap } from "../tools/index.js";
 
 // ─── Step Prompt Builder ─────────────────────────────────────────────────────
@@ -103,8 +105,32 @@ export function buildStepPrompt(
   step: PlanStep,
   conversationHistory?: ModelMessage[],
   priorSteps?: StepDigest[],
+  repairContext?: string,
 ): string {
   let prompt = `Task: ${step.description}\n\nCall a tool to begin immediately. Do not ask clarifying questions.\nIMPORTANT: You MUST use the writeFile or editFile tools to write changes to disk. Printing file contents or code blocks as plain text in chat does NOT write files.`;
+
+  // A repair pass. This goes FIRST, right under the task, because it is the
+  // most important thing the model needs to know: the previous attempt failed
+  // and here is the actual error. Burying it under the file list invites
+  // another cosmetic retry of the same broken action.
+  if (repairContext) {
+    prompt += repairContext;
+  }
+
+  // How this step will be judged. Telling the model the success condition up
+  // front is strictly better than checking it afterwards and reporting a
+  // failure it was never told to avoid.
+  if (step.check) {
+    if (step.check.kind === "command" && step.check.command) {
+      prompt += `\n\nThis step is verified by running \`${step.check.command}\`${
+        step.check.cwd ? ` in ${step.check.cwd}` : ""
+      } and requiring exit code 0. Run it yourself and fix anything it reports.`;
+    } else if (step.check.kind === "url" && step.check.url) {
+      prompt += `\n\nThis step is verified by fetching ${step.check.url}. Start the service, then confirm it with checkUrl.`;
+    } else if (step.check.kind === "files" && step.check.files?.length) {
+      prompt += `\n\nThis step is verified by these files existing: ${step.check.files.join(", ")}.`;
+    }
+  }
 
   // What earlier steps of THIS plan already did. A few lines, not a
   // transcript: enough that the step does not recreate a file a previous
@@ -184,10 +210,20 @@ export interface ExecuteStepOptions {
   provider?: string;
   /** Prior conversation, so the step prompt can resolve "that file" / "it". */
   conversationHistory?: ModelMessage[];
+  /**
+   * Groups this step's file changes with the rest of the user's request, so
+   * `/undo` reverts the whole prompt rather than one plan step of it.
+   */
+  turnId?: string;
   /** Digests of earlier steps in the same plan. Empty/absent in build mode. */
   priorSteps?: StepDigest[];
   /** Cancels this step's LLM call when the user stops the run. */
   abortSignal?: AbortSignal;
+  /**
+   * Set on a repair attempt: what went wrong last time, rendered concretely
+   * (the command, its exit code, the stderr tail). Absent on a first attempt.
+   */
+  repairContext?: string;
 }
 
 /**
@@ -223,10 +259,11 @@ export async function* executeStep(
 
   // Build the step-specific user message, passing conversation history
   // so it can resolve deictic references ("that file", "it") from prior turns.
-  const stepPrompt = buildStepPrompt(step, conversationHistory, priorSteps);
+  const stepPrompt = buildStepPrompt(step, conversationHistory, priorSteps, options.repairContext);
 
-  SessionLogger.logExecutorStepStart(step, `maxSteps=${context.maxSteps}`);
-  SessionLogger.logExecutorStepLLM(systemPrompt, stepPrompt);
+  const journal = getActiveJournal();
+  journal.phase("executor", `maxSteps=${context.maxSteps} — ${step.description}`, step.index);
+  journal.prompt({ role: "executor", system: systemPrompt, user: stepPrompt, stepIndex: step.index });
 
   // Initialize the conversation history. If conversationHistory is provided (e.g. build mode),
   // we inherit it and swap the last user message with the enriched stepPrompt.
@@ -249,7 +286,6 @@ export async function* executeStep(
   // Tracking collections for building the StepResult
   const claimedFiles = new Set<string>();
   const toolCallsMade: ToolCall[] = [];
-  const oldFileStates = new Map<string, string | null>();
   let fullResponseText = "";
   let sawTextDelta = false;
 
@@ -279,25 +315,10 @@ export async function* executeStep(
     temperature: context.temperature,
     maxOutputTokens: context.maxOutputTokens,
     abortSignal: options.abortSignal,
+    turnId: options.turnId,
   });
 
   /** Renders one labelled block for the session log, matching the existing format. */
-  const logBlock = (title: string, fields: Record<string, string>): void => {
-    const body = Object.entries(fields)
-      .map(([label, value]) => `    ${label.padEnd(9)}: ${value}`)
-      .join("\n");
-    SessionLogger.logExecutorStreamEvent(`\n  [${title}]\n${body}\n`);
-  };
-
-  /** Indents a JSON payload under its label, truncating very large outputs. */
-  const indentPayload = (value: unknown, maxChars = Infinity): string => {
-    let text = JSON.stringify(value, null, 2) ?? String(value);
-    if (text.length > maxChars) {
-      text = text.slice(0, maxChars) + "\n... (truncated)";
-    }
-    return "\n" + text.split("\n").map((l) => `      ${l}`).join("\n");
-  };
-
   let result = await turn.next();
   while (!result.done) {
     const event = result.value;
@@ -306,17 +327,11 @@ export async function* executeStep(
     // the generator: the UI renders as the model works, not after it stops.
     yield event;
 
-    // ── Capture what the verifier and checkpointer need ──────────────────
+    // ── Capture what the verifier needs ──────────────────────────────────
     if (event.kind === "text-delta") {
       fullResponseText += event.text;
       sawTextDelta = true;
     } else if (event.kind === "tool-call") {
-      logBlock("TOOL CALL INITIATED", {
-        "Tool Name": event.toolName,
-        "ID": event.toolCallId,
-        "How Sent": "Sent via native JSON tool-calling protocol (function calling) in LLM API payload",
-        "Arguments": indentPayload(event.input),
-      });
 
       // Record the pending call so we can pair it with its result.
       pendingToolCalls.set(event.toolCallId, {
@@ -324,20 +339,18 @@ export async function* executeStep(
         input: event.input,
       });
 
-      // File-modifying call: remember the path and its pre-change content.
+      // File-modifying call: remember the path for the verifier.
+      //
+      // This used to ALSO snapshot the file's pre-change content here, for
+      // undo. It could not work: the SDK runs execute() concurrently with
+      // delivering this event, so the read raced the write it was meant to
+      // precede and often captured post-change content. Undo now snapshots
+      // inside execute() instead — see trace/wrap-tools.ts.
       const filePath = extractFileFromToolCall(event.toolName, event.input);
       if (filePath) {
         claimedFiles.add(filePath);
-        if (!oldFileStates.has(filePath)) {
-          oldFileStates.set(filePath, captureFileState(filePath));
-        }
       }
     } else if (event.kind === "tool-result") {
-      logBlock("TOOL CALL COMPLETED", {
-        "Tool Name": event.toolName,
-        "ID": event.toolCallId,
-        "Result": indentPayload(event.output, 2000),
-      });
 
       const pending = pendingToolCalls.get(event.toolCallId);
       if (pending) {
@@ -350,11 +363,6 @@ export async function* executeStep(
         pendingToolCalls.delete(event.toolCallId);
       }
     } else if (event.kind === "tool-error") {
-      logBlock("TOOL CALL ERROR", {
-        "Tool Name": event.toolName,
-        "ID": event.toolCallId,
-        "Error": String(event.error),
-      });
 
       // Still record the call, with the error as its output.
       const pending = pendingToolCalls.get(event.toolCallId);
@@ -367,10 +375,6 @@ export async function* executeStep(
         });
         pendingToolCalls.delete(event.toolCallId);
       }
-    } else if (event.kind === "finish") {
-      SessionLogger.logExecutorStreamEvent(
-        `\n  [LLM FINISHED GENERATION] usage=${JSON.stringify(event.usage ?? {})}\n`,
-      );
     }
 
     result = await turn.next();
@@ -385,8 +389,23 @@ export async function* executeStep(
 
   if (toolCallsMade.length === 0 && fullResponseText.trim().length > 0) {
     const fallback = extractRawToolCall(fullResponseText);
-    // Same map the model was offered in the first place — see tools/index.ts.
-    const fallbackTools = buildToolMap(onConfirm);
+
+    // Same map the model was offered in the first place — see tools/index.ts —
+    // but WRAPPED, which it was not before.
+    //
+    // A bare buildToolMap() here meant a fallback-parsed call bypassed both
+    // wrappers that runTurn applies: the journal never saw the call or its
+    // diff, and — the real damage — neither did the trace ledger, so a file
+    // written down this path was invisible to `/undo` and `/changes`. The
+    // fallback path is exactly where small models do most of their writing,
+    // so this was worst precisely where it mattered most.
+    //
+    // Wrapper order matches runTurn: trace outermost, so it sees the same
+    // before-state the tool itself acts on.
+    const fallbackTools = wrapToolsWithTrace(
+      journal.wrapTools(buildToolMap(onConfirm)),
+      { turnId: options.turnId ?? randomUUID(), sessionId: getActiveSessionId() ?? null, root: process.cwd() },
+    );
 
     if (fallback && fallbackTools[fallback.name]) {
       const tool = fallbackTools[fallback.name];
@@ -395,45 +414,24 @@ export async function* executeStep(
 
         yield { kind: "tool-call", toolCallId, toolName: fallback.name, input: fallback.arguments };
 
-        // Log initiation with FALLBACK marker
-        const argsStr = JSON.stringify(fallback.arguments, null, 2);
-        SessionLogger.logExecutorStreamEvent(
-          `\n  [FALLBACK PSEUDO-CALL PARSED — not a native tool call]\n` +
-          `    Tool Name: ${fallback.name}\n` +
-          `    ID       : ${toolCallId}\n` +
-          `    How Sent : Parsed from raw text via fallback pseudo-call parser\n` +
-          `    Arguments:\n` +
-          argsStr.split("\n").map(l => `      ${l}`).join("\n") + "\n"
-        );
+        journal.fallbackParse(fallback.name, fullResponseText, true);
 
-        // Record into claimedFiles and capture pre-execution state before executing
+        // Record into claimedFiles for the verifier. Undo is handled by the
+        // trace wrapper around execute(), not from this event stream.
         const filePath = extractFileFromToolCall(fallback.name, fallback.arguments);
         if (filePath) {
           claimedFiles.add(filePath);
-          if (!oldFileStates.has(filePath)) {
-            oldFileStates.set(filePath, captureFileState(filePath));
-          }
         }
 
         let output: any;
-        let success = true;
         try {
           output = await tool.execute(fallback.arguments, { toolCallId, messages: history });
           yield { kind: "tool-result", toolCallId, toolName: fallback.name, output };
         } catch (e) {
-          success = false;
           output = { error: String(e) };
           yield { kind: "tool-error", toolCallId, toolName: fallback.name, error: e };
         }
 
-        // Log the full fallback interception via SessionLogger
-        SessionLogger.logFallbackToolCall(
-          fallback.name,
-          fallback.arguments,
-          output,
-          fullResponseText.slice(0, 500),
-          success,
-        );
 
         toolCallsMade.push({
           toolName: fallback.name,
@@ -451,16 +449,11 @@ export async function* executeStep(
       if (!sawTextDelta) {
         yield { kind: "text-delta", text: fullResponseText };
       }
-      SessionLogger.logExecutorStreamEvent(
-        `\n  [LLM TEXT-ONLY RESPONSE — no tool call made]\n` +
-        `    Text: ${fullResponseText.slice(0, 300)}${fullResponseText.length > 300 ? " ... (truncated)" : ""}\n`
-      );
+      journal.note("text-only", "model replied with text and made no tool call");
     }
   }
 
-  // Log the canonical exchange once, before we strip payloads for the next turn.
   const rawHistory = result.value || [];
-  SessionLogger.logLLMConversation(systemPrompt, rawHistory);
 
   const updatedHistory = cleanHistoryForNextTurn(rawHistory);
 
@@ -471,14 +464,15 @@ export async function* executeStep(
     stepIndex: step.index,
     claimedFiles: Array.from(claimedFiles),
     toolCallsMade,
-    oldFileStates,
     conversationHistory: updatedHistory,
     modelTier,
   };
 
-  SessionLogger.logExecutorStepEnd({
-    ...finalResult,
-    fullResponseText,
+  journal.stepEnd({
+    stepIndex: step.index,
+    claimedFiles: finalResult.claimedFiles,
+    toolNames: toolCallsMade.map((t) => t.toolName),
+    text: fullResponseText,
   });
 
   // Return the StepResult for the verifier to check
@@ -536,13 +530,89 @@ export function cleanHistoryForNextTurn(messages: ModelMessage[]): ModelMessage[
     const content = (msg.content as any[]).map((part) => {
       if (part.type === "tool-call") return collapseToolCall(part);
       if (part.type === "tool-result") {
-        return { ...part, output: collapseToolOutput(part, pathByCallId) };
+        // Re-wrap in the SAME tagged shape the SDK requires. Assigning the
+        // bare payload here produced a tool-result the ModelMessage schema
+        // rejects, and the next request died with "Invalid prompt: The
+        // messages do not match the ModelMessage[] schema."
+        //
+        // It only bit long sessions, because collapsing only applies to
+        // rounds older than FULL_DETAIL_ROUNDS — so a short chat never
+        // reached the corrupt path, and any sustained agentic run did.
+        const { type } = unwrapToolOutput(part);
+        return {
+          ...part,
+          output: { type: type === "text" ? "json" : type, value: collapseToolOutput(part, pathByCallId) },
+        };
       }
       return part;
     });
 
     return { ...msg, content } as ModelMessage;
   });
+}
+
+/**
+ * Makes a conversation safe to send, whatever state it was restored in.
+ *
+ * Two things can leave a persisted session unsendable, and both end the same
+ * way — "Invalid prompt: The messages do not match the ModelMessage[] schema."
+ * with the turn dead before a single tool runs:
+ *
+ *   1. UNTAGGED TOOL OUTPUT. cleanHistoryForNextTurn used to write the bare
+ *      payload into `output` instead of the SDK's `{type, value}` wrapper.
+ *      Sessions written before that fix still hold the broken shape on disk,
+ *      so fixing the writer alone would leave those sessions permanently
+ *      unloadable.
+ *   2. AN ORPHANED TOOL CALL. Every provider requires a tool-call to be
+ *      followed by its result. A turn that was aborted or that threw between
+ *      the call and the result leaves an assistant message that can never be
+ *      sent again.
+ *
+ * Repairing on load beats validating on save: the damage already exists in
+ * users' session directories, and a session that cannot be opened is worse
+ * than one that lost a stale tool receipt.
+ */
+export function repairHistory(messages: ModelMessage[]): ModelMessage[] {
+  if (!Array.isArray(messages)) return [];
+
+  // Which tool-call ids actually have a matching result.
+  const resolved = new Set<string>();
+  for (const msg of messages) {
+    if (msg?.role !== "tool" || !Array.isArray(msg.content)) continue;
+    for (const part of msg.content as any[]) {
+      if (part?.type === "tool-result" && part.toolCallId) resolved.add(part.toolCallId);
+    }
+  }
+
+  const out: ModelMessage[] = [];
+  for (const msg of messages) {
+    if (!msg || typeof msg !== "object" || !msg.role) continue;
+    if (!Array.isArray(msg.content)) {
+      out.push(msg);
+      continue;
+    }
+
+    const content = (msg.content as any[])
+      .filter((part) => {
+        // Drop a call nothing ever answered.
+        if (part?.type === "tool-call" && !resolved.has(part.toolCallId)) return false;
+        return !!part;
+      })
+      .map((part) => {
+        if (part.type !== "tool-result") return part;
+        const raw = part.output ?? part.result;
+        const alreadyTagged =
+          raw && typeof raw === "object" && typeof raw.type === "string" && "value" in raw;
+        if (alreadyTagged) return part;
+        return { ...part, output: { type: part.isError ? "error-json" : "json", value: raw ?? {} } };
+      });
+
+    // An assistant message left with no content at all is itself invalid.
+    if (content.length === 0 && msg.role !== "user") continue;
+    out.push({ ...msg, content } as ModelMessage);
+  }
+
+  return out;
 }
 
 /**
@@ -582,9 +652,30 @@ function collapseToolCall(part: any): any {
   };
 }
 
+/**
+ * Unwraps a tool result's payload.
+ *
+ * AI SDK v7 stores a tool result's output as a TAGGED union —
+ * `{ type: "json", value: {...} }`, or "text" / "error-json" / "error-text".
+ * The payload is under `.value`; the object itself only says what kind it is.
+ *
+ * Reading the wrapper directly (which this file used to do) finds no `success`
+ * field on any result, so every collapsed result reported success — including
+ * failed commands, which came back labelled "Command completed successfully".
+ */
+function unwrapToolOutput(part: any): { value: any; type: string } {
+  const raw = part.output ?? part.result;
+  if (raw && typeof raw === "object" && typeof raw.type === "string" && "value" in raw) {
+    return { value: raw.value, type: raw.type };
+  }
+  // Untagged: either an older persisted session written before this was fixed,
+  // or a provider that does not tag. Treat the whole thing as the payload.
+  return { value: raw, type: part.isError ? "error-json" : "json" };
+}
+
 /** Reduces an old tool result to what it accomplished, not what it returned. */
 function collapseToolOutput(part: any, pathByCallId: Map<string, string>): any {
-  const output = part.output ?? part.result;
+  const { value: output } = unwrapToolOutput(part);
   const file = pathByCallId.get(part.toolCallId) ?? "unknown";
 
   if (!output || typeof output !== "object") {
@@ -621,12 +712,29 @@ function collapseToolOutput(part: any, pathByCallId: Map<string, string>): any {
     }
 
     case "runBash":
-    case "runBackground": {
+    case "runBackground":
+    case "terminal":
+    case "service": {
       const collapsed: Record<string, unknown> = {
         ...base,
         message: success ? "Command completed successfully" : "Command failed",
       };
       if (output.taskId) collapsed.taskId = output.taskId;
+      if (output.name) collapsed.name = output.name;
+      if (output.url) collapsed.url = output.url;
+      if (output.status) collapsed.status = output.status;
+
+      // A SUCCEEDING command's output is safe to drop — it did what it said.
+      // A FAILING one is not: collapsing it to "Command failed" throws away
+      // the exit code and the compiler error, leaving the model to retry
+      // blind. Keep just enough to act on.
+      if (!success) {
+        if (output.exitCode !== undefined && output.exitCode !== null) {
+          collapsed.exitCode = output.exitCode;
+        }
+        const detail = String(output.stderr ?? output.crashReason ?? output.output ?? "");
+        if (detail) collapsed.stderr = detail.slice(-500);
+      }
       return collapsed;
     }
 

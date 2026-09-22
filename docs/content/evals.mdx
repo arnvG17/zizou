@@ -1,0 +1,265 @@
+# ZIZOU DOCUMENTATION
+
+Everything you need to run, extend, and understand Zizou — the AI coding agent that lives in your terminal.
+
+<div id="evals" className="pt-8" />
+
+## Evals & Token Stats
+
+Zizou connects to six providers and around twenty models. Two questions follow
+from that, and no amount of reading the code will answer either:
+
+- **Can I trust this model with my codebase?**
+- **What is this actually going to cost me?**
+
+The eval suite answers the first by running the agent against eleven fixed
+tasks and checking the result with code. The token ledger answers the second by
+counting every model call Zizou makes. Both land in the sidebar of your chat
+window.
+
+> [!IMPORTANT]
+> None of this makes an LLM deterministic. The same prompt can behave
+> differently between runs, and that is a property of the model, not a bug in
+> Zizou. What the eval suite does is make that variation **measurable** — a pass
+> rate over several runs, a cost range, a count of how often the model fumbled a
+> tool call. "Benchmarked" is the promise here, not "identical every time".
+
+<div id="the-sidebar" className="pt-16" />
+
+### The sidebar
+
+Open a chat at a terminal width of 90 columns or more and the right column
+shows two panels:
+
+```
+Tokens                        Evals
+in              12.4k         pass         83% (2/3)
+out              1.7k         tools/task   6.3
+cached           8.1k         $/task       $0.0031
+context      11% of 128k      fallbacks    2
+                              failing: build-fix-off-by-one
+cost          $0.0412         c7ee198 (stale) · 1d ago
+calls               14
+
+by stage
+route ×1          510
+plan ×1          4.6k
+build ×9        12.1k
+verify ×3        2.9k
+```
+
+**Tokens** updates live, including between turns. That matters more than it
+sounds: Zizou makes model calls from four places, not one.
+
+| Stage | When it runs |
+|---|---|
+| `route` | Every Auto-mode turn, to pick a route |
+| `plan` | Every Plan-mode turn |
+| `build` | The main agent loop |
+| `verify` | **Once per step** |
+
+A ten-step plan makes twelve calls you never typed. The `by stage` rows are
+there so you can see them.
+
+**Evals** shows how the model you are currently running scored, read from the
+most recent report on disk. If you have never run the suite it says `never run`
+rather than showing you a zero.
+
+> [!NOTE]
+> Neither panel will ever invent a number. A model with no known price shows
+> `unknown`, not a guess. If only some calls could be priced, the cost shows as
+> `>$0.0412` — a floor, marked as one. A report older than your current commit
+> is tagged `(stale)`.
+
+### From inside the chat
+
+You do not have to leave Zizou to check Zizou:
+
+```
+/evals                   every task, your current model
+/evals smoke             one group of tasks
+/evals report            the last results, without running anything
+/evals matrix groq:fast,anthropic:balanced
+/evals --repeat 3
+/evals help
+
+/test                    run the project's unit tests
+/test src/telemetry      just one path
+```
+
+`/evals report` is free and instant — it reads the last run off disk. `/evals`
+itself calls your provider and spends tokens.
+
+While a suite runs, progress lines appear in the transcript. The input stays
+busy until it finishes, which is deliberate: the harness moves through throwaway
+working directories, and starting a second request mid-run would point two
+agents at one directory.
+
+> [!NOTE]
+> `/evals` needs the Zizou source repository. The published npm package ships
+> only the built CLI, not the eval harness, and the command says so rather than
+> failing with a confusing error.
+
+### Running the suite
+
+```bash
+bun run eval                                    # every task, your default model
+bun run eval -- --task build-create-file        # one task
+bun run eval -- --tag router                    # one group
+bun run eval -- --provider groq --effort fast
+```
+
+Every run happens in a throwaway folder under `evals/.artifacts/`. Your project
+is never used as a workspace, and the suite checks that nothing in it changed
+before it exits.
+
+Passing runs clean up after themselves. **Failing runs keep everything** — the
+workspace and a full journal of what the agent did — and print the paths.
+
+### What the tasks check
+
+| Group (`--tag`) | What it protects |
+|---|---|
+| `smoke` | Tool-calling works at all. If this fails, nothing else matters. |
+| `editing` | Fixing a bug in existing code without breaking something else. |
+| `plan-mode` | The planner decomposes work and orders dependencies correctly. |
+| `router` | Auto mode sends your prompt to the right route. |
+| `placement` | New files go where you would expect, and edits change the file rather than making a twin. |
+| `error-handling` | When something is wrong, Zizou says so instead of reporting success. |
+
+Every check is mechanical — a file exists or it does not, a command exits
+cleanly or it does not, a pattern is in a file or it is not. **No model ever
+judges whether a task passed.** A grader that is itself an LLM cannot tell you
+whether the agent got worse or the grader drifted.
+
+<div id="comparing-models" className="pt-16" />
+
+### Comparing models
+
+This is what the suite is really for.
+
+```bash
+bun run eval -- --matrix anthropic:balanced,groq:balanced,ollama:balanced --repeat 3
+```
+
+That runs every task against each model three times and writes a table to
+`evals/reports/`:
+
+```
+model                    pass   $/task   tools  fallback  $/pass
+claude-sonnet-4-5        100%   $0.041     4.1        0%  $0.041
+gpt-5-mini                92%   $0.008     6.3        0%  $0.009
+llama-3.3-70b (groq)      67%   $0.003     9.7       18%  $0.004
+qwen3:4b (ollama)         25%   $0.000    14.2       61%  $0.000
+```
+
+Read the columns in this order:
+
+1. **`pass`** — below about 80%, the model is not a candidate whatever it costs.
+2. **`$/pass`**, not `$/task`. Cost per task prices the successes. Cost per pass
+   prices the failures in too, which is what you actually pay when a cheap model
+   needs three attempts.
+3. **`fallback`** — how often the model failed to call a tool properly and had to
+   be rescued by a text parser. This is the single best predictor of whether a
+   model will feel frustrating to use, and a pass rate cannot see it.
+4. **`tools`** — two models that both pass, one in 4 calls and one in 14, are not
+   the same experience. This is your latency.
+
+`--repeat 3` is not optional for this. A single run of a probabilistic system is
+a coin flip reported as a fact — a task at 67% would otherwise show up as either
+a clean pass or a clean fail depending on the day.
+
+### Using it day to day
+
+**Before trusting a new model.** Run `--matrix` with your current model and the
+candidate. The sidebar then shows the winner's score every time you open a chat.
+
+**When something feels off.** Run `--tag smoke` first. It is one task and a few
+cents, and it separates "the model is having a bad day" from "something is
+actually broken".
+
+**Watching your spend.** The `by stage` breakdown tells you where money goes:
+
+- `plan` large next to `build` → the planner is exploring more than it needs to.
+  Try `/effort fast`.
+- `route` showing up when you pinned a mode → an Auto classification is running
+  that should not be. Pinned modes never route.
+- `cached` climbing → prompt caching is working, and your long session is
+  getting *cheaper* per turn rather than more expensive.
+
+**When a task fails.** The report names a category so you know where to look:
+
+| Category | What happened |
+|---|---|
+| `assertion` | The agent did the wrong thing. Every failed check is listed with what it actually found. |
+| `budget` | Right answer, too many tool calls or too long. Usually a retry loop. |
+| `exception` | It crashed. The journal has the stack. |
+| `rate-limit` | Your provider said no. Not a quality signal — re-run with `--pause 20`. |
+
+Then open the journal for that run. It records what actually happened on disk,
+not what the model said it did, so a tool that claimed success and changed
+nothing shows up plainly:
+
+```
+  TOOL OK    editFile  (1ms)
+  FILE MODIFIED: calc.js  (+1 -1)
+       -  for(let i=0;i<n.length-1;i++){
+       +  for(let i=0;i<n.length;i++){
+
+  TOOL FAIL  editFile  (0ms)
+  output: { "success": false, "error": "NO_MATCH: old_string not found" }
+  FILES: no filesystem change observed.
+```
+
+### Debug journal for normal sessions
+
+The same journal can record your ordinary chat sessions:
+
+```bash
+ZIZOU_DEBUG=1 zizou         # events, tool calls, real file diffs
+ZIZOU_DEBUG=prompts zizou   # the above, plus every prompt sent, verbatim
+```
+
+Logs go to `.zizou/journal/`, one pair of files per session named with the
+timestamp. This is **off by default on purpose** — the journal records file
+contents and diffs, and writing your source code into a log file on every run is
+not something to turn on without asking.
+
+The two levels are separate because the prompts are large: several thousand
+tokens of tool schemas on every call. Start with `ZIZOU_DEBUG=1`, which tells you
+what the agent *did*; reach for `prompts` when you need to know what it was
+*told*.
+
+### Adding your own task
+
+If Zizou does something wrong in a real session, that is a task worth keeping.
+They live in `evals/tasks/index.ts` and are about fifteen lines:
+
+```ts
+{
+  id: "build-fix-off-by-one",
+  intent: "Fix a bug in existing code without collateral damage.",
+  prompt: "The sum function in calc.js misses the last element. Fix it.",
+  mode: "build",
+  tags: ["editing"],
+  budget: { maxToolCalls: 12 },
+
+  // Files written into the fresh workspace before the agent starts.
+  fixture: { "calc.js": "…", "test.js": "…" },
+
+  // All of these run. All results are reported.
+  assertions: [
+    commandSucceeds("node test.js"),         // did it work?
+    fileLacks("calc.js", "length - 1"),      // is the bug actually gone?
+    fileContains("test.js", "sum([1,2,3])"), // did it cheat by editing the test?
+    touchedNothingBut("calc.js"),            // did it break anything else?
+  ],
+}
+```
+
+Two rules worth keeping in mind. **Write it so it fails before your fix** — a
+task that passes either way is testing nothing. And **if you need a model to
+decide whether it passed, the prompt is too vague**; tighten it until code can
+settle the question.
+
+Full details are in `evals/README.md`.

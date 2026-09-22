@@ -23,7 +23,19 @@ test("the default read-only map is look-only — this is the planner's map", () 
 
 test("the planner's map cannot open, write, edit or run anything", () => {
   const keys = Object.keys(buildReadOnlyToolMap());
-  for (const forbidden of ["openFile", "writeFile", "editFile", "runBash", "runBackground", "fileOperations"]) {
+  for (const forbidden of [
+    "openFile",
+    "writeFile",
+    "editFile",
+    "runBash",
+    "runBackground",
+    "fileOperations",
+    // A planner that opens a shell, boots a server, or probes one has begun
+    // doing the work rather than describing it — the same line openFile draws.
+    "terminal",
+    "service",
+    "checkUrl",
+  ]) {
     expect(keys).not.toContain(forbidden);
   }
 });
@@ -38,7 +50,16 @@ test("canOpen still cannot write, edit or run", () => {
   // The whole claim of the ask route is that it changes nothing on disk.
   // openFile is allowed precisely because it does not.
   const keys = Object.keys(buildReadOnlyToolMap({ canOpen: true }));
-  for (const forbidden of ["writeFile", "editFile", "runBash", "runBackground", "fileOperations"]) {
+  for (const forbidden of [
+    "writeFile",
+    "editFile",
+    "runBash",
+    "runBackground",
+    "fileOperations",
+    "terminal",
+    "service",
+    "checkUrl",
+  ]) {
     expect(keys).not.toContain(forbidden);
   }
 });

@@ -44,10 +44,11 @@
 // Must NOT import from ui/, config/, or provider/.
 
 import { generateText, stepCountIs, type LanguageModel, type ModelMessage } from "ai";
+import { recordModelUsage } from "../telemetry/index.js";
 import { buildReadOnlyToolMap } from "../tools/index.js";
 import { buildSystemPrompt, type AgentRole } from "../context/build-system-prompt.js";
-import type { Plan, PlanRevision, PlanStep, ProjectContext } from "./types.js";
-import { SessionLogger } from "./debug/index.js";
+import type { Plan, PlanRevision, PlanStep, ProjectContext, StepCheck } from "./types.js";
+import { getActiveJournal } from "./debug/index.js";
 
 // ─── Planner System Prompt Extension ─────────────────────────────────────────
 //
@@ -92,14 +93,30 @@ RULES:
 2. "assumptions" is an array of short strings: decisions you made that the
    user did not specify (framework, scope, storage, styling, and so on).
    Use [] only when the request genuinely left nothing open.
-3. "steps" is an array of steps, each with: index, description, targetFiles, dependsOn.
+3. "steps" is an array of steps, each with: index, description, targetFiles, dependsOn,
+   and optionally check.
 4. Use dependsOn to enforce ordering — if step 3 edits a file created in
    step 1, then step 3 must have dependsOn: [1].
 5. Keep steps atomic — each step should do ONE thing (create a file, modify
    a function, install a dependency, etc.).
-6. List ALL files each step will create or modify in targetFiles.
-7. Include setup steps (create directories, install packages) before code steps.
-8. Prefer what already exists in the repo map over introducing new tools.
+6. targetFiles is your best guess at what the step will touch, used to focus
+   the work. It is NOT a contract. For a step that runs a command or invokes a
+   scaffolder (npm create, a generator, a package manager), you cannot know the
+   files it produces — leave targetFiles EMPTY rather than inventing plausible
+   paths.
+7. "check" states how to tell the step actually worked. Prefer it to guessed
+   file paths:
+     - { "kind": "command", "command": "npm run build", "cwd": "frontend" }
+       for a step whose success is an exit code.
+     - { "kind": "url", "url": "http://localhost:5173" }
+       for a step that brings a server up.
+     - { "kind": "files", "files": ["src/App.tsx"] }
+       only for files you are genuinely authoring by hand.
+   Omit check when the step has no meaningful automated check.
+8. Include setup steps (create directories, install packages) before code steps.
+   If the plan produces something runnable, END it with a step that starts the
+   app and checks its URL.
+9. Prefer what already exists in this repo over introducing new tools.
 
 OUTPUT FORMAT — respond with ONLY this JSON object:
 {
@@ -125,6 +142,20 @@ OUTPUT FORMAT — respond with ONLY this JSON object:
       "description": "Wire Auth component into the main App layout",
       "targetFiles": ["src/App.tsx"],
       "dependsOn": [0, 1]
+    },
+    {
+      "index": 3,
+      "description": "Install dependencies",
+      "targetFiles": [],
+      "check": { "kind": "command", "command": "npm install" },
+      "dependsOn": [2]
+    },
+    {
+      "index": 4,
+      "description": "Start the dev server and confirm the app serves",
+      "targetFiles": [],
+      "check": { "kind": "url", "url": "http://localhost:5173" },
+      "dependsOn": [3]
     }
   ]
 }
@@ -255,7 +286,8 @@ fix up dependsOn accordingly.`
 
 ${userPrompt}`;
 
-  SessionLogger.logPlannerStart(userPrompt);
+  const journal = getActiveJournal();
+  journal.phase("planner", `planning: ${userPrompt.slice(0, 120)}`);
 
   // generateText, not streamText: the output is one JSON object that must be
   // parsed whole, and the plan is displayed all at once for review.
@@ -282,15 +314,16 @@ ${PLANNER_INSTRUCTIONS}`;
     ],
   });
 
+  // The planner's own spend. It explores with read-only tools over several
+  // rounds before emitting the plan, so this is not a trivial call — and it was
+  // entirely absent from the cost readout before.
+  recordModelUsage("planner", model, result.usage);
+
   // Parse the model's response into a Plan.
   const responseText = result.text.trim();
 
-  SessionLogger.logExecutorStreamEvent(
-    `\n  [PLANNER] explored in ${result.steps.length} step(s) before planning\n`,
-  );
-
-  // Log verbatim prompts and response
-  SessionLogger.logPlannerLLM(systemText, userText, responseText);
+  journal.note("planner", `explored in ${result.steps.length} step(s) before planning`);
+  journal.prompt({ role: "planner", system: systemText, user: userText });
 
   const parsed = parsePlan(responseText);
 
@@ -298,7 +331,16 @@ ${PLANNER_INSTRUCTIONS}`;
   // before the orchestrator tries to execute them.
   validateDependencies(parsed.steps);
 
-  SessionLogger.logPlannerEnd(parsed.steps);
+  // Journaled here rather than by the orchestrator, so a plan that fails
+  // validateDependencies above never reaches the log as though it were accepted.
+  journal.plan(
+    parsed.steps.map((s) => ({
+      index: s.index,
+      description: s.description,
+      targetFiles: s.targetFiles,
+    })),
+    parsed.assumptions,
+  );
   return parsed;
 }
 
@@ -386,10 +428,43 @@ function validateSteps(raw: unknown[]): PlanStep[] {
       targetFiles: (item.targetFiles as unknown[]).filter(
         (f): f is string => typeof f === "string",
       ),
+      ...(normalizeCheck(item.check) ? { check: normalizeCheck(item.check)! } : {}),
       dependsOn: (item.dependsOn as unknown[]).filter(
         (d): d is number => typeof d === "number",
       ),
     }));
+}
+
+/**
+ * Accepts a step's `check` only if it is actually usable.
+ *
+ * A check is optional, so a malformed one is dropped rather than throwing —
+ * the same tolerance validateSteps already applies to everything else. A
+ * check that survives here will be RUN, so "kind: command" with no command
+ * must not get through.
+ */
+function normalizeCheck(raw: unknown): StepCheck | null {
+  if (typeof raw !== "object" || raw === null) return null;
+  const obj = raw as Record<string, unknown>;
+
+  if (obj.kind === "command" && typeof obj.command === "string" && obj.command.trim()) {
+    return {
+      kind: "command",
+      command: obj.command.trim(),
+      ...(typeof obj.cwd === "string" ? { cwd: obj.cwd } : {}),
+    };
+  }
+
+  if (obj.kind === "url" && typeof obj.url === "string" && obj.url.trim()) {
+    return { kind: "url", url: obj.url.trim() };
+  }
+
+  if (obj.kind === "files" && Array.isArray(obj.files)) {
+    const files = obj.files.filter((f): f is string => typeof f === "string");
+    if (files.length) return { kind: "files", files };
+  }
+
+  return null;
 }
 
 /**

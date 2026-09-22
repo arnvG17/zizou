@@ -106,11 +106,17 @@ Per run, from the journal:
 - `duplicatesBlocked` — identical failing calls retried unchanged
 - tokens, duration, estimated cost
 
-`$/run` reads `unknown` when the model has no entry in `RATE_TABLE`
-(`src/tui/cost-tracker.ts`). It is deliberately not defaulted to the table's
-guessed `$1/$5` fallback — a fabricated figure next to measured ones in the same
-table is worse than an admitted gap. **Most models `EFFORT_MODELS` selects are
-currently missing from that table**, so expect `unknown` until it is filled in.
+Cost comes from the telemetry ledger (`src/telemetry/usage.ts`), not from the
+run journal — the journal only sees calls that go through `runTurn`, so a
+journal-derived cost would omit the router, planner and per-step verifier calls.
+On a plan-mode task that is most of them.
+
+`$/run` reads `unknown` when any call in the run used a model with no rate in
+`src/telemetry/pricing.ts`. It is never defaulted to a guessed rate: a
+fabricated figure next to measured ones in the same table is worse than an
+admitted gap. `telemetry.test.ts` asserts that every model `EFFORT_MODELS` can
+select has a rate, so `unknown` should now only appear for a model set by hand
+with `/model`.
 
 `$/pass` divides cost per run by pass rate, pricing in the failures. It is the
 column that actually compares a cheap flaky model against an expensive reliable

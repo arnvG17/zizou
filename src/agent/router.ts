@@ -31,6 +31,7 @@
 // from ui/, tools/, or the rest of agent/ (mode.ts is types only).
 
 import { generateText, type ModelMessage } from "ai";
+import { recordUsage } from "../telemetry/index.js";
 import type { Route } from "./mode.js";
 import { resolveModel } from "../sdk/resolve-model.js";
 import { modelForEffort } from "../config/effort.js";
@@ -169,12 +170,24 @@ THE FOUR ROUTES:
 
     It is ALSO build when the action changes no code at all — opening a file, running a script, starting the dev server, installing a package, formatting, launching something in the browser. "Changes no code" does not make it a question. If the user is telling you to DO a thing rather than to EXPLAIN a thing, it is build.
 
-"plan" — Multi-file feature work, a migration, a refactor spanning modules, or any request with several ordered parts that must happen in sequence. Signals: multiple named surfaces, "across", "and then", "refactor", "migrate", "set up", "build me a <whole application>". Choose plan when getting the order wrong would mean redoing work.
+"plan" — Choose plan for EITHER of two reasons.
+
+    (a) SIZE. Multi-file feature work, a migration, a refactor spanning modules, or any request with several ordered parts that must happen in sequence. Signals: multiple named surfaces, "across", "and then", "refactor", "migrate", "set up". Choose plan when getting the order wrong would mean redoing work.
+
+    (b) OPEN DECISIONS. The user asked you to CREATE something new, and did not say what it should do. Even a single file. "make a todo app", "build a chess game", "create a dashboard", "write me a scraper" name an artifact and nothing else — the features, the data storage, the framework and the styling are all unstated, so building it means silently inventing a dozen product decisions the user never saw.
+
+    Plan mode exists for exactly this: the planner states its assumptions and the user corrects them at the gate BEFORE anything is written. A wrong guess caught at the gate costs one line of typing; the same guess caught after execution costs the whole file.
+
+    (b) applies to CREATING something new and underspecified. It does NOT apply to a small, clear change to something that already exists — "fix the typo", "rename this function", "add a --verbose flag" leave nothing open, however short they are.
 
 HOW TO DECIDE:
 - Is the user asking or telling? Asking → chat or ask. Telling → build or plan.
 - An imperative verb is telling, even a short one. "open it", "run it", "show me the file", "try it" are all build — the user wants the thing done, not described.
-- If telling: could one focused edit session finish it? Yes → build. Does it need several steps in a specific order → plan.
+- If telling, ask TWO questions, not one:
+    1. How big is it? Several ordered steps → plan.
+    2. How specified is it? Creating something new with its behaviour unstated → plan, even if it is one file.
+  Only when the answer to both is "small and clear" is it build.
+- "Small" and "specified" are different things. A one-file request can still leave every product decision open. Do not let a short prompt read as a simple one.
 - Grammar lies. "can you add a dark mode toggle" is phrased as a question but is a build. "should I be using useEffect here" is phrased as a question and is an ask.
 - A greeting attached to a task is the task. Route on the task.
 - Follow-ups inherit context. After a build, "now add tests for it" is another build, not a question.
@@ -194,6 +207,10 @@ EXAMPLES:
 "add dark mode across the settings page, the header and the theme provider" -> {"route":"plan","confidence":0.9,"reason":"three named surfaces, ordered work"}
 "migrate us from express to fastify" -> {"route":"plan","confidence":0.95,"reason":"migration spanning the codebase"}
 "build me a chess app with a timer and move history" -> {"route":"plan","confidence":0.85,"reason":"whole application, several components"}
+"create a new todoapp.html" -> {"route":"plan","confidence":0.8,"reason":"new app, behaviour unspecified"}
+"make me a scraper" -> {"route":"plan","confidence":0.85,"reason":"new tool, nothing specified"}
+"create hello.txt containing exactly: hi" -> {"route":"build","confidence":0.95,"reason":"new file, contents fully specified"}
+"add a --verbose flag to the CLI" -> {"route":"build","confidence":0.9,"reason":"small change, nothing left open"}
 "now write tests for that" -> {"route":"build","confidence":0.8,"reason":"follow-up change to what was just built"}
 
 OUTPUT:
@@ -353,7 +370,7 @@ export async function routePrompt(args: RoutePromptArgs): Promise<RouteDecision>
 
     const prompt = `${renderHistory(history)}Classify this message:\n${userPrompt.slice(0, 4000)}`;
 
-    const { text } = await generateText({
+    const { text, usage } = await generateText({
       model,
       system: ROUTER_SYSTEM,
       prompt,
@@ -363,6 +380,10 @@ export async function routePrompt(args: RoutePromptArgs): Promise<RouteDecision>
       // tokens of a four-way label choice are not where sampling matters.
       abortSignal: AbortSignal.timeout(ROUTER_TIMEOUT_MS),
     });
+
+    // The router runs on EVERY auto-mode turn before anything else does. It is
+    // cheap per call and entirely invisible without this line.
+    recordUsage({ role: "router", provider, modelId: modelId ?? "unknown", usage });
 
     const decision = parseRouteDecision(text);
     if (!decision) {

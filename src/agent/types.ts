@@ -38,9 +38,27 @@ export interface PlanStep {
 
   /**
    * Files this step expects to create or modify.
-   * Used by the verifier to check filesystem state after execution.
+   *
+   * ADVISORY ONLY. This focuses the step prompt, and nothing more.
+   *
+   * It used to be a contract the verifier enforced, which was a category
+   * error: the planner is asked to name files before the work happens, so for
+   * any step that runs a scaffolder or a package manager the paths are a
+   * GUESS. Enforcing the guess produced failures like
+   * "target-not-created: frontend/todo-app/package.json" for a step that had
+   * in fact succeeded. What a step should be judged on lives in `check`.
    */
   targetFiles: string[];
+
+  /**
+   * How to tell whether this step actually worked.
+   *
+   * Prefer this over targetFiles for anything the planner cannot know up
+   * front: `command` for a step whose success is an exit code, `url` for a
+   * step that brings a server up, `files` only for paths genuinely authored
+   * by hand.
+   */
+  check?: StepCheck;
 
   /**
    * Indices of other PlanSteps that must complete before this one.
@@ -48,6 +66,19 @@ export interface PlanStep {
    * Empty array means no dependencies (can run immediately).
    */
   dependsOn: number[];
+}
+
+/** A step's declared success condition. */
+export interface StepCheck {
+  kind: "files" | "command" | "url";
+  /** kind: "files" — paths that must exist afterwards. */
+  files?: string[];
+  /** kind: "command" — must exit 0, e.g. "npm run build". */
+  command?: string;
+  /** kind: "command" — where to run it, relative to the workspace root. */
+  cwd?: string;
+  /** kind: "url" — must respond, e.g. "http://localhost:5173". */
+  url?: string;
 }
 
 // ─── Tool Call Record ────────────────────────────────────────────────────────
@@ -99,9 +130,6 @@ export interface StepResult {
   // async generator and yields each AgentEvent as it happens. Buffering them
   // here as well meant the orchestrator replayed the whole step after it had
   // already finished, which defeated streaming entirely.
-
-  /** Map of file paths to their contents before they were modified in this step. */
-  oldFileStates?: Map<string, string | null>;
 
   /** The fully updated conversation history for this step/turn. */
   conversationHistory?: import("ai").ModelMessage[];
@@ -179,27 +207,86 @@ export interface StepDigest {
 // Output of the verifier. Tells the orchestrator whether the executor's
 // claimed changes actually match filesystem reality.
 
+export type FindingCode =
+  | "syntax-error"
+  | "claimed-changed-but-missing"
+  | "claimed-changed-but-unchanged"
+  | "changed-but-not-claimed"
+  | "target-not-created"
+  | "tool-error"
+  | "command-failed"
+  | "url-unreachable";
+
 /**
- * Result of verifying a step's execution against filesystem state.
+ * One thing the verifier noticed.
  *
- * `verified` is true only when every claimed file actually changed AND
- * no unexpected files were modified. `mismatches` lists specific
- * discrepancies for debugging.
+ * THE SEVERITY SPLIT IS THE POINT. Every finding used to be fatal, because
+ * `verified` was `mismatches.length === 0`. That made a guessed file path
+ * (which proves nothing) weigh exactly as much as a failed write (which proves
+ * the step did not happen), and the noise from the former is what taught
+ * everyone to ignore the latter.
+ *
+ *   hard — evidence the step did NOT do its job. Blocks, and earns a retry.
+ *   soft — worth mentioning, not worth failing over.
+ */
+export interface Finding {
+  code: FindingCode;
+  severity: "hard" | "soft";
+  /** The file this concerns, when it concerns one. */
+  file?: string;
+  /** The concrete evidence: stderr tail, exit code, tool error, server log. */
+  detail?: string;
+}
+
+/** Which codes are fatal. Anything absent here is advisory. */
+export const HARD_CODES: ReadonlySet<FindingCode> = new Set<FindingCode>([
+  "syntax-error",
+  "claimed-changed-but-missing",
+  "tool-error",
+  "command-failed",
+  "url-unreachable",
+]);
+
+/**
+ * Result of verifying a step's execution.
+ *
+ * `verified` is true when nothing HARD was found — the commands exited zero,
+ * the server answered, the files the executor claimed to write exist. Soft
+ * findings can be present on a passing step and are shown as notes.
  */
 export interface VerificationResult {
-  /** true if filesystem state matches the executor's claims. */
+  /** true when no hard finding was recorded. */
   verified: boolean;
 
+  /** Everything noticed, hard and soft. */
+  findings: Finding[];
+
   /**
-   * Human-readable descriptions of what went wrong. Examples:
-   *   - "claimed-changed-but-unchanged: src/foo.ts"
-   *   - "changed-but-not-claimed: src/bar.ts"
-   * Empty when verified is true.
+   * One-line renderings of `findings`, e.g. "target-not-created: src/foo.ts".
+   * Derived, not authoritative — kept so previously persisted sessions and
+   * the log restorer keep working.
    */
   mismatches: string[];
 
   /** Verbose conversational feedback explaining the verification results. */
   verboseFeedback?: string;
+}
+
+/** Builds a Finding, assigning severity from the single source of truth. */
+export function makeFinding(code: FindingCode, file?: string, detail?: string): Finding {
+  return {
+    code,
+    severity: HARD_CODES.has(code) ? "hard" : "soft",
+    ...(file ? { file } : {}),
+    ...(detail ? { detail } : {}),
+  };
+}
+
+/** The one-line form used in logs and in the UI. */
+export function renderFinding(f: Finding): string {
+  const subject = f.file ? `: ${f.file}` : "";
+  const detail = f.detail ? ` — ${f.detail}` : "";
+  return `${f.code}${subject}${detail}`;
 }
 
 // ─── Project Context ─────────────────────────────────────────────────────────

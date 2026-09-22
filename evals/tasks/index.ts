@@ -271,6 +271,51 @@ const autoRoutesFeatureToPlan: GoldenTask = {
   ],
 };
 
+// ─── 6b. Auto mode: underspecified work goes to plan ─────────────────────
+//
+// The SECOND axis the router judges on, and the one it originally lacked.
+//
+// "create a new todoapp.html" is one file, so a size-only classifier calls it
+// a build and the agent silently invents every product decision — storage,
+// editing, filtering, styling — and writes 200 lines of them. Plan mode's
+// assumptions-plus-gate is exactly the machinery for that case: a wrong guess
+// caught at the gate costs one line of typing.
+//
+// The pair matters more than either task alone. Both say "create a new file";
+// only one of them leaves anything open. A router that routes on the word
+// "create" would pass the first and fail the second.
+
+const autoRoutesVagueCreateToPlan: GoldenTask = {
+  id: "auto-route-plan-underspecified",
+  intent: "A new artifact with its behaviour unstated goes to plan, even as a single file.",
+  prompt: "create a new todoapp.html",
+  mode: "auto",
+  tags: ["router", "auto-mode", "scope"],
+  budget: { maxToolCalls: 25, maxDurationMs: 240_000 },
+  assertions: [
+    routedTo("plan"),
+    // The payoff: the guesses are stated where the user can see and correct
+    // them, rather than being discovered afterwards in the file.
+    statedAssumptions(1),
+  ],
+};
+
+const autoRoutesSpecifiedCreateToBuild: GoldenTask = {
+  id: "auto-route-build-specified",
+  intent: "A new file whose contents are fully specified stays a build — nothing is open.",
+  prompt: "create hello.txt containing exactly: Hello, World!",
+  mode: "auto",
+  tags: ["router", "auto-mode", "scope"],
+  budget: { maxToolCalls: 8, maxDurationMs: 120_000 },
+  assertions: [
+    // The guard on the rule above. Without this, "route anything that says
+    // create to plan" would pass the underspecified test and be wrong.
+    routedTo("build"),
+    fileMatches("hello.txt", /Hello,?\s*World!?/i),
+    touchedNothingBut("hello.txt"),
+  ],
+};
+
 // ─── 7. File placement ─────────────────────────────────────────
 //
 // The failure this exists to catch: asked for an app, the agent wrote
@@ -337,6 +382,8 @@ export const ALL_TASKS: GoldenTask[] = [
   autoRoutesQuestionToAsk,
   autoRoutesEditToBuild,
   autoRoutesFeatureToPlan,
+  autoRoutesVagueCreateToPlan,
+  autoRoutesSpecifiedCreateToBuild,
   buildPlacesFilesSensibly,
   buildEditsRatherThanRecreates,
 ];

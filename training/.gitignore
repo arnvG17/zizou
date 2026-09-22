@@ -1,0 +1,14 @@
+__pycache__/
+*.pyc
+
+# Training outputs. All regenerable, all large.
+*.gguf
+outputs/
+data/
+zizou-executor/
+zizou-merged/
+llama.cpp/
+
+# Rebuilt by: bun run evals/sft/render.ts --out training/reference_renders.json
+# ~900KB of duplicated tool schemas; the command is in README step 1.
+reference_renders.json

@@ -2,13 +2,13 @@
 //
 // LAYER: config/
 //
-// Identifies the current project for on-disk state (checkpoints, sessions).
+// Identifies the current project for on-disk state (file traces, sessions).
 //
 // THIS IS THE ONLY IMPLEMENTATION. The same djb2-style hash was written out
 // three times — checkpoint/storage.ts, session/storage.ts and git/git.ts —
 // which is three chances for them to drift and silently point at different
 // state directories for the same project. config/ is the one layer both
-// checkpoint/ and session/ are allowed to import from.
+// trace/ and session/ are allowed to import from.
 //
 // DEPENDENCY DIRECTION: imports nothing from the project.
 

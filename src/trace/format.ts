@@ -116,7 +116,7 @@ const KIND_GLYPH: Record<EditKind, string> = {
 export function formatEditRow(index: number, edit: FileEdit, extra?: string): string {
   const idx = String(index).padEnd(3);
   const glyph = KIND_GLYPH[edit.kind];
-  const path = edit.path.padEnd(44);
+  const path = (edit.displayPath ?? edit.path).padEnd(44);
   const stat = formatStat(edit.added, edit.removed);
   const tail = edit.revertedAt ? ` ${DIM}(reverted)${RESET}` : extra ? ` ${DIM}${extra}${RESET}` : "";
   return `  ${idx}${glyph}  ${path} ${stat}${tail}`;

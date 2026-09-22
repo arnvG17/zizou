@@ -35,6 +35,21 @@ export function canonicalPath(p: string, root: string): string {
   return process.platform === "win32" ? normalized.toLowerCase() : normalized;
 }
 
+/**
+ * The same path, spelled as the user would recognise it.
+ *
+ * canonicalPath lowercases on Windows so that two spellings of one file share
+ * an identity. That is right for keys and wrong for display — it turns
+ * README.md into readme.md in the `/changes` list. Identity and presentation
+ * are therefore two functions, not one.
+ */
+export function displayPath(p: string, root: string): string {
+  const abs = isAbsolute(p) ? p : resolve(root, p);
+  let rel = relative(root, abs);
+  if (rel === "" || rel.startsWith("..")) rel = abs;
+  return rel.split(sep).join("/");
+}
+
 /** Turns a canonical key back into an absolute path for filesystem access. */
 export function toAbsolute(canonical: string, root: string): string {
   return isAbsolute(canonical) ? canonical : resolve(root, canonical);

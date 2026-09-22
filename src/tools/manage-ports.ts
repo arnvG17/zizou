@@ -2,6 +2,7 @@ import { exec } from "node:child_process";
 import { promisify } from "node:util";
 import { z } from "zod";
 import { tool } from "ai";
+import { win32Bin } from "./shell.js";
 
 const execAsync = promisify(exec);
 
@@ -10,8 +11,14 @@ async function findProcessOnPort(port: number): Promise<{ pid: number; name?: st
 
   if (process.platform === "win32") {
     try {
-      // Find PID using netstat (faster and always works without admin rights)
-      const { stdout } = await execAsync(`netstat -ano | findstr :${port}`);
+      // Find PID using netstat (faster and always works without admin rights).
+      // Absolute paths: System32 is not always on PATH (notably under a Git
+      // Bash style environment), and a bare `netstat` there fails with "not
+      // recognized" — which this function's catch would silently read as
+      // "nothing is listening on that port".
+      const { stdout } = await execAsync(
+        `"${win32Bin("netstat")}" -ano | "${win32Bin("findstr")}" :${port}`,
+      );
       const lines = stdout.split("\n");
       const pids = new Set<number>();
 
@@ -34,7 +41,9 @@ async function findProcessOnPort(port: number): Promise<{ pid: number; name?: st
         let details = "";
         try {
           // Get process details using tasklist
-          const { stdout: taskStdout } = await execAsync(`tasklist /FI "PID eq ${pid}" /NH`);
+          const { stdout: taskStdout } = await execAsync(
+            `"${win32Bin("tasklist")}" /FI "PID eq ${pid}" /NH`,
+          );
           const taskParts = taskStdout.trim().split(/\s+/);
           if (taskParts.length > 0 && taskParts[0] !== "INFO:") {
             name = taskParts[0];
@@ -90,7 +99,7 @@ async function findProcessOnPort(port: number): Promise<{ pid: number; name?: st
 async function killProcess(pid: number): Promise<boolean> {
   try {
     if (process.platform === "win32") {
-      await execAsync(`taskkill /F /PID ${pid}`);
+      await execAsync(`"${win32Bin("taskkill")}" /F /PID ${pid}`);
     } else {
       await execAsync(`kill -9 ${pid}`);
     }

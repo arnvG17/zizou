@@ -1,0 +1,72 @@
+{
+  "generatedAt": "2026-09-21T04:22:23.964Z",
+  "totalRecords": 1048,
+  "train": 854,
+  "val": 194,
+  "valFamilies": [
+    "blocked-no-such-thing",
+    "chat-general",
+    "create-nothing-exists",
+    "fs-delete",
+    "multi-logging",
+    "recovery-two-fails-rewrite",
+    "search-listdir",
+    "shell-background-lifecycle",
+    "single-edit-named-path"
+  ],
+  "valBands": {
+    "single-edit": 20,
+    "create-in-place": 20,
+    "search-then-act": 25,
+    "multi-file": 30,
+    "recovery": 30,
+    "shell-process": 20,
+    "fs-ops": 15,
+    "blocked": 15,
+    "no-tool-chat": 19
+  },
+  "bands": {
+    "single-edit": 150,
+    "create-in-place": 160,
+    "search-then-act": 140,
+    "multi-file": 70,
+    "recovery": 160,
+    "shell-process": 180,
+    "fs-ops": 85,
+    "blocked": 60,
+    "no-tool-chat": 43
+  },
+  "tools": {
+    "readFile": 690,
+    "editFile": 975,
+    "listDir": 160,
+    "writeFile": 150,
+    "glob": 210,
+    "grep": 145,
+    "runBash": 65,
+    "manageTasks": 85,
+    "managePorts": 70,
+    "runBackground": 20,
+    "addFileToContext": 20,
+    "fileOperations": 105
+  },
+  "tokenStats": {
+    "p50": 3723,
+    "p95": 4386,
+    "max": 5405
+  },
+  "toolNames": [
+    "addFileToContext",
+    "editFile",
+    "fileOperations",
+    "glob",
+    "grep",
+    "listDir",
+    "managePorts",
+    "manageTasks",
+    "readFile",
+    "runBackground",
+    "runBash",
+    "writeFile"
+  ]
+}

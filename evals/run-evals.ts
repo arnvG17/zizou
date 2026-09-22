@@ -65,7 +65,7 @@ import { EFFORT_PROFILES, modelForEffort, type Effort } from "../src/config/effo
 import { resolveModel, getActiveModelId } from "../src/sdk/resolve-model.js";
 import { getDefaultProvider, type ProviderChoice } from "../src/config/api-keys.js";
 import { RunJournal, setActiveJournal, type RunTotals } from "../src/agent/debug/index.js";
-import { getModelRate } from "../src/tui/cost-tracker.js";
+import { costOf, getSessionUsage, resetUsage } from "../src/telemetry/index.js";
 
 // ─── Paths ───────────────────────────────────────────────────────────────────
 
@@ -198,18 +198,32 @@ function verifyIntegrity(before: ProjectSnapshot): boolean {
 /**
  * Estimated USD for a run, or null when the model has no known rate.
  *
- * Returning null rather than falling back to a default rate is deliberate.
- * The rate table's `default` entry ($1/$5 per 1M) is a guess, and most models
- * the effort dial selects are not in the table — so a defaulted number here
- * would be a fabricated figure presented next to measured ones in the same
- * table. An explicit "unknown" is the honest column value.
+ * Costed from the TELEMETRY LEDGER, not from the journal totals. The journal
+ * only sees calls that go through runTurn, which is the executor — so a
+ * journal-derived cost silently omits the router call, the planner call, and
+ * one verifier call per step. On a plan-mode task that is most of the calls.
+ * See src/telemetry/usage.ts.
+ *
+ * Returning null rather than defaulting to a guessed rate is also deliberate:
+ * a fabricated figure sitting in the same column as measured ones is worse
+ * than an admitted gap.
  */
-function estimateRunCost(modelId: string, totals: RunTotals): number | null {
-  const rate = getModelRate(modelId);
-  if (!rate) return null;
-  const inTok = totals.usage.inputTokens;
-  const outTok = totals.usage.outputTokens + (totals.usage.reasoningTokens ?? 0);
-  return (inTok / 1_000_000) * rate.input + (outTok / 1_000_000) * rate.output;
+function estimateRunCost(modelId: string, provider: string): number | null {
+  const usage = getSessionUsage();
+  if (usage.totalCalls === 0) return null;
+  // Any unpriced call makes the total a floor, not a cost. Report unknown
+  // rather than a number that reads as complete.
+  if (usage.unpricedCalls > 0) return null;
+  return costOf(
+    modelId,
+    {
+      inputTokens: usage.totalInputTokens,
+      outputTokens: usage.totalOutputTokens,
+      cachedInputTokens: usage.totalCachedInputTokens,
+      reasoningTokens: usage.totalReasoningTokens,
+    },
+    provider,
+  );
 }
 
 // ─── Budget ──────────────────────────────────────────────────────────────────
@@ -363,6 +377,11 @@ async function runOnce(
   // file diff inside the agent land in THIS run's files.
   setActiveJournal(journal);
 
+  // The usage ledger is process-wide, so without this every run would inherit
+  // the previous one's tokens and the per-task cost column would climb
+  // monotonically across the suite.
+  resetUsage();
+
   journal.runStart({
     prompt: task.prompt,
     mode: task.mode,
@@ -456,7 +475,7 @@ async function runOnce(
     failureCategory,
     failureDetail,
     totals,
-    costUsd: estimateRunCost(cell.modelId, totals),
+    costUsd: estimateRunCost(cell.modelId, cell.provider),
     journalPath: journal.logPath,
     workspaceDir: passed && !keepWorkspaces ? undefined : workspaceDir,
   };

@@ -36,6 +36,8 @@ import {
 } from "../config/api-keys.js";
 import type { ConfirmFn } from "../tools/index.js";
 import { sessionPermissions } from "../tools/index.js";
+import { listServices } from "../tools/service-registry.js";
+import { repairHistory } from "../agent/executor.js";
 import { runTurn } from "../agent/run-turn.js";
 import { buildSystemPrompt, addPinnedFile, pinnedContextFiles } from "../context/build-system-prompt.js";
 import { buildRepoMap } from "../context/repo-map.js";
@@ -45,9 +47,11 @@ import type { LogEntry as SharedLogEntry } from "../commands/index.js";
 import { readdirSync, statSync, existsSync } from "fs";
 import { join, relative, resolve as resolvePath } from "path";
 import { loadActiveSessionState, saveActiveSessionState, listSessions, getActiveSession, getActiveSessionId, createSession } from "../session/registry.js";
-import { listCheckpoints, listBranches } from "../checkpoint/manager.js";
+import { getChanges } from "../trace/query.js";
 import { FileSearchOverlay } from "../tui/file-search-overlay.js";
 import { estimateCost, formatCost, getModelRate } from "../tui/cost-tracker.js";
+import { execSync } from "node:child_process";
+import { TokenStatsPanel, EvalStatsPanel } from "./SidebarStats.js";
 
 // ─── Orchestrator imports ────────────────────────────────────────────────────
 // These enable the full clarify → plan → execute → verify pipeline.
@@ -301,6 +305,56 @@ const THINKING_WORDS = [
 
 const SPINNER_FRAMES = ["⠋", "⠙", "⠹", "⠸", "⠼", "⠴", "⠦", "⠧", "⠇", "⠏"];
 
+/**
+ * How often streamed assistant text is committed to the log, in ms.
+ *
+ * ~16 frames a second: fast enough to read as live typing, slow enough that
+ * the terminal is not asked to repaint the whole screen once per token.
+ */
+const STREAM_FLUSH_MS = 60;
+
+/** Widest thinking word plus its ellipsis, so the spinner slot never resizes. */
+const WORD_SLOT_WIDTH =
+  THINKING_WORDS.reduce((max, w) => Math.max(max, w.length), 0) + 1;
+
+/**
+ * One line showing what the agent currently has running.
+ *
+ * Services are killed when the CLI exits, so without this the user has no way
+ * to know a dev server is theirs to lose — or to notice that the "running"
+ * server they are debugging actually crashed two steps ago.
+ *
+ * Polls rather than subscribing: the registry is a plain module-level map with
+ * no change events, and a 1s poll over a handful of entries is cheaper than
+ * wiring an emitter through it.
+ */
+function RunningServices() {
+  const [items, setItems] = useState<ReturnType<typeof listServices>>([]);
+
+  useEffect(() => {
+    const tick = () => setItems(listServices().filter((s) => s.status !== "stopped"));
+    tick();
+    const id = setInterval(tick, 1000);
+    return () => clearInterval(id);
+  }, []);
+
+  if (items.length === 0) return null;
+
+  return (
+    <Box flexDirection="row" paddingX={1} gap={2}>
+      {items.map((s) => {
+        const color = s.status === "ready" ? "#5FB87A" : s.status === "crashed" ? "red" : "yellow";
+        return (
+          <Text key={s.name} color={color}>
+            {s.status === "crashed" ? "○" : "●"} {s.name}
+            {s.port ? ` :${s.port}` : ""} {s.status}
+          </Text>
+        );
+      })}
+    </Box>
+  );
+}
+
 function ThinkingLoader() {
   const [word, setWord] = useState(() => {
     const randomIndex = Math.floor(Math.random() * THINKING_WORDS.length);
@@ -330,9 +384,14 @@ function ThinkingLoader() {
   // only moment it is true, and the only moment anyone needs it. A cancel key
   // nobody knows about is the same as no cancel key — which is why the only
   // way out of a long run used to be Ctrl+C and a dead session.
+  // The word is padded to a FIXED width. Without it, "booping" and
+  // "percolating" render four columns apart, so every word swap shoves
+  // "esc to stop" sideways and the input row appears to twitch.
+  const label = (word + "…").padEnd(WORD_SLOT_WIDTH, " ");
+
   return (
     <Text>
-      <Text color="#39FF14"> ({SPINNER_FRAMES[frameIndex]} {word}…)</Text>
+      <Text color="#39FF14"> ({SPINNER_FRAMES[frameIndex]} {label})</Text>
       <Text color="#6B7280" dimColor>  esc to stop</Text>
     </Text>
   );
@@ -400,6 +459,45 @@ export function Chat({ onChangeKeys, mode: initialMode = "auto", initialPrompt }
     return full.replace(/\\/g, "/");
   }, []);
 
+  // ── Sidebar stat inputs ──────────────────────────────────────────────────
+  //
+  // The unabbreviated cwd, kept separate from the display form above: the eval
+  // reader opens evals/reports/ under it, and "/~/ZIZOUv1" is not a path.
+  const projectRoot = useMemo(() => process.cwd(), []);
+
+  // Bumped whenever /model writes a new provider or model, so the memos below
+  // recompute. The active model lives in the Conf store rather than in React
+  // state, so there is nothing for a memo to depend on without this.
+  const [modelSwitchNonce, setModelSwitchNonce] = useState(0);
+
+  // Recomputed whenever the model changes, so /model is reflected immediately
+  // in both the cost rate and the eval lookup.
+  const activeProvider = useMemo(
+    () => getDefaultProvider() || "groq",
+    [modelSwitchNonce],
+  );
+  const activeModelId = useMemo(
+    () => getActiveModelId(activeProvider),
+    [activeProvider, modelSwitchNonce],
+  );
+
+  // Marks an eval report as stale when it predates the working tree. Resolved
+  // once: a shelling out per render would be absurd for a value that changes
+  // when the user commits, not when they type.
+  const currentSha = useMemo(() => {
+    try {
+      return execSync("git rev-parse --short HEAD", {
+        cwd: projectRoot,
+        stdio: ["ignore", "pipe", "ignore"],
+      })
+        .toString()
+        .trim();
+    } catch {
+      // Not a git repo, or git is absent. Staleness simply goes unmarked.
+      return undefined;
+    }
+  }, [projectRoot]);
+
   // Conversation history persists across turns
   const history = useRef<ModelMessage[]>([]);
   const systemPromptRef = useRef<string>("");
@@ -466,7 +564,10 @@ export function Chat({ onChangeKeys, mode: initialMode = "auto", initialPrompt }
     }
     
     if (sessionState) {
-      history.current = sessionState.conversation || [];
+      // Repaired on the way in: a session saved by an older build can hold
+      // tool results in a shape the model API rejects, which would otherwise
+      // make the session impossible to reopen. See repairHistory.
+      history.current = repairHistory(sessionState.conversation || []);
       setTokenStats(sessionState.tokenStats || {
         inputTokens: 0,
         outputTokens: 0,
@@ -661,16 +762,13 @@ export function Chat({ onChangeKeys, mode: initialMode = "auto", initialPrompt }
       }
       return null;
     }
-    if (input.startsWith("/checkpoint ")) {
+    if (input.startsWith("/changes ")) {
       const parts = input.trim().split(/\s+/);
       if (parts.length === 1) {
-        return "checkpoint-subcommands";
+        return "changes-subcommands";
       }
-      if (parts.length === 2 && (parts[1] === "restore" || parts[1] === "diff" || parts[1] === "delete")) {
-        return "checkpoint-targets";
-      }
-      if (parts.length === 2 && parts[1] === "switch") {
-        return "checkpoint-branches";
+      if (parts.length === 2 && (parts[1] === "diff" || parts[1] === "revert")) {
+        return "changes-targets";
       }
       return null;
     }
@@ -739,39 +837,27 @@ export function Chat({ onChangeKeys, mode: initialMode = "auto", initialPrompt }
     ];
   }, [suggestionMode]);
 
-  const checkpointSubcommands = useMemo(() => {
-    if (suggestionMode !== "checkpoint-subcommands") return [];
+  const changesSubcommands = useMemo(() => {
+    if (suggestionMode !== "changes-subcommands") return [];
     return [
-      { value: "list", label: "list - List all checkpoints" },
-      { value: "diff", label: "diff - Show local uncommitted changes" },
-      { value: "diff session", label: "diff session - Show all changes in the full session" },
-      { value: "diff", label: "diff <id> - Show changes in checkpoint" },
-      { value: "diff", label: "diff <from> <to> - Compare two checkpoints" },
-      { value: "restore", label: "restore <id> - Restore to checkpoint" },
-      { value: "branch", label: "branch <name> - Create new branch" },
-      { value: "switch", label: "switch <branch> - Switch to branch" },
-      { value: "delete", label: "delete <id> - Delete checkpoint" },
-      { value: "revert", label: "revert - Revert all uncommitted changes" },
-      { value: "revert session", label: "revert session - Revert all changes in the full session" },
+      { value: "diff", label: "diff <n> - Show what changed in that file" },
+      { value: "revert", label: "revert <n> - Revert just that file" },
     ];
   }, [suggestionMode]);
 
-  const checkpointTargets = useMemo(() => {
-    if (suggestionMode !== "checkpoint-targets") return [];
-    const checkpoints = listCheckpoints();
-    return checkpoints.map((c) => ({
-      value: c.id.slice(0, 8),
-      label: `Step ${c.stepIndex}: ${c.description}`,
-    }));
-  }, [suggestionMode]);
-
-  const checkpointBranches = useMemo(() => {
-    if (suggestionMode !== "checkpoint-branches") return [];
-    const branches = listBranches();
-    return branches.map((b) => ({
-      value: b.name,
-      label: b.name,
-    }));
+  // Numbered to match what /changes prints, so the number the user sees in the
+  // list is the number they type.
+  const changesTargets = useMemo(() => {
+    if (suggestionMode !== "changes-targets") return [];
+    try {
+      const { files } = getChanges(process.cwd(), getActiveSessionId() ?? null);
+      return files.map((f, i) => ({
+        value: String(i + 1),
+        label: `${f.displayPath} (+${f.added} -${f.removed})`,
+      }));
+    } catch {
+      return [];
+    }
   }, [suggestionMode]);
 
   const providerSearchQuery = useMemo(() => {
@@ -825,17 +911,14 @@ export function Chat({ onChangeKeys, mode: initialMode = "auto", initialPrompt }
     if (suggestionMode === "context-modes") {
       return contextModes.map((m) => ({ value: m.value, description: m.label }));
     }
-    if (suggestionMode === "checkpoint-subcommands") {
-      return checkpointSubcommands.map((s) => ({ value: s.value, description: s.label }));
+    if (suggestionMode === "changes-subcommands") {
+      return changesSubcommands.map((s) => ({ value: s.value, description: s.label }));
     }
-    if (suggestionMode === "checkpoint-targets") {
-      return checkpointTargets.map((t) => ({ value: t.value, description: t.label }));
-    }
-    if (suggestionMode === "checkpoint-branches") {
-      return checkpointBranches.map((b) => ({ value: b.value, description: b.label }));
+    if (suggestionMode === "changes-targets") {
+      return changesTargets.map((t) => ({ value: t.value, description: t.label }));
     }
     return [];
-  }, [suggestionMode, filteredCommands, filteredFiles, filteredSkills, filteredProviders, filteredModelNames, sessionSubcommands, sessionNames, contextModes, checkpointSubcommands, checkpointTargets, checkpointBranches]);
+  }, [suggestionMode, filteredCommands, filteredFiles, filteredSkills, filteredProviders, filteredModelNames, sessionSubcommands, sessionNames, contextModes, changesSubcommands, changesTargets]);
 
   const completedValue = useMemo(() => {
     if (activeSuggestions.length === 0 || selectedIndex >= activeSuggestions.length) return "";
@@ -868,18 +951,13 @@ export function Chat({ onChangeKeys, mode: initialMode = "auto", initialPrompt }
     if (suggestionMode === "context-modes") {
       return "/context " + selected + " ";
     }
-    if (suggestionMode === "checkpoint-subcommands") {
-      return "/checkpoint " + selected + " ";
+    if (suggestionMode === "changes-subcommands") {
+      return "/changes " + selected + " ";
     }
-    if (suggestionMode === "checkpoint-targets") {
+    if (suggestionMode === "changes-targets") {
       const parts = input.split(/\s+/);
       const subcommand = parts[1] || "";
-      return `/checkpoint ${subcommand} ${selected} `;
-    }
-    if (suggestionMode === "checkpoint-branches") {
-      const parts = input.split(/\s+/);
-      const subcommand = parts[1] || "";
-      return `/checkpoint ${subcommand} ${selected} `;
+      return `/changes ${subcommand} ${selected} `;
     }
     return "";
   }, [input, suggestionMode, activeSuggestions, selectedIndex, modelSearchQuery]);
@@ -981,6 +1059,7 @@ export function Chat({ onChangeKeys, mode: initialMode = "auto", initialPrompt }
             const option = MODEL_OPTIONS[state.selectedModelIndex];
             setDefaultProvider(option.provider);
             setProviderModel(option.provider, option.modelId);
+            setModelSwitchNonce((n) => n + 1);
             setLog((l) => [
               ...l,
               { kind: "assistant", text: `Switched provider to ${SHORT_LABELS[option.provider]} and model to ${option.modelId}` },
@@ -1053,7 +1132,7 @@ export function Chat({ onChangeKeys, mode: initialMode = "auto", initialPrompt }
         if (executableCommands.includes(selected)) {
           shouldExecute = true;
         }
-      } else if (suggestionMode === "files" || suggestionMode === "skills" || suggestionMode === "session-subcommands" || suggestionMode === "session-names" || suggestionMode === "context-modes" || suggestionMode === "checkpoint-subcommands" || suggestionMode === "checkpoint-targets" || suggestionMode === "checkpoint-branches") {
+      } else if (suggestionMode === "files" || suggestionMode === "skills" || suggestionMode === "session-subcommands" || suggestionMode === "session-names" || suggestionMode === "context-modes" || suggestionMode === "changes-subcommands" || suggestionMode === "changes-targets") {
         shouldExecute = true;
       }
 
@@ -1254,6 +1333,58 @@ export function Chat({ onChangeKeys, mode: initialMode = "auto", initialPrompt }
     let thoughtDuration = "";
     let hasActualUsage = false;
 
+    // Deltas arrive far faster than a terminal can usefully repaint: a quick
+    // provider lands dozens per second, and every setLog redraws the header,
+    // the whole transcript, the input box and the sidebar. That full-frame
+    // repaint at token rate is what makes the prompt row jitter mid-answer.
+    // So deltas accumulate in `currentAssistantText` and are committed to the
+    // log on a fixed cadence instead — the text still reads as streaming,
+    // but the frame rate is one a terminal can actually keep up with.
+    let flushTimer: ReturnType<typeof setTimeout> | null = null;
+
+    const commitAssistantText = () => {
+      setLog((l) => {
+        if (!assistantEntryAdded) {
+          assistantEntryAdded = true;
+          return [
+            ...l,
+            { kind: "assistant", text: currentAssistantText, thoughtDuration },
+          ];
+        }
+        const updated = [...l];
+        updated[updated.length - 1] = {
+          kind: "assistant",
+          text: currentAssistantText,
+          thoughtDuration,
+        };
+        return updated;
+      });
+    };
+
+    /**
+     * Commits what has accumulated and cancels any pending repaint.
+     *
+     * Every non-delta event calls this FIRST. A queued flush rewrites
+     * `log[log.length - 1]`, so if a tool-call entry were appended while one
+     * was still pending, that flush would land on the tool call and overwrite
+     * it with assistant text.
+     */
+    const flushAssistantText = () => {
+      if (flushTimer) {
+        clearTimeout(flushTimer);
+        flushTimer = null;
+      }
+      if (currentAssistantText) commitAssistantText();
+    };
+
+    const scheduleAssistantFlush = () => {
+      if (flushTimer) return;
+      flushTimer = setTimeout(() => {
+        flushTimer = null;
+        commitAssistantText();
+      }, STREAM_FLUSH_MS);
+    };
+
     try {
       // One resolution point for provider, model, and every sampling knob.
       // Effort drives all of them together, so they cannot contradict.
@@ -1302,6 +1433,12 @@ export function Chat({ onChangeKeys, mode: initialMode = "auto", initialPrompt }
         }
 
         const event = result.value;
+
+        // Anything that is not a text delta is about to touch the log, so the
+        // buffered text has to land first and in order.
+        if (!(event.kind === "agent-event" && event.event.kind === "text-delta")) {
+          flushAssistantText();
+        }
 
         // ── Handle orchestrator-level events ──────────────────────────────
         switch (event.kind) {
@@ -1369,6 +1506,7 @@ export function Chat({ onChangeKeys, mode: initialMode = "auto", initialPrompt }
                 kind: "verification",
                 stepIndex: event.step.index,
                 verified: event.verification.verified,
+                findings: event.verification.findings,
                 mismatches: event.verification.mismatches,
                 verboseFeedback: event.verification.verboseFeedback,
                 modelTier: event.modelTier,
@@ -1382,6 +1520,20 @@ export function Chat({ onChangeKeys, mode: initialMode = "auto", initialPrompt }
               verified: event.verification.verified,
             });
             break;
+
+          case "step-retry": {
+            // The step failed on something real and is being run again with
+            // the error fed back. Say WHY, or the user just sees the same step
+            // run twice with no explanation.
+            const reason = event.findings
+              .map((f) => f.detail?.split("\n")[0] ?? f.code)
+              .join("; ");
+            setLog((l) => [
+              ...l,
+              { kind: "step-retry", stepIndex: event.step.index, reason, attempt: event.attempt },
+            ]);
+            break;
+          }
 
           case "history-updated":
             history.current = event.history;
@@ -1416,22 +1568,7 @@ export function Chat({ onChangeKeys, mode: initialMode = "auto", initialPrompt }
 
             if (agentEvent.kind === "text-delta") {
               currentAssistantText += agentEvent.text;
-              setLog((l) => {
-                if (!assistantEntryAdded) {
-                  assistantEntryAdded = true;
-                  return [
-                    ...l,
-                    { kind: "assistant", text: currentAssistantText, thoughtDuration },
-                  ];
-                }
-                const updated = [...l];
-                updated[updated.length - 1] = {
-                  kind: "assistant",
-                  text: currentAssistantText,
-                  thoughtDuration,
-                };
-                return updated;
-              });
+              scheduleAssistantFlush();
             } else if (agentEvent.kind === "tool-call") {
               assistantEntryAdded = false;
               currentAssistantText = "";
@@ -1557,6 +1694,10 @@ export function Chat({ onChangeKeys, mode: initialMode = "auto", initialPrompt }
         setLog((l) => [...l, { kind: "error", text: explained ?? raw }]);
       }
     } finally {
+      // A pending flush outlives the turn otherwise, and would repaint the
+      // transcript after the spinner is already gone.
+      flushAssistantText();
+
       // Findings published by the local-model request hook, e.g. that Ollama
       // ignored our num_ctx and is silently truncating the prompt. Drained
       // here rather than printed at the source because the sdk layer cannot
@@ -1614,6 +1755,15 @@ export function Chat({ onChangeKeys, mode: initialMode = "auto", initialPrompt }
     () => badgeFor(flow.pinnedMode, flow.lastRoute),
     [flow.pinnedMode, flow.lastRoute],
   );
+
+  // The repo map is split three times over in the sidebar. It runs to
+  // thousands of lines and never changes mid-session, so redoing that on
+  // every streamed frame is pure cost against the redraw budget.
+  const repoMapPreview = useMemo(() => {
+    if (!repoMap) return null;
+    const lines = repoMap.split("\n");
+    return { total: lines.length, head: lines.slice(0, 10) };
+  }, [repoMap]);
 
   return (
     <Box flexDirection="row" width="100%">
@@ -1699,6 +1849,7 @@ export function Chat({ onChangeKeys, mode: initialMode = "auto", initialPrompt }
                         if (modelName) {
                           setDefaultProvider(selectedProvider);
                           setProviderModel(selectedProvider, modelName);
+                          setModelSwitchNonce((n) => n + 1);
                           setLog((l) => [
                             ...l,
                             { kind: "assistant", text: `Switched provider to ${SHORT_LABELS[selectedProvider]} and model to ${modelName}` },
@@ -1792,6 +1943,10 @@ export function Chat({ onChangeKeys, mode: initialMode = "auto", initialPrompt }
                 {busy && <ThinkingLoader />}
               </Box>
 
+              {/* What is currently running. Also the only warning the user
+                  gets that quitting takes their dev servers with it. */}
+              <RunningServices />
+
               {/* Input Footer */}
               <Box flexDirection="row" justifyContent="space-between" paddingX={1} marginTop={0}>
                 <Box flexDirection="row" gap={1}>
@@ -1828,15 +1983,23 @@ export function Chat({ onChangeKeys, mode: initialMode = "auto", initialPrompt }
             </Box>
           </Box>
 
-          {/* Section 2: Context statistics */}
-          <Box flexDirection="column" marginBottom={1}>
-            <Text color="#E6E6E6" bold>Context</Text>
-            <Text color="gray">Max: {tokenStats.contextLimit.toLocaleString()} tokens</Text>
-            <Text color="gray">In:  {tokenStats.inputTokens.toLocaleString()}</Text>
-            <Text color="gray">Out: {tokenStats.outputTokens.toLocaleString()}</Text>
-            <Text color="gray">{tokenStats.pctUsed}% used</Text>
-            <Text color="gray">${tokenStats.cost.toFixed(4)} spent</Text>
-          </Box>
+          {/* Section 2: Tokens and spend.
+              Reads the telemetry ledger directly rather than the `tokenStats`
+              state, because that state only ever saw executor usage — the
+              router, planner and verifier calls never reached it. See
+              src/telemetry/usage.ts. */}
+          <TokenStatsPanel
+            contextLimit={tokenStats.contextLimit}
+            modelId={activeModelId}
+            provider={activeProvider}
+          />
+
+          {/* Section 3: How this model scored on the golden tasks. */}
+          <EvalStatsPanel
+            projectRoot={projectRoot}
+            modelId={activeModelId}
+            currentSha={currentSha}
+          />
 
           {/* Section 3: LSP status */}
           <Box flexDirection="column" marginBottom={1}>
@@ -1847,21 +2010,21 @@ export function Chat({ onChangeKeys, mode: initialMode = "auto", initialPrompt }
           {/* Section 4: Repo Map live view */}
           <Box flexDirection="column" marginBottom={1}>
             <Text color="#E6E6E6" bold>Repo Map</Text>
-            {!contextReady || !repoMap ? (
+            {!contextReady || !repoMapPreview ? (
               <Text color="gray" dimColor>loading…</Text>
             ) : (
               <>
                 <Text color="gray" dimColor>
-                  {repoMap.split("\n").length} lines
+                  {repoMapPreview.total} lines
                 </Text>
-                {repoMap.split("\n").slice(0, 10).map((line, i) => (
+                {repoMapPreview.head.map((line, i) => (
                   <Text key={i} color="#4A5568" dimColor wrap="truncate">
                     {line || " "}
                   </Text>
                 ))}
-                {repoMap.split("\n").length > 10 && (
+                {repoMapPreview.total > 10 && (
                   <Text color="#4A5568" dimColor>
-                    … ({repoMap.split("\n").length - 10} more lines)
+                    … ({repoMapPreview.total - 10} more lines)
                   </Text>
                 )}
               </>
@@ -1907,7 +2070,7 @@ export function Chat({ onChangeKeys, mode: initialMode = "auto", initialPrompt }
  *
  * Ink has no error boundary here, so this is a try/catch rather than one.
  */
-function LogLine({ entry }: { entry: LogEntry }) {
+const LogLine = React.memo(function LogLine({ entry }: { entry: LogEntry }) {
   try {
     return <LogLineInner entry={entry} />;
   } catch (err) {
@@ -1919,7 +2082,7 @@ function LogLine({ entry }: { entry: LogEntry }) {
       </Box>
     );
   }
-}
+});
 
 function LogLineInner({ entry }: { entry: LogEntry }) {
   if (entry.kind === "user") {
@@ -2114,10 +2277,20 @@ function LogLineInner({ entry }: { entry: LogEntry }) {
   }
 
   if (entry.kind === "verification") {
-    // Shows verification result — green check for pass, red X for fail
+    // A step can PASS WITH NOTES. Hard findings are failures and print red;
+    // soft ones are predictions that did not pan out and print as dim amber
+    // notes under a green tick. Rendering both in red is what taught everyone
+    // to scroll past the real ones.
     const tierLabel = entry.modelTier === "local" ? "[local]" : entry.modelTier === "hosted" ? "[hosted]" : "";
     const tierColor = entry.modelTier === "local" ? "green" : entry.modelTier === "hosted" ? "yellow" : "gray";
-    
+
+    const findings = entry.findings ?? [];
+    const hard = findings.filter((f) => f.severity === "hard");
+    const soft = findings.filter((f) => f.severity === "soft");
+
+    const line = (f: { code: string; file?: string; detail?: string }) =>
+      `${f.code}${f.file ? `: ${f.file}` : ""}${f.detail ? ` — ${f.detail.split("\n")[0]}` : ""}`;
+
     return (
       <Box marginBottom={1} flexDirection="column">
         <Box flexDirection="row" gap={1}>
@@ -2125,12 +2298,20 @@ function LogLineInner({ entry }: { entry: LogEntry }) {
           {tierLabel && <Text color={tierColor} bold>{tierLabel}</Text>}
           <Text color={entry.verified ? "#5FB87A" : "red"} bold>
             Step {entry.stepIndex + 1} verification {entry.verified ? "passed" : "failed"}
+            {entry.verified && soft.length > 0 ? ` (${soft.length} note${soft.length > 1 ? "s" : ""})` : ""}
           </Text>
         </Box>
-        {entry.mismatches.length > 0 && (
+        {hard.length > 0 && (
           <Box paddingLeft={2} flexDirection="column">
-            {entry.mismatches.map((m, i) => (
-              <Text key={i} color="red" dimColor>↳ {m}</Text>
+            {hard.map((f, i) => (
+              <Text key={`h${i}`} color="red">↳ {line(f)}</Text>
+            ))}
+          </Box>
+        )}
+        {soft.length > 0 && (
+          <Box paddingLeft={2} flexDirection="column">
+            {soft.map((f, i) => (
+              <Text key={`s${i}`} color="yellow" dimColor>⚠ {line(f)}</Text>
             ))}
           </Box>
         )}
@@ -2139,6 +2320,16 @@ function LogLineInner({ entry }: { entry: LogEntry }) {
             <Text color="gray" italic>Feedback: {entry.verboseFeedback}</Text>
           </Box>
         )}
+      </Box>
+    );
+  }
+
+  if (entry.kind === "step-retry") {
+    return (
+      <Box marginBottom={1} flexDirection="row" gap={1}>
+        <Text color="#D9A441">↻</Text>
+        <Text color="#D9A441" bold>Retrying step {entry.stepIndex + 1}</Text>
+        <Text color="gray">{entry.reason}</Text>
       </Box>
     );
   }

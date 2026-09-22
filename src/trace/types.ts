@@ -47,6 +47,8 @@ export interface FileEdit {
   toolName: string;
   /** Canonical project-relative path. The single identity for a file — see paths.ts. */
   path: string;
+  /** The same file as the user spells it. Display only; never a key. */
+  displayPath: string;
   kind: EditKind;
   /** sha256 of the content before the change; null when the file did not exist. */
   beforeBlob: string | null;
