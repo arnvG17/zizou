@@ -85,6 +85,24 @@ export interface GoldenTask {
   prompt: string;
 
   /**
+   * Further prompts sent in the SAME conversation, each after the previous one
+   * finishes, with the accumulated history threaded through.
+   *
+   * WHY THIS EXISTS: every task here used to be a single prompt against an
+   * empty history, so a whole class of bug was structurally unreachable by the
+   * suite. History is only trimmed BETWEEN turns (see cleanHistoryForNextTurn,
+   * which collapses rounds older than FULL_DETAIL_ROUNDS), so a one-shot task
+   * never executes that code at all.
+   *
+   * That is not hypothetical: the collapser wrote tool results in a shape the
+   * model API rejects, and every turn from the fourth onwards died with
+   * "Invalid prompt: The messages do not match the ModelMessage[] schema" —
+   * with the eval suite entirely green, because no task ever took a fourth
+   * turn. A multi-turn task is the only way the suite can see that.
+   */
+  followUps?: string[];
+
+  /**
    * Which mode to PIN for this run.
    *
    * "auto" lets the router choose, which is the only way to eval the router

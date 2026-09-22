@@ -408,3 +408,61 @@ export function nothingAtRoot(...allowed: string[]): Assertion {
     };
   };
 }
+
+// ─── Run integrity ───────────────────────────────────────────────────────────
+
+/**
+ * The run finished without throwing.
+ *
+ * Distinct from every assertion above, which ask whether the agent did the
+ * right thing. This one asks whether it got to try at all — a turn that dies
+ * inside the harness produces no files, so a suite without this check reports
+ * a crash as an ordinary "file missing" failure and sends you looking in the
+ * wrong place.
+ */
+export function ranWithoutError(): Assertion {
+  return async ({ events }) => {
+    const errors = events.filter((e) => e.kind === "error");
+    return {
+      name: "run completed without throwing",
+      passed: errors.length === 0,
+      detail:
+        errors.length === 0
+          ? "no error events"
+          : errors.map((e) => `${e.where}: ${e.message}`).join(" | "),
+    };
+  };
+}
+
+/**
+ * The conversation stayed sendable for the whole run.
+ *
+ * THE REGRESSION THIS NAMES: history is trimmed between turns, and the trimmer
+ * wrote tool results as a bare payload where AI SDK v7 requires a tagged
+ * `{type, value}`. From the fourth turn onwards every request died with
+ * "Invalid prompt: The messages do not match the ModelMessage[] schema", and
+ * one corrupt message poisoned that conversation permanently — retrying could
+ * never help, because the damage was in the history being re-sent.
+ *
+ * It went unnoticed because it needs FOUR turns to appear and every task in
+ * this suite was a single prompt. Pair this assertion with `followUps` long
+ * enough to cross that threshold, or it proves nothing.
+ */
+export function conversationStayedValid(): Assertion {
+  return async ({ events }) => {
+    const offenders = events.filter(
+      (e) =>
+        e.kind === "error" &&
+        typeof e.message === "string" &&
+        /ModelMessage|Invalid prompt/i.test(e.message),
+    );
+    return {
+      name: "conversation remained a valid prompt",
+      passed: offenders.length === 0,
+      detail:
+        offenders.length === 0
+          ? "no message-schema rejections"
+          : offenders.map((e) => e.message).join(" | "),
+    };
+  };
+}

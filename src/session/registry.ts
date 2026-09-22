@@ -10,6 +10,7 @@ import type { SessionMeta, SessionState, TokenStats } from "./types.js";
 import { SESSION_SCHEMA_VERSION } from "./types.js";
 import { loadRegistry, saveRegistry, loadSessionState, saveSessionState, archiveSessionState } from "./state-io.js";
 import type { ModelMessage } from "ai";
+import { repairHistory } from "../agent/history.js";
 
 /**
  * Creates a new session with the given name.
@@ -191,7 +192,15 @@ export function saveActiveSessionState(
     // Stamp the current schema on every write, so a session saved by this
     // version is trusted on load and one saved by an older version is not.
     schemaVersion: SESSION_SCHEMA_VERSION,
-    conversation,
+    // Repaired on the way OUT as well as on the way in.
+    //
+    // Sending is already guarded (run-turn repairs immediately before the
+    // provider call), so this is not what keeps a turn alive — it is what stops
+    // the bad shape being written down in the first place. Without it a session
+    // corrupted by an older build stays corrupted on disk forever, repaired
+    // over and over on every load; with it, the file heals the first time the
+    // session is used again.
+    conversation: repairHistory(conversation),
     tokenStats,
     log: log ? JSON.stringify(log) : existingState.log,
     currentMode: currentMode || existingState.currentMode,

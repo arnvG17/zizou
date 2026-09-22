@@ -63,6 +63,28 @@ const myTask: GoldenTask = {
 
 Register it in `evals/tasks/index.ts`.
 
+### Multi-turn tasks
+
+`followUps` sends further prompts in the **same conversation**, threading the
+accumulated history through each one:
+
+```ts
+prompt: "Add a line to notes.md that reads: alpha",
+followUps: ["Now add a line that reads: bravo", /* ... */],
+```
+
+Use it whenever the behaviour under test only appears *between* turns. History
+trimming is the main one: `cleanHistoryForNextTurn` collapses tool results older
+than `FULL_DETAIL_ROUNDS` (3), so a single-prompt task never runs that code at
+all.
+
+That gap was not theoretical. The collapser wrote tool results in a shape the
+model API rejects, so every turn from the fourth onwards died with
+`Invalid prompt: The messages do not match the ModelMessage[] schema` — while
+this suite stayed green, because no task had ever taken a fourth turn. A task
+using `followUps` needs to cross that threshold to prove anything; pair it with
+`conversationStayedValid()`.
+
 ### Design rules
 
 - **Prefer a fixture to self-setup.** A task that creates its own starting files
@@ -85,7 +107,9 @@ Behaviour: `commandSucceeds` `commandFails`
 
 About the run (read the journal): `touchedFiles` `touchedNothingBut`
 `noToolFailures` `noFallbackParsing` `planHasAtLeast` `statedAssumptions`
-`allStepsVerified`
+`allStepsVerified` `routedTo` `nothingAtRoot`
+
+Run integrity: `ranWithoutError` `conversationStayedValid`
 
 Combinators: `anyOf` `not` `advisory`
 

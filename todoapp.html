@@ -23,7 +23,19 @@
         if (todoText) {
             const todoItem = document.createElement('li');
             todoItem.textContent = todoText;
-            const removeButton = document.createElement('button');
+            const editButton = document.createElement('button');
+            editButton.textContent = 'Edit';
+            editButton.addEventListener('click', () => {
+                const newTodoText = prompt('Edit your todo:', todoText);
+                if (newTodoText) {
+                    todoItem.textContent = newTodoText;
+                    todoItem.appendChild(editButton);
+                    todoItem.appendChild(removeButton);
+            todoItem.appendChild(editButton);
+                }
+            });
+            todoItem.appendChild(editButton);
+            todoItem.appendChild(removeButton);
             removeButton.textContent = 'Remove';
             removeButton.addEventListener('click', () => {
                 todoList.removeChild(todoItem);

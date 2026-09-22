@@ -40,6 +40,7 @@ import { type LanguageModel, type ModelMessage } from "ai";
 import { buildSystemPrompt, type AgentRole } from "../context/build-system-prompt.js";
 import { runTurn, type AgentEvent } from "./run-turn.js";
 import { extractRawToolCall } from "./fallback-tool-parse.js";
+import { unwrapToolOutput, tagToolOutput } from "./history.js";
 import type { ConfirmFn } from "../tools/types.js";
 import type { PlanStep, StepResult, StepDigest, ToolCall, ProjectContext } from "./types.js";
 import { getActiveJournal } from "./debug/index.js";
@@ -539,80 +540,13 @@ export function cleanHistoryForNextTurn(messages: ModelMessage[]): ModelMessage[
         // rounds older than FULL_DETAIL_ROUNDS — so a short chat never
         // reached the corrupt path, and any sustained agentic run did.
         const { type } = unwrapToolOutput(part);
-        return {
-          ...part,
-          output: { type: type === "text" ? "json" : type, value: collapseToolOutput(part, pathByCallId) },
-        };
+        return { ...part, output: tagToolOutput(collapseToolOutput(part, pathByCallId), type) };
       }
       return part;
     });
 
     return { ...msg, content } as ModelMessage;
   });
-}
-
-/**
- * Makes a conversation safe to send, whatever state it was restored in.
- *
- * Two things can leave a persisted session unsendable, and both end the same
- * way — "Invalid prompt: The messages do not match the ModelMessage[] schema."
- * with the turn dead before a single tool runs:
- *
- *   1. UNTAGGED TOOL OUTPUT. cleanHistoryForNextTurn used to write the bare
- *      payload into `output` instead of the SDK's `{type, value}` wrapper.
- *      Sessions written before that fix still hold the broken shape on disk,
- *      so fixing the writer alone would leave those sessions permanently
- *      unloadable.
- *   2. AN ORPHANED TOOL CALL. Every provider requires a tool-call to be
- *      followed by its result. A turn that was aborted or that threw between
- *      the call and the result leaves an assistant message that can never be
- *      sent again.
- *
- * Repairing on load beats validating on save: the damage already exists in
- * users' session directories, and a session that cannot be opened is worse
- * than one that lost a stale tool receipt.
- */
-export function repairHistory(messages: ModelMessage[]): ModelMessage[] {
-  if (!Array.isArray(messages)) return [];
-
-  // Which tool-call ids actually have a matching result.
-  const resolved = new Set<string>();
-  for (const msg of messages) {
-    if (msg?.role !== "tool" || !Array.isArray(msg.content)) continue;
-    for (const part of msg.content as any[]) {
-      if (part?.type === "tool-result" && part.toolCallId) resolved.add(part.toolCallId);
-    }
-  }
-
-  const out: ModelMessage[] = [];
-  for (const msg of messages) {
-    if (!msg || typeof msg !== "object" || !msg.role) continue;
-    if (!Array.isArray(msg.content)) {
-      out.push(msg);
-      continue;
-    }
-
-    const content = (msg.content as any[])
-      .filter((part) => {
-        // Drop a call nothing ever answered.
-        if (part?.type === "tool-call" && !resolved.has(part.toolCallId)) return false;
-        return !!part;
-      })
-      .map((part) => {
-        if (part.type !== "tool-result") return part;
-        const raw = part.output ?? part.result;
-        const alreadyTagged =
-          raw && typeof raw === "object" && typeof raw.type === "string" && "value" in raw;
-        if (alreadyTagged) return part;
-        return { ...part, output: { type: part.isError ? "error-json" : "json", value: raw ?? {} } };
-      });
-
-    // An assistant message left with no content at all is itself invalid.
-    if (content.length === 0 && msg.role !== "user") continue;
-    out.push({ ...msg, content } as ModelMessage);
-  }
-
-  return out;
 }
 
 /**
@@ -650,27 +584,6 @@ function collapseToolCall(part: any): any {
     ...part,
     input: { ...input, contents: `${ELIDED} (${input.contents.length} chars written)` },
   };
-}
-
-/**
- * Unwraps a tool result's payload.
- *
- * AI SDK v7 stores a tool result's output as a TAGGED union —
- * `{ type: "json", value: {...} }`, or "text" / "error-json" / "error-text".
- * The payload is under `.value`; the object itself only says what kind it is.
- *
- * Reading the wrapper directly (which this file used to do) finds no `success`
- * field on any result, so every collapsed result reported success — including
- * failed commands, which came back labelled "Command completed successfully".
- */
-function unwrapToolOutput(part: any): { value: any; type: string } {
-  const raw = part.output ?? part.result;
-  if (raw && typeof raw === "object" && typeof raw.type === "string" && "value" in raw) {
-    return { value: raw.value, type: raw.type };
-  }
-  // Untagged: either an older persisted session written before this was fixed,
-  // or a provider that does not tag. Treat the whole thing as the payload.
-  return { value: raw, type: part.isError ? "error-json" : "json" };
 }
 
 /** Reduces an old tool result to what it accomplished, not what it returned. */

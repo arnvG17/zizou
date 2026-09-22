@@ -12,7 +12,8 @@
 
 import { test, expect } from "bun:test";
 import type { ModelMessage } from "ai";
-import { cleanHistoryForNextTurn, repairHistory, FULL_DETAIL_ROUNDS } from "./executor.js";
+import { cleanHistoryForNextTurn, FULL_DETAIL_ROUNDS } from "./executor.js";
+import { repairHistory } from "./history.js";
 
 const BIG = "X".repeat(50_000);
 

@@ -37,7 +37,7 @@ import {
 import type { ConfirmFn } from "../tools/index.js";
 import { sessionPermissions } from "../tools/index.js";
 import { listServices } from "../tools/service-registry.js";
-import { repairHistory } from "../agent/executor.js";
+import { repairHistory } from "../agent/history.js";
 import { runTurn } from "../agent/run-turn.js";
 import { buildSystemPrompt, addPinnedFile, pinnedContextFiles } from "../context/build-system-prompt.js";
 import { buildRepoMap } from "../context/repo-map.js";

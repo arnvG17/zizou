@@ -57,6 +57,7 @@ import type {
   TaskResult,
 } from "./types.js";
 
+import type { ModelMessage } from "ai";
 import { runOrchestrator, type OrchestratorEvent } from "../src/agent/orchestrator.js";
 import type { ModeContext } from "../src/agent/mode.js";
 import type { PlanStep, ProjectContext } from "../src/agent/types.js";
@@ -296,16 +297,25 @@ async function driveOrchestrator(
   const events: OrchestratorEvent[] = [];
   let approvedPlan: PlanStep[] | undefined;
 
-  const consume = async (approved?: PlanStep[]) => {
+  // Carried across prompts so a multi-turn task is one CONVERSATION rather
+  // than a series of unrelated runs. Without this the suite could only ever
+  // exercise the first turn, which is exactly how a history-trimming bug shipped
+  // green — trimming happens only between turns.
+  let history: ModelMessage[] = [];
+
+  const consume = async (prompt: string, approved?: PlanStep[]) => {
     for await (const event of runOrchestrator({
-      userPrompt: task.prompt,
+      userPrompt: prompt,
       modeContext,
       context: await makeContext(),
       model,
       onConfirm: autoConfirm,
+      history,
       ...(approved ? { approvedPlan: approved } : {}),
     })) {
       events.push(event);
+
+      if (event.kind === "history-updated") history = event.history;
 
       if (event.kind === "plan-ready") {
         approvedPlan = event.steps;
@@ -329,8 +339,16 @@ async function driveOrchestrator(
     }
   };
 
-  await consume();
-  if (approvedPlan) await consume(approvedPlan);
+  await consume(task.prompt);
+  if (approvedPlan) await consume(task.prompt, approvedPlan);
+
+  // Each follow-up is a new turn on the SAME history — which is what makes the
+  // between-turn machinery (history trimming, tool-result collapsing) run at all.
+  for (const followUp of task.followUps ?? []) {
+    approvedPlan = undefined;
+    await consume(followUp);
+    if (approvedPlan) await consume(followUp, approvedPlan);
+  }
 
   return events;
 }

@@ -21,6 +21,7 @@
 import { streamText, stepCountIs, type ModelMessage, type LanguageModel } from "ai";
 import { buildToolMap, buildReadOnlyToolMap, type ConfirmFn } from "../tools/index.js";
 import { extractRawToolCall, auditResponse } from "./fallback-tool-parse.js";
+import { repairHistory } from "./history.js";
 import { randomUUID } from "node:crypto";
 import { getActiveJournal, type RunJournal, type UsageRecord } from "./debug/index.js";
 import { recordUsage } from "../telemetry/index.js";
@@ -264,8 +265,17 @@ export async function* runTurn(
     tools,
     // 4. Stop Safety Cap: Caps the internal tool-call/re-prompt loop to prevent infinite runaways (default 15 steps).
     stopWhen: stepCountIs(maxSteps),
-    // 5. Conversation History & User Query: Full thread history with the latest user query already pre-appended.
-    messages: history,
+    // 5. Conversation History & User Query: Full thread history with the latest
+    //    user query already pre-appended.
+    //
+    //    REPAIRED HERE, at the last possible moment. A conversation can be
+    //    malformed for unrelated reasons — an older build wrote tool results in
+    //    a shape the schema rejects, or a turn aborted between a tool call and
+    //    its result — and each one killed the turn with "Invalid prompt: The
+    //    messages do not match the ModelMessage[] schema" before any tool ran.
+    //    Guarding at every entry point means missing one; guarding where they
+    //    all converge does not.
+    messages: repairHistory(history),
     // 6. Max Retries: Disabled (0) to prevent multiplying token costs on rate limit / 429 errors.
     maxRetries: 0,
     ...(temperature !== undefined ? { temperature } : {}),

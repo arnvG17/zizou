@@ -24,6 +24,7 @@ import {
   allStepsVerified,
   anyOf,
   commandSucceeds,
+  conversationStayedValid,
   fileContains,
   fileExists,
   fileLacks,
@@ -32,6 +33,7 @@ import {
   noToolFailures,
   nothingAtRoot,
   planHasAtLeast,
+  ranWithoutError,
   routedTo,
   statedAssumptions,
   touchedFiles,
@@ -370,6 +372,104 @@ const buildEditsRatherThanRecreates: GoldenTask = {
   ],
 };
 
+// ─── 8. A conversation that outlives the history-trimming threshold ──────────
+//
+// THE BUG THIS EXISTS FOR, and why nothing here caught it:
+//
+//   History is trimmed between turns — cleanHistoryForNextTurn collapses tool
+//   results older than FULL_DETAIL_ROUNDS (3) to keep them from re-billing
+//   forever. It wrote the collapsed result as a bare payload, where AI SDK v7
+//   requires a tagged `{type: "json", value}`. From the fourth turn onwards
+//   every request died with "Invalid prompt: The messages do not match the
+//   ModelMessage[] schema", and because the corrupt message lived in the
+//   history being re-sent, that conversation was finished — retrying could
+//   never clear it.
+//
+//   The suite was green throughout, for a structural reason rather than an
+//   oversight: every task was one prompt against an empty history, so the
+//   trimming code never ran. This task is the first that takes a fourth turn.
+//
+// The follow-ups are deliberately trivial. The point is not whether the model
+// can do five hard things; it is whether the conversation is still sendable by
+// the fifth one. Each turn does touch a file, so a run that dies partway is
+// visible in the end state as well as in the assertions.
+
+const buildLongConversationStaysValid: GoldenTask = {
+  id: "build-long-conversation",
+  intent:
+    "A conversation past the history-trimming threshold stays sendable. Guards the " +
+    "collapsed-tool-result corruption that killed every turn from the fourth on.",
+  prompt: "Add a line to notes.md that reads: alpha",
+  followUps: [
+    "Now add a line that reads: bravo",
+    "Now add a line that reads: charlie",
+    "Now add a line that reads: delta",
+    "Now add a line that reads: echo",
+  ],
+  mode: "build",
+  tags: ["history", "multi-turn", "regression"],
+  fixture: {
+    "notes.md": "# Notes\n",
+  },
+  // Five turns, so the ceiling covers all of them rather than one.
+  budget: { maxToolCalls: 40, maxDurationMs: 420_000 },
+  assertions: [
+    // The regression itself. Everything below is downstream of this passing.
+    conversationStayedValid(),
+    ranWithoutError(),
+    // The fifth turn is the one past the threshold — if only the first three
+    // lines are present, the conversation died exactly where the bug predicts.
+    fileContains("notes.md", "alpha"),
+    fileContains("notes.md", "delta"),
+    fileContains("notes.md", "echo"),
+    touchedNothingBut("notes.md"),
+  ],
+};
+
+// ─── 9. Running what it just built ───────────────────────────────────────────
+//
+// The other half of the same debugging session. The agent could write an app
+// but had no way to confirm it ran: the shell tool discarded exit codes, the
+// background tool returned the instant a process spawned (so verification read
+// the filesystem before the work existed), and nothing could tell a server
+// that was serving from one that had crashed on startup.
+//
+// The fixture is a server that WORKS, so this asks only "can the agent start
+// it and confirm it serves" — not "can it also debug Node". Port 0 lets the OS
+// assign one, which keeps concurrent eval runs from colliding.
+
+const buildRunsAndVerifiesServer: GoldenTask = {
+  id: "build-run-and-verify-server",
+  intent:
+    "The agent starts a long-running server and confirms it actually serves, rather " +
+    "than reporting success because a process was spawned.",
+  prompt:
+    "Start the server in server.js in the background, then confirm it is actually " +
+    "serving by fetching its URL. Write the HTTP status code you got into status.txt.",
+  mode: "build",
+  tags: ["process", "terminal", "service"],
+  fixture: {
+    "server.js": [
+      "const { createServer } = require('node:http');",
+      "const port = Number(process.env.PORT || 4317);",
+      "createServer((_, res) => {",
+      "  res.writeHead(200, { 'content-type': 'text/html' });",
+      "  res.end('<!doctype html><html><body><h1>it works</h1></body></html>');",
+      "}).listen(port, () => console.log(`listening on http://localhost:${port}`));",
+      "",
+    ].join("\n"),
+  },
+  budget: { maxToolCalls: 25, maxDurationMs: 300_000 },
+  assertions: [
+    ranWithoutError(),
+    // 200 is the whole claim: the agent got a real response, not a spawn receipt.
+    fileMatches("status.txt", /\b200\b/),
+    // A dev server through the blocking shell tool hangs until the timeout —
+    // reaching a 200 without that means it used the non-blocking path correctly.
+    advisory(noToolFailures()),
+  ],
+};
+
 // ─── Registry ────────────────────────────────────────────────────────────────
 
 export const ALL_TASKS: GoldenTask[] = [
@@ -386,6 +486,8 @@ export const ALL_TASKS: GoldenTask[] = [
   autoRoutesSpecifiedCreateToBuild,
   buildPlacesFilesSensibly,
   buildEditsRatherThanRecreates,
+  buildLongConversationStaysValid,
+  buildRunsAndVerifiesServer,
 ];
 
 /** Filters by id or tag. `--task` and `--tag` both land here. */
